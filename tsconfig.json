@@ -1,0 +1,27 @@
+{
+  "files": [],
+  "references": [{ "path": "./tsconfig.node.json"}, { "path": "./tsconfig.web.json"}],
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "allowJs": true,
+    "strict": true,
+    "jsx": "preserve",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    },
+    "types": ["vite/client"],
+    "esModuleInterop": true,    /* 允许使用默认导入方式导入 CommonJS 模块 */
+    "allowSyntheticDefaultImports": true, /* 提供更好的类型检查支持 */
+    "moduleResolution": "node" /* 确保能正确找到 node_modules */
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "src/**/*.tsx",
+    "src/**/*.vue",
+    "auto-imports.d.ts",
+    "components.d.ts"
+  ]
+}

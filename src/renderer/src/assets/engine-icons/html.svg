@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="topBar" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0%" stop-color="#63b0f0" />
+      <stop offset="100%" stop-color="#4c9ae0" />
+    </linearGradient>
+    <linearGradient id="cardFill" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0%" stop-color="#dbe4ef" />
+      <stop offset="100%" stop-color="#cfd8e3" />
+    </linearGradient>
+    <linearGradient id="badgeFill" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0%" stop-color="#ffd86c" />
+      <stop offset="100%" stop-color="#ffbf47" />
+    </linearGradient>
+  </defs>
+  <rect x="16" y="56" width="480" height="400" rx="20" fill="url(#cardFill)" />
+  <path d="M16 56h480v64H16z" fill="url(#topBar)" />
+  <rect x="82" y="106" width="24" height="16" rx="8" fill="#000" opacity=".9" />
+  <circle cx="404" cy="96" r="8" fill="#000" />
+  <circle cx="434" cy="96" r="8" fill="#000" />
+  <circle cx="464" cy="96" r="8" fill="#000" />
+  <rect x="92" y="160" width="328" height="148" rx="22" fill="url(#badgeFill)" stroke="#000" stroke-width="14" />
+  <text x="256" y="258" fill="#000" font-family="Arial, Helvetica, sans-serif" font-size="82" font-weight="700" text-anchor="middle">HTML</text>
+  <path d="M98 366 72 392l26 26" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-width="14" />
+  <path d="M414 366 440 392l-26 26" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-width="14" />
+  <path d="M148 374h82M258 374h96M176 420h138M336 420h42M148 456h48M228 456h52M312 456h72" fill="none" stroke="#000" stroke-linecap="round" stroke-width="14" />
+</svg>
