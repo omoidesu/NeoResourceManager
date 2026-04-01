@@ -7,6 +7,8 @@ import { DatabaseService } from './database.service'
 import { Settings } from '../../common/constants'
 
 export class DialogService {
+  private static readonly IMAGE_FILE_MACHINE_AMD64 = 0x8664
+
   static async selectFolder() {
     const result = await dialog.showOpenDialog({
       title: '请选择目录',
@@ -264,6 +266,146 @@ export class DialogService {
     }
   }
 
+  static async launchPathWithMtool(gameExePath: string, mtoolPath: string, hookFiles: string[]) {
+    const normalizedGameExePath = path.normalize(String(gameExePath ?? '').trim())
+    const normalizedMtoolPath = path.normalize(String(mtoolPath ?? '').trim())
+
+    if (!normalizedGameExePath) {
+      return {
+        message: '游戏启动文件不能为空',
+        pid: null,
+      }
+    }
+
+    if (!normalizedMtoolPath) {
+      return {
+        message: '请先在设置中配置 MTool 路径',
+        pid: null,
+      }
+    }
+
+    if (!fs.existsSync(normalizedGameExePath)) {
+      return {
+        message: `游戏启动文件不存在: ${normalizedGameExePath}`,
+        pid: null,
+      }
+    }
+
+    const resolvedMtool = this.resolveMtoolExecutable(normalizedMtoolPath)
+    if (!resolvedMtool) {
+      return {
+        message: '未找到可用的 MTool 主程序，请确认配置的是 MTool.exe、nw.exe，或 MTool 根目录',
+        pid: null,
+      }
+    }
+
+    const selectedHookPath = this.resolveMtoolHookPath(
+      resolvedMtool.loadersDir,
+      hookFiles,
+      normalizedGameExePath
+    )
+
+    if (!selectedHookPath) {
+      return {
+        message: `未找到可用的 MTool Hook 文件: ${hookFiles.join(', ') || '未知'}`,
+        pid: null,
+      }
+    }
+
+    const hookExtension = path.extname(selectedHookPath).toLowerCase()
+
+    if (hookExtension === '.dll') {
+      const injectExePath = path.join(resolvedMtool.loadersDir, 'inject.exe')
+      if (!fs.existsSync(injectExePath)) {
+        return {
+          message: `未找到 MTool 注入器: ${injectExePath}`,
+          pid: null,
+        }
+      }
+
+      const injectProcess = spawn(injectExePath, [normalizedGameExePath, selectedHookPath], {
+        cwd: path.dirname(normalizedGameExePath),
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false
+      })
+      injectProcess.unref()
+    } else if (hookExtension === '.exe') {
+      const launcherProcess = spawn(selectedHookPath, [normalizedGameExePath], {
+        cwd: path.dirname(normalizedGameExePath),
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false
+      })
+      launcherProcess.unref()
+    } else {
+      return {
+        message: `不支持的 MTool Hook 类型: ${selectedHookPath}`,
+        pid: null,
+      }
+    }
+
+    const mtoolProcess = spawn(resolvedMtool.executablePath, [resolvedMtool.toolDir], {
+      cwd: resolvedMtool.toolDir,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false
+    })
+    mtoolProcess.unref()
+
+    return {
+      message: '',
+      pid: null,
+    }
+  }
+
+  static async launchPathWithLocaleEmulator(gameExePath: string, localeEmulatorPath: string) {
+    const normalizedGameExePath = path.normalize(String(gameExePath ?? '').trim())
+    const normalizedLocaleEmulatorPath = path.normalize(String(localeEmulatorPath ?? '').trim())
+
+    if (!normalizedGameExePath) {
+      return {
+        message: '游戏启动文件不能为空',
+        pid: null,
+      }
+    }
+
+    if (!normalizedLocaleEmulatorPath) {
+      return {
+        message: '请先在设置中配置 LE 转区工具路径',
+        pid: null,
+      }
+    }
+
+    if (!fs.existsSync(normalizedGameExePath)) {
+      return {
+        message: `游戏启动文件不存在: ${normalizedGameExePath}`,
+        pid: null,
+      }
+    }
+
+    const resolvedLocaleEmulator = this.resolveLocaleEmulatorExecutable(normalizedLocaleEmulatorPath)
+    if (!resolvedLocaleEmulator) {
+      return {
+        message: '未找到可用的 LE 主程序，请确认配置的是 LEProc.exe 或 Locale Emulator 根目录',
+        pid: null,
+      }
+    }
+
+    const child = spawn(resolvedLocaleEmulator, [normalizedGameExePath], {
+      cwd: path.dirname(normalizedGameExePath),
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false,
+    })
+    child.unref()
+
+    return {
+      message: '',
+      pid: child.pid ?? null,
+    }
+  }
+
   static async stopProcess(pid: number | null | undefined) {
     if (!pid || !Number.isFinite(pid)) {
       return {
@@ -319,5 +461,133 @@ export class DialogService {
     const screenshotFolder = path.join(cacheRoot, 'screenshot', resourceId)
     fs.mkdirSync(screenshotFolder, { recursive: true })
     return screenshotFolder
+  }
+
+  private static resolveMtoolExecutable(inputPath: string) {
+    const normalizedPath = path.normalize(String(inputPath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return null
+    }
+
+    const stat = fs.statSync(normalizedPath)
+    const candidatePaths = stat.isDirectory()
+      ? [
+          path.join(normalizedPath, 'Tool', 'MTool.exe'),
+          path.join(normalizedPath, 'Tool', 'nw.exe'),
+          path.join(normalizedPath, 'MTool.exe'),
+          path.join(normalizedPath, 'nw.exe')
+        ]
+      : [
+          normalizedPath,
+          path.join(path.dirname(normalizedPath), 'Tool', 'MTool.exe'),
+          path.join(path.dirname(normalizedPath), 'Tool', 'nw.exe')
+        ]
+
+    const executablePath = candidatePaths.find((candidatePath) => {
+      if (!candidatePath || !fs.existsSync(candidatePath)) {
+        return false
+      }
+
+      const extension = path.extname(candidatePath).toLowerCase()
+      return extension === '.exe'
+    })
+
+    if (!executablePath) {
+      return null
+    }
+
+    const executableDir = path.dirname(executablePath)
+    const toolDir = path.basename(executableDir).toLowerCase() === 'tool'
+      ? executableDir
+      : path.join(executableDir, 'Tool')
+    const loadersDir = path.join(toolDir, 'loaders')
+
+    if (!fs.existsSync(toolDir) || !fs.existsSync(loadersDir)) {
+      return null
+    }
+
+    return {
+      executablePath,
+      toolDir,
+      loadersDir
+    }
+  }
+
+  private static resolveLocaleEmulatorExecutable(inputPath: string) {
+    const normalizedPath = path.normalize(String(inputPath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return null
+    }
+
+    const stat = fs.statSync(normalizedPath)
+    const candidatePaths = stat.isDirectory()
+      ? [
+          path.join(normalizedPath, 'LEProc.exe'),
+          path.join(normalizedPath, 'Locale Emulator', 'LEProc.exe')
+        ]
+      : [normalizedPath]
+
+    const executablePath = candidatePaths.find((candidatePath) => {
+      if (!candidatePath || !fs.existsSync(candidatePath)) {
+        return false
+      }
+
+      return path.extname(candidatePath).toLowerCase() === '.exe'
+    })
+
+    return executablePath ?? null
+  }
+
+  private static resolveMtoolHookPath(loadersDir: string, hookFiles: string[], gameExePath: string) {
+    const normalizedHookFiles = (hookFiles ?? [])
+      .map((hookFile) => String(hookFile ?? '').trim())
+      .filter(Boolean)
+
+    if (!normalizedHookFiles.length) {
+      return null
+    }
+
+    const is64BitGame = this.isExecutable64Bit(gameExePath)
+    const existingHookPaths = normalizedHookFiles
+      .map((hookFile) => path.join(loadersDir, hookFile))
+      .filter((hookPath) => fs.existsSync(hookPath))
+
+    if (!existingHookPaths.length) {
+      return null
+    }
+
+    const preferredHookPath = existingHookPaths.find((hookPath) => {
+      const hookName = path.basename(hookPath).toLowerCase()
+      if (is64BitGame) {
+        return hookName.includes('64') || (!hookName.includes('32') && !hookName.includes('x86'))
+      }
+
+      return hookName.includes('32') || hookName.includes('x86') || !hookName.includes('64')
+    })
+
+    return preferredHookPath ?? existingHookPaths[0]
+  }
+
+  private static isExecutable64Bit(filePath: string) {
+    try {
+      const fileBuffer = fs.readFileSync(filePath)
+      if (fileBuffer.length < 0x3c + 6) {
+        return false
+      }
+
+      const peHeaderOffset = fileBuffer.readUInt32LE(0x3c)
+      if (!Number.isFinite(peHeaderOffset) || peHeaderOffset <= 0 || peHeaderOffset + 6 > fileBuffer.length) {
+        return false
+      }
+
+      if (fileBuffer.toString('ascii', peHeaderOffset, peHeaderOffset + 4) !== 'PE\u0000\u0000') {
+        return false
+      }
+
+      const machine = fileBuffer.readUInt16LE(peHeaderOffset + 4)
+      return machine === this.IMAGE_FILE_MACHINE_AMD64
+    } catch {
+      return false
+    }
   }
 }

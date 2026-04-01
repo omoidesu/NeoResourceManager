@@ -20,6 +20,7 @@ type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0]
 type DbExecutor = typeof db | DbTransaction
 
 type ResourceQueryParams = {
+  keyword?: string
   authorIds?: string[]
   tagIds?: string[]
   typeIds?: string[]
@@ -38,6 +39,7 @@ export class DatabaseService {
     categoryId: string,
     query: ResourceQueryParams = {}
   ) {
+    const keyword = String(query.keyword ?? '').trim()
     const authorIds = (query.authorIds ?? []).filter(Boolean)
     const tagIds = (query.tagIds ?? []).filter(Boolean)
     const typeIds = (query.typeIds ?? []).filter(Boolean)
@@ -47,6 +49,10 @@ export class DatabaseService {
       eq(resource.categoryId, categoryId),
       eq(resource.isDeleted, false)
     ]
+
+    if (keyword) {
+      conditions.push(sql`lower(${resource.title}) like ${`%${keyword.toLowerCase()}%`}`)
+    }
 
     if (query.missingOnly) {
       conditions.push(eq(resource.missingStatus, true))
@@ -858,6 +864,41 @@ export class DatabaseService {
         eq(resource.isDeleted, false)
       )
     })
+  }
+
+  static async getResourcesByIds(resourceIds: string[]) {
+    const normalizedIds = resourceIds.filter(Boolean)
+    if (!normalizedIds.length) {
+      return []
+    }
+
+    return db.query.resource.findMany({
+      where: and(
+        inArray(resource.id, normalizedIds),
+        eq(resource.isDeleted, false)
+      )
+    })
+  }
+
+  static async getRunningResourceIdsByResourceIds(resourceIds: string[]) {
+    const normalizedIds = resourceIds.filter(Boolean)
+    if (!normalizedIds.length) {
+      return []
+    }
+
+    const rows = await db
+      .select({ resourceId: resourceLog.resourceId })
+      .from(resourceLog)
+      .where(and(
+        inArray(resourceLog.resourceId, normalizedIds),
+        eq(resourceLog.isDeleted, false),
+        sql`${resourceLog.endTime} is null`
+      ))
+      .groupBy(resourceLog.resourceId)
+
+    return rows
+      .map((item) => String(item.resourceId ?? '').trim())
+      .filter(Boolean)
   }
 
   static async getResourceByStoragePath(basePath: string, fileName: string | null) {

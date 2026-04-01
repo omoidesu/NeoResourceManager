@@ -13,7 +13,7 @@ import { FetchPluginService } from './fetch-plugin.service'
 import {createLogger} from '../util/logger'
 import axios from 'axios'
 import { WindowScreenshotService } from './window-screenshot.service'
-import { detectGameEngine } from '../util/game-engine-detector'
+import { detectGameEngineProfile } from '../util/game-engine-detector'
 import { detectGameLaunchFile } from '../util/game-launch-file-detector'
 
 const fs = require('fs-extra')
@@ -21,8 +21,9 @@ const hidefile = require('hidefile')
 
 export class ResourceService {
   static readonly logger = createLogger('ResourceService')
-  static async detectGameEngine(basePath: string) {
+  static async detectGameEngine(basePath: string, resourceId?: string | null) {
     const normalizedBasePath = String(basePath ?? '').trim()
+    const normalizedResourceId = String(resourceId ?? '').trim()
 
     if (!normalizedBasePath) {
       return {
@@ -32,7 +33,8 @@ export class ResourceService {
     }
 
     try {
-      const engineName = await detectGameEngine(normalizedBasePath)
+      const engineProfile = await detectGameEngineProfile(normalizedBasePath)
+      const engineName = engineProfile.engineName
       if (!engineName) {
         return {
           type: 'warning',
@@ -48,17 +50,31 @@ export class ResourceService {
           type: 'warning',
           message: `检测到引擎“${engineName}”，但未在引擎字典中找到对应项`,
           data: {
-            engineName
+            engineName,
+            mtoolSupported: engineProfile.mtoolSupported,
+            mtoolHookFiles: engineProfile.mtoolHookFiles,
+            requiresLocaleEmulator: engineProfile.requiresLocaleEmulator,
+            localeEmulatorReason: engineProfile.localeEmulatorReason
           }
         }
+      }
+
+      const detectedEngineId = String(matchedOption.value ?? '').trim()
+
+      if (normalizedResourceId && detectedEngineId) {
+        await this.persistDetectedEngineIfMissing(normalizedResourceId, detectedEngineId)
       }
 
       return {
         type: 'success',
         message: `已检测到游戏引擎：${engineName}`,
         data: {
-          engineId: matchedOption.value,
-          engineName: matchedOption.label
+          engineId: detectedEngineId,
+          engineName: matchedOption.label,
+          mtoolSupported: engineProfile.mtoolSupported,
+          mtoolHookFiles: engineProfile.mtoolHookFiles,
+          requiresLocaleEmulator: engineProfile.requiresLocaleEmulator,
+          localeEmulatorReason: engineProfile.localeEmulatorReason
         }
       }
     } catch (error) {
@@ -130,14 +146,19 @@ export class ResourceService {
       }
     }
 
-    const pathDealResult = await dealPath(targetLaunchFilePath)
-    const existingResource = await DatabaseService.getResourceByStoragePath(
-      pathDealResult.basePath,
-      pathDealResult.fileName
-    )
-
-    const gamePathAnalysis = await ResourceService.analyzeGamePath(targetLaunchFilePath)
-    const engineAnalysis = await ResourceService.detectGameEngine(targetLaunchFilePath)
+    // These checks are independent. Parallelizing them reduces single-directory
+    // latency, which matters a lot during batch import analysis.
+    const [existingResource, gamePathAnalysis, engineAnalysis] = await Promise.all([
+      (async () => {
+        const pathDealResult = await dealPath(targetLaunchFilePath)
+        return DatabaseService.getResourceByStoragePath(
+          pathDealResult.basePath,
+          pathDealResult.fileName
+        )
+      })(),
+      ResourceService.analyzeGamePath(targetLaunchFilePath),
+      ResourceService.detectGameEngine(targetLaunchFilePath)
+    ])
 
     return {
       directoryPath: normalizedDirectoryPath,
@@ -162,6 +183,19 @@ export class ResourceService {
     fetchInfoEnabled?: boolean
   }>) {
     const results: Array<{ directoryPath: string; launchFilePath: string; type: string; message: string }> = []
+    const total = Array.isArray(items) ? items.length : 0
+    let completed = 0
+
+    const pushImportProgress = (directoryPath: string, done = false) => {
+      NotificationQueueService.getInstance().pushBatchImportProgress({
+        categoryId,
+        stage: 'import',
+        current: completed,
+        total,
+        message: directoryPath,
+        done
+      })
+    }
 
     for (const item of items ?? []) {
       const launchFilePath = String(item?.launchFilePath ?? '').trim()
@@ -174,6 +208,8 @@ export class ResourceService {
           type: 'warning',
           message: '未提供启动文件'
         })
+        completed += 1
+        pushImportProgress(directoryPath)
         continue
       }
 
@@ -185,6 +221,8 @@ export class ResourceService {
           type: 'info',
           message: analysis.existingResourceTitle ? `已存在：${analysis.existingResourceTitle}` : '该资源已存在'
         })
+        completed += 1
+        pushImportProgress(directoryPath)
         continue
       }
 
@@ -239,11 +277,14 @@ export class ResourceService {
         type: String(saveResult?.type ?? 'info'),
         message: String(saveResult?.message ?? '处理完成')
       })
+      completed += 1
+      pushImportProgress(directoryPath)
     }
 
     const successCount = results.filter((item) => item.type === 'success').length
     const skippedCount = results.filter((item) => item.type === 'info').length
     const failedCount = results.filter((item) => item.type === 'error').length
+    pushImportProgress('', true)
 
     return {
       type: failedCount > 0 && successCount === 0 ? 'error' : 'success',
@@ -337,6 +378,202 @@ export class ResourceService {
       type: 'success',
       message: launchResult.pid ? '启动成功' : '已启动，但暂不支持停止状态跟踪',
     }
+  }
+
+  static async launchResourceWithMtool(resourceId: string, basePath: string, fileName?: string | null) {
+    const targetPath = fileName ? path.join(basePath, fileName) : basePath
+    const normalizedTargetPath = path.normalize(String(targetPath ?? '').trim())
+
+    if (!normalizedTargetPath) {
+      return {
+        type: 'warning',
+        message: '请先提供游戏路径',
+      }
+    }
+
+    const mtoolSetting = await DatabaseService.getSetting(Settings.MTOOL_PATH)
+    const mtoolPath = String(mtoolSetting?.value ?? '').trim()
+
+    if (!mtoolPath) {
+      return {
+        type: 'warning',
+        message: '请先在设置中配置 MTool 路径',
+      }
+    }
+
+    const launchFilePath = await resolveMtoolLaunchFile(normalizedTargetPath)
+    if (!launchFilePath) {
+      return {
+        type: 'warning',
+        message: '未找到可供 MTool 注入的游戏启动文件',
+      }
+    }
+
+    if (path.extname(launchFilePath).toLowerCase() !== '.exe') {
+      return {
+        type: 'warning',
+        message: `MTool 目前只支持对 EXE 启动文件注入，当前解析到的是：${path.basename(launchFilePath)}`,
+      }
+    }
+
+    const engineDetectionResult = await this.detectGameEngine(launchFilePath, resourceId)
+    const engineProfile = engineDetectionResult?.data
+    const engineName = String(engineProfile?.engineName ?? '').trim()
+
+    if (!engineName) {
+      return {
+        type: 'warning',
+        message: '未检测到游戏引擎，无法判断是否支持 MTool 注入',
+      }
+    }
+
+    if (!engineProfile?.mtoolSupported || !Array.isArray(engineProfile?.mtoolHookFiles) || !engineProfile.mtoolHookFiles.length) {
+      return {
+        type: 'warning',
+        message: `当前引擎“${engineName}”暂不支持通过 MTool 启动`,
+        data: {
+          engineName,
+          mtoolSupported: Boolean(engineProfile?.mtoolSupported),
+          mtoolHookFiles: Array.isArray(engineProfile?.mtoolHookFiles) ? engineProfile.mtoolHookFiles : [],
+        }
+      }
+    }
+
+    const launchResult = await DialogService.launchPathWithMtool(
+      launchFilePath,
+      mtoolPath,
+      engineProfile.mtoolHookFiles
+    )
+
+    const message = launchResult.message
+
+    if (message) {
+      return {
+        type: 'error',
+        message,
+      }
+    }
+
+    const accessTime = new Date()
+
+    await DatabaseService.bumpResourceStatOnLaunch(resourceId, accessTime)
+
+    await DatabaseService.insertResourceLog({
+      resourceId,
+      startTime: accessTime,
+      endTime: accessTime,
+      duration: 0,
+      pid: null,
+      isDeleted: false,
+    })
+
+    return {
+      type: 'success',
+      message: `已通过 MTool 启动，当前引擎：${engineName}`,
+      data: {
+        engineName,
+        mtoolHookFiles: engineProfile.mtoolHookFiles,
+        launchFilePath,
+      }
+    }
+  }
+
+  static async launchResourceWithLocaleEmulator(resourceId: string, basePath: string, fileName?: string | null) {
+    const targetPath = fileName ? path.join(basePath, fileName) : basePath
+    const normalizedTargetPath = path.normalize(String(targetPath ?? '').trim())
+
+    if (!normalizedTargetPath) {
+      return {
+        type: 'warning',
+        message: '请先提供游戏路径',
+      }
+    }
+
+    const localeEmulatorSetting = await DatabaseService.getSetting(Settings.LOCALE_EMULATOR_PATH)
+    const localeEmulatorPath = String(localeEmulatorSetting?.value ?? '').trim()
+
+    if (!localeEmulatorPath) {
+      return {
+        type: 'warning',
+        message: '请先在设置中配置 LE 转区工具路径',
+      }
+    }
+
+    const launchFilePath = await resolveMtoolLaunchFile(normalizedTargetPath)
+    if (!launchFilePath) {
+      return {
+        type: 'warning',
+        message: '未找到可供 LE 启动的游戏启动文件',
+      }
+    }
+
+    if (path.extname(launchFilePath).toLowerCase() !== '.exe') {
+      return {
+        type: 'warning',
+        message: `LE 启动目前只支持 EXE 启动文件，当前解析到的是：${path.basename(launchFilePath)}`,
+      }
+    }
+
+    const launchResult = await DialogService.launchPathWithLocaleEmulator(launchFilePath, localeEmulatorPath)
+    const message = launchResult.message
+
+    if (message) {
+      return {
+        type: 'error',
+        message,
+      }
+    }
+
+    const accessTime = new Date()
+
+    await DatabaseService.bumpResourceStatOnLaunch(resourceId, accessTime)
+
+    await DatabaseService.insertResourceLog({
+      resourceId,
+      startTime: accessTime,
+      endTime: launchResult.pid ? null : accessTime,
+      duration: 0,
+      pid: launchResult.pid ?? null,
+      isDeleted: false,
+    })
+
+    return {
+      type: 'success',
+      message: '已通过 LE 转区启动',
+      data: {
+        launchFilePath,
+      }
+    }
+  }
+
+  private static async persistDetectedEngineIfMissing(resourceId: string, engineId: string) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    const normalizedEngineId = String(engineId ?? '').trim()
+
+    if (!normalizedResourceId || !normalizedEngineId) {
+      return
+    }
+
+    const resourceDetail = await DatabaseService.getResourceDetailById(normalizedResourceId)
+    if (!resourceDetail) {
+      return
+    }
+
+    const existingEngineId = String(resourceDetail?.gameMeta?.engine ?? '').trim()
+    if (existingEngineId) {
+      return
+    }
+
+    DatabaseService.upsertGameMeta({
+      resourceId: normalizedResourceId,
+      nameZh: resourceDetail?.gameMeta?.nameZh ?? null,
+      nameEn: resourceDetail?.gameMeta?.nameEn ?? null,
+      nameJp: resourceDetail?.gameMeta?.nameJp ?? null,
+      nickname: resourceDetail?.gameMeta?.nickname ?? null,
+      engine: normalizedEngineId,
+      version: resourceDetail?.gameMeta?.version ?? null,
+      language: resourceDetail?.gameMeta?.language ?? null,
+    })
   }
 
   static async stopResource(resourceId: string) {
@@ -681,9 +918,12 @@ export class ResourceService {
       }
     }
 
-    const activeLog = await DatabaseService.getLatestActiveResourceLogByResourceId(normalizedResourceId)
-    if (activeLog && !activeLog.endTime) {
-      await this.finalizeStoppedResource(normalizedResourceId, activeLog, new Date())
+    const runningResourceIds = await DatabaseService.getRunningResourceIdsByResourceIds([normalizedResourceId])
+    if (runningResourceIds.length) {
+      return {
+        type: 'warning',
+        message: '资源正在运行，无法删除',
+      }
     }
 
     await removeResourceMarker({
@@ -705,6 +945,187 @@ export class ResourceService {
     return {
       type: 'success',
       message: '删除成功',
+    }
+  }
+
+  static async deleteResources(resourceIds: string[]) {
+    const normalizedIds = Array.from(new Set((resourceIds ?? []).map((item) => String(item ?? '').trim()).filter(Boolean)))
+    if (!normalizedIds.length) {
+      return {
+        type: 'warning',
+        message: '未选择需要删除的资源',
+        data: {
+          successIds: [],
+          skippedRunningIds: [],
+          missingIds: [],
+          failedIds: []
+        }
+      }
+    }
+
+    const resources = await DatabaseService.getResourcesByIds(normalizedIds)
+    const resourceMap = new Map(resources.map((item) => [String(item.id), item]))
+    const runningIds = new Set(await DatabaseService.getRunningResourceIdsByResourceIds(normalizedIds))
+    const successIds: string[] = []
+    const skippedRunningIds: string[] = []
+    const missingIds: string[] = []
+    const failedIds: string[] = []
+
+    for (const resourceId of normalizedIds) {
+      const existingResource = resourceMap.get(resourceId)
+      if (!existingResource) {
+        missingIds.push(resourceId)
+        continue
+      }
+
+      if (runningIds.has(resourceId)) {
+        skippedRunningIds.push(resourceId)
+        continue
+      }
+
+      try {
+        await removeResourceMarker({
+          id: resourceId,
+          basePath: existingResource.basePath,
+          fileName: existingResource.fileName ?? null
+        })
+        await DatabaseService.logicalDeleteResource(resourceId)
+        await ResourceWatcher.getInstance().untrackResource(resourceId)
+
+        NotificationQueueService.getInstance().pushResourceStateChanged({
+          resourceId,
+          categoryId: existingResource.categoryId,
+          running: false,
+          missingStatus: Boolean(existingResource.missingStatus),
+          changedAt: Date.now(),
+        })
+
+        successIds.push(resourceId)
+      } catch {
+        failedIds.push(resourceId)
+      }
+    }
+
+    const messageParts = [
+      `已删除 ${successIds.length} 个`,
+      skippedRunningIds.length ? `跳过运行中 ${skippedRunningIds.length} 个` : '',
+      missingIds.length ? `不存在 ${missingIds.length} 个` : '',
+      failedIds.length ? `失败 ${failedIds.length} 个` : ''
+    ].filter(Boolean)
+
+    return {
+      type: failedIds.length > 0 && successIds.length === 0 ? 'error' : 'success',
+      message: messageParts.join('，'),
+      data: {
+        successIds,
+        skippedRunningIds,
+        missingIds,
+        failedIds
+      }
+    }
+  }
+
+  static async batchUpdateResourceLabels(
+    resourceIds: string[],
+    field: 'tags' | 'types',
+    mode: 'add' | 'remove',
+    values: string[]
+  ) {
+    const normalizedIds = Array.from(new Set((resourceIds ?? []).map((item) => String(item ?? '').trim()).filter(Boolean)))
+    const normalizedValues = Array.from(new Set((values ?? []).map((item) => String(item ?? '').trim()).filter(Boolean)))
+
+    if (!normalizedIds.length) {
+      return {
+        type: 'warning',
+        message: '未选择需要批量修改的资源',
+        data: {
+          affectedIds: [],
+          successIds: [],
+          missingIds: [],
+          failedIds: []
+        }
+      }
+    }
+
+    if (!normalizedValues.length) {
+      return {
+        type: 'warning',
+        message: field === 'tags' ? '请先输入要处理的标签' : '请先输入要处理的分类',
+        data: {
+          affectedIds: [],
+          successIds: [],
+          missingIds: [],
+          failedIds: []
+        }
+      }
+    }
+
+    const affectedIds: string[] = []
+    const successIds: string[] = []
+    const missingIds: string[] = []
+    const failedIds: string[] = []
+
+    for (const resourceId of normalizedIds) {
+      try {
+        const resourceDetail = await DatabaseService.getResourceDetailById(resourceId)
+        if (!resourceDetail) {
+          missingIds.push(resourceId)
+          continue
+        }
+
+        const categoryId = String(resourceDetail.categoryId ?? '').trim()
+        if (!categoryId) {
+          failedIds.push(resourceId)
+          continue
+        }
+
+        const currentValues = (
+          field === 'tags'
+            ? (resourceDetail.tags ?? []).map((item: any) => String(item?.name ?? '').trim())
+            : (resourceDetail.types ?? []).map((item: any) => String(item?.name ?? '').trim())
+        ).filter(Boolean)
+
+        const nextValues = mode === 'add'
+          ? Array.from(new Set([...currentValues, ...normalizedValues]))
+          : currentValues.filter((item) => !normalizedValues.includes(item))
+
+        if (!isSameStringArray(currentValues, nextValues)) {
+          affectedIds.push(resourceId)
+        }
+
+        await replaceResourceLabels(resourceId, categoryId, field, nextValues)
+        successIds.push(resourceId)
+      } catch (error) {
+        ResourceService.logger.error('batchUpdateResourceLabels', {
+          resourceId,
+          field,
+          mode,
+          values: normalizedValues,
+          error
+        })
+        failedIds.push(resourceId)
+      }
+    }
+
+    const fieldLabel = field === 'tags' ? '标签' : '分类'
+    const actionLabel = mode === 'add' ? '添加' : '移除'
+    const messageParts = [`已批量${actionLabel}${fieldLabel}，影响 ${affectedIds.length} 个`]
+    if (missingIds.length) {
+      messageParts.push(`缺失 ${missingIds.length} 个`)
+    }
+    if (failedIds.length) {
+      messageParts.push(`失败 ${failedIds.length} 个`)
+    }
+
+    return {
+      type: failedIds.length ? (successIds.length ? 'warning' : 'error') : 'success',
+      message: messageParts.join('，'),
+      data: {
+        affectedIds,
+        successIds,
+        missingIds,
+        failedIds
+      }
     }
   }
 
@@ -1105,6 +1526,79 @@ async function buildTypePayload(resourceId: string, resourceForm: ResourceForm) 
   }
 }
 
+async function replaceResourceLabels(
+  resourceId: string,
+  categoryId: string,
+  field: 'tags' | 'types',
+  values: string[]
+) {
+  const normalizedValues = Array.from(new Set((values ?? []).map((item) => String(item ?? '').trim()).filter(Boolean)))
+  const resourceForm = {
+    categoryId,
+    tags: field === 'tags' ? normalizedValues : [],
+    types: field === 'types' ? normalizedValues : []
+  } as ResourceForm
+
+  if (field === 'tags') {
+    const tagPayload = await buildTagPayload(resourceId, resourceForm)
+    db.transaction((tx) => {
+      DatabaseService.deleteTagRefsByResourceId(resourceId, tx)
+      DatabaseService.insertTags(tagPayload.newTags, tx)
+      DatabaseService.insertTagRefs(tagPayload.tagRefs, tx)
+    })
+    return
+  }
+
+  const typePayload = await buildTypePayload(resourceId, resourceForm)
+  db.transaction((tx) => {
+    DatabaseService.deleteTypeRefsByResourceId(resourceId, tx)
+    DatabaseService.insertTypes(typePayload.newTypes, tx)
+    DatabaseService.insertTypeRefs(typePayload.typeRefs, tx)
+  })
+}
+
+function isSameStringArray(left: string[], right: string[]) {
+  if (left.length !== right.length) {
+    return false
+  }
+
+  const leftSet = new Set(left)
+  const rightSet = new Set(right)
+
+  if (leftSet.size !== rightSet.size) {
+    return false
+  }
+
+  for (const item of leftSet) {
+    if (!rightSet.has(item)) {
+      return false
+    }
+  }
+
+  return true
+}
+
+async function resolveMtoolLaunchFile(targetPath: string) {
+  if (!targetPath) {
+    return null
+  }
+
+  if (!await fs.pathExists(targetPath)) {
+    return null
+  }
+
+  const stats = await fs.stat(targetPath)
+  if (stats.isDirectory()) {
+    return detectGameLaunchFile(targetPath)
+  }
+
+  if (path.extname(targetPath).toLowerCase() === '.exe') {
+    return targetPath
+  }
+
+  return detectGameLaunchFile(path.dirname(targetPath))
+}
+
 function buildStoreWorkPayloads(resourceId: string, resourceForm: ResourceForm) {
   const storeItems = [
     {
@@ -1459,3 +1953,6 @@ async function dealPath(basePath: string): Promise<ResourcePathInfo> {
     fileName: path.basename(normalizedPath),
   }
 }
+
+
+

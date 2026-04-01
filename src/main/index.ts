@@ -1,5 +1,6 @@
 import { app, shell, BrowserWindow, ipcMain, screen } from 'electron'
 import { join } from 'path'
+import fs from 'fs'
 import { execFile } from 'child_process'
 import { electronApp, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -15,6 +16,24 @@ import { WindowScreenshotService } from './service/window-screenshot.service';
 
 let isShuttingDown = false
 const logger = createLogger('main')
+
+function prepareChromiumStoragePaths() {
+  const userDataPath = app.getPath('userData')
+  const sessionDataPath = join(userDataPath, 'sessionData')
+  const diskCachePath = join(sessionDataPath, 'Cache')
+  const gpuCachePath = join(sessionDataPath, 'GPUCache')
+
+  ;[userDataPath, sessionDataPath, diskCachePath, gpuCachePath].forEach((targetPath) => {
+    if (!fs.existsSync(targetPath)) {
+      fs.mkdirSync(targetPath, { recursive: true })
+    }
+  })
+
+  app.setPath('sessionData', sessionDataPath)
+  app.commandLine.appendSwitch('disk-cache-dir', diskCachePath)
+}
+
+prepareChromiumStoragePaths()
 
 function logActiveRuntimeState(stage: string) {
   const runtimeProcess = process as NodeJS.Process & {
@@ -101,12 +120,12 @@ function destroyAllWindows() {
 
 function ensureMainWindowVisible(window: BrowserWindow) {
   const targetWidth = 1280
-  const targetHeight = 670
+  const targetHeight = 768
   const bounds = window.getBounds()
   const display = screen.getDisplayMatching(bounds)
   const workArea = display.workArea
 
-  const widthTooSmall = bounds.width < 800 || bounds.height < 500
+  const widthTooSmall = bounds.width < 1024 || bounds.height < 768
   const outsideHorizontal = bounds.x + bounds.width < workArea.x || bounds.x > workArea.x + workArea.width
   const outsideVertical = bounds.y + bounds.height < workArea.y || bounds.y > workArea.y + workArea.height
 
@@ -156,7 +175,7 @@ function forceNativeWindowShow(window: BrowserWindow, reason: string) {
     `$hWnd = [IntPtr]::new(${handleValue});`,
     '[WindowShowApi]::ShowWindow($hWnd, 5) | Out-Null;',
     '[WindowShowApi]::SetForegroundWindow($hWnd) | Out-Null;'
-  ].join(' ')
+  ].join('\n')
 
   execFile(
     'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
@@ -175,9 +194,11 @@ function forceNativeWindowShow(window: BrowserWindow, reason: string) {
 function createWindow(): void {
   // Create the browser window.
   const mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 670,
+    width: 1024,
+    height: 768,
     minWidth: 1024,
+    minHeight: 768,
+    useContentSize: true,
     show: true,
     backgroundColor: '#1a1a1a',
     autoHideMenuBar: true,

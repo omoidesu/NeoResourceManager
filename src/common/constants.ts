@@ -60,6 +60,11 @@ export const Settings = {
     description: 'LE转区工具路径',
     default: ''
   },
+  MTOOL_PATH: {
+    name: 'mtoolPath',
+    description: 'Mtool路径',
+    default: ''
+  },
   ENABLE_PROXY: {
     name: 'enableHttpProxy',
     description: '启用代理',
@@ -104,7 +109,7 @@ export const Settings = {
     name: 'themeColor',
     description: '主题颜色',
     default: ''
-  }
+  },
 } as const;
 
 export const DictType = {

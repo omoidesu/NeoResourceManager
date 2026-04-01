@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import {computed, defineAsyncComponent, h, inject, markRaw, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch} from 'vue'
+import {computed, defineAsyncComponent, h, inject, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch} from 'vue'
 import type { ComputedRef } from 'vue'
 import { useRoute } from 'vue-router'
-import { CheckmarkOutline, ChevronBackOutline, ChevronForwardOutline, CloseOutline, EyeOutline, FolderOpenOutline, FunnelOutline, Play, Stop, TrashOutline } from '@vicons/ionicons5'
+import { CheckmarkOutline, ChevronBackOutline, ChevronForwardOutline, CloseOutline, EyeOutline, FolderOpenOutline, FunnelOutline, Play, SearchOutline, Stop, TrashOutline } from '@vicons/ionicons5'
 import { confirmDialog, notify } from '../utils/notification'
 import { removeOngoingCenterItem, upsertOngoingCenterItem } from '../utils/notification-center'
 import ResourceCard from '../components/card/ResourceCard.vue'
@@ -21,6 +21,7 @@ const websiteTypeOptions = ref<any[]>([])
 const tagList = ref<any[]>([])
 const typeList = ref<any[]>([])
 const loading = ref(true)
+const keyword = ref('')
 const authorSearch = ref<string>('')
 const tagSearch = ref<string>('')
 const typeSearch = ref<string>('')
@@ -28,15 +29,18 @@ const showModal = ref(false)
 const showEditModal = ref(false)
 const showBatchImportLoading = ref(false)
 const showBatchImportModal = ref(false)
+const showBatchLabelModal = ref(false)
 const formData = ref<any>({ name: '', meta: {} })
 const editingResourceId = ref('')
 const editInitialFormData = ref<any | null>(null)
 const batchImportItems = ref<any[]>([])
 const isBatchImportSubmitting = ref(false)
+const batchImportFetchInfoEnabled = ref(true)
 const batchAnalyzeCurrent = ref(0)
 const batchAnalyzeTotal = ref(0)
 const batchAnalyzeMessage = ref('')
 const batchAnalyzeRunning = ref(false)
+const batchImportRunning = ref(false)
 const batchAnalyzeCancelled = ref(false)
 const batchAnalyzeInBackground = ref(false)
 const batchAnalyzeToastDismissed = ref(false)
@@ -51,6 +55,7 @@ const showPictureViewer = ref(false)
 const pictureViewerScrollMode = ref(String(Settings.PICTURE_READ_SCROLL_MODE.default ?? 'zoom'))
 const tagInputValue = ref('')
 const typeInputValue = ref('')
+const batchLabelInputValue = ref('')
 const showDetailDrawer = ref(false)
 const selectedDetailResource = ref<any>(null)
 const detailScreenshotPaths = ref<string[]>([])
@@ -77,6 +82,50 @@ const engineIconUrlByName = new Map<string, string>(
 const storeIconUrlByName = new Map<string, string>(
   Object.entries(storeIconModules).map(([filePath, url]) => [filePath.split('/').pop() ?? filePath, url])
 )
+
+type BatchImportState = {
+  items: any[]
+  fetchInfoEnabled: boolean
+  analyzeCurrent: number
+  analyzeTotal: number
+  analyzeMessage: string
+  analyzeRunning: boolean
+  importRunning: boolean
+  analyzeCancelled: boolean
+  analyzeInBackground: boolean
+  analyzeToastDismissed: boolean
+  showLoading: boolean
+  showPreview: boolean
+}
+
+const createBatchImportState = (): BatchImportState => ({
+  items: [],
+  fetchInfoEnabled: true,
+  analyzeCurrent: 0,
+  analyzeTotal: 0,
+  analyzeMessage: '',
+  analyzeRunning: false,
+  importRunning: false,
+  analyzeCancelled: false,
+  analyzeInBackground: false,
+  analyzeToastDismissed: false,
+  showLoading: false,
+  showPreview: false
+})
+
+const batchImportStateStore = reactive<Record<string, BatchImportState>>({})
+
+const ensureBatchImportState = (targetCategoryId: string) => {
+  if (!targetCategoryId) {
+    return createBatchImportState()
+  }
+
+  if (!batchImportStateStore[targetCategoryId]) {
+    batchImportStateStore[targetCategoryId] = createBatchImportState()
+  }
+
+  return batchImportStateStore[targetCategoryId]
+}
 
 const renderWebsiteOptionLabel = (icon: string, rawLabel: string) =>
   h(
@@ -244,22 +293,37 @@ const selectedTagList = ref<string[]>([])
 const selectedTypeList = ref<string[]>([])
 const selectedResourceIds = ref<string[]>([])
 const selectionModeManuallyEnabled = ref(false)
+const isBatchDeleting = ref(false)
+const isBatchLabelSubmitting = ref(false)
+const batchLabelField = ref<'tags' | 'types'>('tags')
+const batchLabelMode = ref<'add' | 'remove'>('add')
+const batchLabelValues = ref<string[]>([])
 const currentPage = ref(1)
 const jumpPageInput = ref<number | null>(1)
 const pageSize = ref(24)
 const totalResources = ref(0)
 const sortBy = ref('createTime-desc')
 const localeEmulatorPath = ref('')
+const mtoolPath = ref('')
 
 const showBatchImportButton = computed(() => categorySettings.value.extendTable === 'game_meta')
-const BATCH_IMPORT_ONGOING_ID = 'batch-import-analysis'
+const getBatchImportOngoingId = (targetCategoryId: string) => `batch-import-analysis:${targetCategoryId}`
+const batchProgressRunning = computed(() => batchAnalyzeRunning.value || batchImportRunning.value)
+const batchProgressStage = computed(() => (batchImportRunning.value ? 'import' : 'analyze'))
 const batchAnalyzePercent = computed(() =>
   batchAnalyzeTotal.value > 0
     ? Math.min(100, Math.round((batchAnalyzeCurrent.value / batchAnalyzeTotal.value) * 100))
     : 0
 )
+const batchAnalyzeDisplayIndex = computed(() => {
+  if (!batchProgressRunning.value) {
+    return batchAnalyzeCurrent.value
+  }
+
+  return Math.min(batchAnalyzeTotal.value, batchAnalyzeCurrent.value + 1)
+})
 const showBatchImportProgressToast = computed(() =>
-  batchAnalyzeRunning.value && batchAnalyzeInBackground.value && !batchAnalyzeToastDismissed.value
+  batchProgressRunning.value && batchAnalyzeInBackground.value && !batchAnalyzeToastDismissed.value
 )
 const selectableBatchImportItems = computed(() =>
   batchImportItems.value.filter((item) => !item.exists && !item.errorMessage && item.launchFilePath)
@@ -269,6 +333,9 @@ const selectedBatchImportCount = computed(() =>
 )
 const selectedResourceCount = computed(() => selectedResourceIds.value.length)
 const resourceSelectionMode = computed(() => selectedResourceCount.value > 0 || selectionModeManuallyEnabled.value)
+const currentCategoryBatchInBackground = computed(() =>
+  batchProgressRunning.value && batchAnalyzeInBackground.value
+)
 
 const descriptionLabel = computed(() =>
   categorySettings.value.extendTable === 'game_meta' ? '游戏简介' : `${categoryName.value}描述`
@@ -382,6 +449,8 @@ const categoryName = computed(() => {
 const startText = computed(() => categorySettings.value.startText || '启动')
 const showZoneLaunch = computed(() => categorySettings.value.extendTable === 'game_meta')
 const canZoneLaunch = computed(() => Boolean(localeEmulatorPath.value.trim()))
+const showMtoolLaunch = computed(() => categorySettings.value.extendTable === 'game_meta')
+const canMtoolLaunch = computed(() => Boolean(mtoolPath.value.trim()))
 const showScreenshotFolder = computed(() => categorySettings.value.extendTable === 'game_meta')
 const showCompletedToggle = computed(() => categorySettings.value.extendTable === 'game_meta')
 const showEngineFilter = computed(() => categorySettings.value.extendTable === 'game_meta')
@@ -507,6 +576,16 @@ const typeSelectOptions = computed(() =>
     }))
     .filter((item) => item.label && item.value)
 )
+const batchLabelOptions = computed(() => batchLabelField.value === 'tags' ? tagSelectOptions.value : typeSelectOptions.value)
+const batchLabelTitle = computed(() => {
+  const fieldLabel = batchLabelField.value === 'tags' ? '标签' : '分类'
+  const actionLabel = batchLabelMode.value === 'add' ? '添加' : '移除'
+  return `批量${actionLabel}${fieldLabel}`
+})
+const batchLabelPlaceholder = computed(() => {
+  const fieldLabel = batchLabelField.value === 'tags' ? '标签' : '分类'
+  return `可选择已有${fieldLabel}，也可输入新${fieldLabel}，按空格、顿号、英文逗号或回车批量添加`
+})
 
 const pageStyle = computed(() => ({
   backgroundColor: injectedIsDark.value ? '#121212' : '#f7f8fa',
@@ -791,6 +870,7 @@ const fetchData = async () => {
   loading.value = true
   try {
     const resourceQuery = {
+      keyword: keyword.value.trim(),
       authorIds: [...selectedAuthorList.value],
       engineIds: [...selectedEngineList.value],
       tagIds: [...selectedTagList.value],
@@ -809,6 +889,8 @@ const fetchData = async () => {
     websiteTypeOptions.value = await window.api.db.getSelectDictData(DictType.STORE_WEBSITE_TYPE)
     const localeEmulatorSetting = await window.api.db.getSetting(Settings.LOCALE_EMULATOR_PATH)
     localeEmulatorPath.value = String(localeEmulatorSetting?.value ?? '')
+    const mtoolSetting = await window.api.db.getSetting(Settings.MTOOL_PATH)
+    mtoolPath.value = String(mtoolSetting?.value ?? '')
     // 2. 获取该分类下的资源列表（带标签）
       const resourceResponse = await window.api.db.getResourceByCategoryId(categoryId.value, resourceQuery)
       resourceList.value = resourceResponse?.items ?? []
@@ -871,13 +953,20 @@ const handleJumpPage = () => {
 }
 
 // 监控路由 ID 变化
-watch(categoryId, () => {
+watch(categoryId, (nextCategoryId, previousCategoryId) => {
+  if (previousCategoryId) {
+    syncBatchImportStateFromRefs(previousCategoryId)
+  }
+
+  syncBatchImportRefsFromState(String(nextCategoryId ?? ''))
+  selectionModeManuallyEnabled.value = false
+  selectedResourceIds.value = []
   currentPage.value = 1
   fetchData()
 }, { immediate: true })
 
 watch(
-  [missingFile, favoriteOnly, completedOnly, runningOnly, selectedAuthorList, selectedEngineList, selectedTagList, selectedTypeList, pageSize, sortBy],
+  [keyword, missingFile, favoriteOnly, completedOnly, runningOnly, selectedAuthorList, selectedEngineList, selectedTagList, selectedTypeList, pageSize, sortBy],
   () => {
     currentPage.value = 1
     fetchData()
@@ -900,6 +989,7 @@ watch(totalPages, (value) => {
 })
 
 let stopResourceStateListener: null | (() => void) = null
+let stopBatchImportProgressListener: null | (() => void) = null
 
 onMounted(() => {
   stopResourceStateListener = window.api.service.onResourceStateChanged((message) => {
@@ -908,6 +998,34 @@ onMounted(() => {
     }
 
     void fetchData()
+  })
+
+  stopBatchImportProgressListener = window.api.service.onBatchImportProgress((message) => {
+    const targetCategoryId = String(message.categoryId ?? '').trim()
+    if (!targetCategoryId) {
+      return
+    }
+
+    patchBatchImportState(targetCategoryId, {
+      analyzeTotal: Number(message.total ?? 0),
+      analyzeCurrent: Number(message.current ?? 0),
+      analyzeMessage: String(message.message ?? ''),
+      importRunning: !message.done && message.stage === 'import',
+      analyzeRunning: !message.done && message.stage === 'analyze',
+      showLoading: !message.done && targetCategoryId === categoryId.value
+    })
+
+    if (message.done) {
+      patchBatchImportState(targetCategoryId, {
+        importRunning: false,
+        analyzeRunning: false,
+        showLoading: false
+      })
+      clearBatchImportOngoingCenter(targetCategoryId)
+      return
+    }
+
+    syncBatchImportOngoingCenter(targetCategoryId)
   })
 
   window.addEventListener('mousemove', handleDetailDrawerResizeMove)
@@ -937,6 +1055,8 @@ const updateDetailDescriptionHeight = async () => {
 onBeforeUnmount(() => {
   stopResourceStateListener?.()
   stopResourceStateListener = null
+  stopBatchImportProgressListener?.()
+  stopBatchImportProgressListener = null
   window.removeEventListener('mousemove', handleDetailDrawerResizeMove)
   window.removeEventListener('mouseup', handleDetailDrawerResizeEnd)
   document.body.style.userSelect = ''
@@ -1037,6 +1157,29 @@ watch(showEditModal, (visible) => {
   }
 })
 
+watch(
+  [
+    batchImportItems,
+    batchImportFetchInfoEnabled,
+    batchAnalyzeCurrent,
+    batchAnalyzeTotal,
+    batchAnalyzeMessage,
+    batchAnalyzeRunning,
+    batchImportRunning,
+    batchAnalyzeCancelled,
+    batchAnalyzeInBackground,
+    batchAnalyzeToastDismissed,
+    showBatchImportLoading,
+    showBatchImportModal
+  ],
+  () => {
+    if (categoryId.value) {
+      syncBatchImportStateFromRefs(categoryId.value)
+    }
+  },
+  { deep: true }
+)
+
 // --- E. 交互事件 ---
 const handleAddResource = () => {
   editingResourceId.value = ''
@@ -1045,35 +1188,64 @@ const handleAddResource = () => {
   showModal.value = true
 }
 
-const syncBatchImportOngoingCenter = () => {
-  if (!batchAnalyzeRunning.value) {
-    removeOngoingCenterItem(BATCH_IMPORT_ONGOING_ID)
+const syncBatchImportOngoingCenter = (targetCategoryId = categoryId.value) => {
+  if (!targetCategoryId) {
     return
   }
 
-  const currentDirectoryName = getResourceNameFromBasePath(batchAnalyzeMessage.value.split('\n')[1] || '') || (batchAnalyzeMessage.value.split('\n')[1] || '') || '正在准备分析目录'
+  const state = ensureBatchImportState(targetCategoryId)
+  const isRunning = state.analyzeRunning || state.importRunning
+  if (!isRunning) {
+    clearBatchImportOngoingCenter(targetCategoryId)
+    return
+  }
+
+  const [, secondLine] = String(state.analyzeMessage ?? '').split('\n')
+  const currentDirectoryName = getResourceNameFromBasePath(secondLine || state.analyzeMessage || '')
+    || secondLine
+    || state.analyzeMessage
+    || '正在准备分析目录'
+  const current = Number(state.analyzeCurrent ?? 0)
+  const total = Number(state.analyzeTotal ?? 0)
+  const displayIndex = Math.min(total, current + 1)
+  const progress = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0
+  const title = state.importRunning ? '批量导入进行中' : '批量导入'
+  const contentPrefix = state.importRunning
+    ? `正在导入第 ${displayIndex} / ${total} 个游戏`
+    : `正在分析第 ${displayIndex} / ${total} 个目录`
   upsertOngoingCenterItem({
-    id: BATCH_IMPORT_ONGOING_ID,
-    title: '批量导入',
-    content: `正在分析第 ${batchAnalyzeCurrent.value} / ${batchAnalyzeTotal.value} 个目录\n${currentDirectoryName}`,
-    progress: batchAnalyzePercent.value,
+    id: getBatchImportOngoingId(targetCategoryId),
+    title,
+    content: `${contentPrefix}\n${currentDirectoryName}`,
+    progress,
     onClick: () => {
-      handleReopenBatchImportProgress()
+      if (targetCategoryId === categoryId.value) {
+        handleReopenBatchImportProgress()
+      }
     }
   })
 }
 
-const clearBatchImportOngoingCenter = () => {
-  removeOngoingCenterItem(BATCH_IMPORT_ONGOING_ID)
+const clearBatchImportOngoingCenter = (targetCategoryId = categoryId.value) => {
+  if (!targetCategoryId) {
+    return
+  }
+
+  removeOngoingCenterItem(getBatchImportOngoingId(targetCategoryId))
 }
 
 const handleBatchImportClick = () => {
   void (async () => {
-    if (batchAnalyzeRunning.value) {
-      showBatchImportLoading.value = true
-      batchAnalyzeInBackground.value = false
-      batchAnalyzeToastDismissed.value = false
-      syncBatchImportOngoingCenter()
+    const targetCategoryId = categoryId.value
+    const currentState = ensureBatchImportState(targetCategoryId)
+
+    if (currentState.analyzeRunning || currentState.importRunning) {
+      patchBatchImportState(targetCategoryId, {
+        analyzeInBackground: false,
+        analyzeToastDismissed: false,
+        showLoading: true
+      })
+      syncBatchImportOngoingCenter(targetCategoryId)
       return
     }
 
@@ -1083,65 +1255,47 @@ const handleBatchImportClick = () => {
         return
       }
 
-      batchImportItems.value = []
-      batchAnalyzeTotal.value = directoryPaths.length
-      batchAnalyzeCurrent.value = 0
-      batchAnalyzeMessage.value = '正在分析游戏启动文件，请稍候...'
-      batchAnalyzeCancelled.value = false
-      batchAnalyzeInBackground.value = false
-      batchAnalyzeToastDismissed.value = false
-      batchAnalyzeRunning.value = true
-      showBatchImportLoading.value = true
-      syncBatchImportOngoingCenter()
+      patchBatchImportState(targetCategoryId, {
+        items: [],
+        fetchInfoEnabled: true,
+        analyzeTotal: directoryPaths.length,
+        analyzeCurrent: 0,
+        analyzeMessage: '正在分析游戏启动文件，请稍候...',
+        analyzeCancelled: false,
+        analyzeInBackground: false,
+        analyzeToastDismissed: false,
+        analyzeRunning: true,
+        importRunning: false,
+        showLoading: true,
+        showPreview: false
+      })
+      syncBatchImportOngoingCenter(targetCategoryId)
 
-      const items: any[] = []
-      for (const [index, directoryPath] of directoryPaths.entries()) {
-        if (batchAnalyzeCancelled.value) {
-          break
-        }
+      const items = await analyzeBatchImportDirectories(targetCategoryId, directoryPaths)
 
-        const directoryName = getResourceNameFromBasePath(directoryPath)
-        batchAnalyzeCurrent.value = index + 1
-        batchAnalyzeMessage.value = `正在分析第 ${index + 1} / ${directoryPaths.length} 个目录\n${directoryName || directoryPath}`
-        syncBatchImportOngoingCenter()
+      patchBatchImportState(targetCategoryId, {
+        items,
+        showPreview: items.length > 0,
+        showLoading: false
+      })
 
-        try {
-          const analysis = await window.api.service.analyzeGameDirectory(directoryPath)
-          items.push(await enrichBatchImportItem({
-            ...analysis,
-            checked: !analysis?.exists && !analysis?.errorMessage && !!analysis?.launchFilePath
-          }))
-        } catch (error) {
-          items.push({
-            directoryPath,
-            directoryName,
-            launchFilePath: '',
-            launchFileName: '',
-            exists: false,
-            checked: false,
-            errorMessage: error instanceof Error ? error.message : '分析失败'
-          })
-        }
-      }
-
-      batchImportItems.value = items
-      if (items.length) {
-        showBatchImportModal.value = true
-      } else if (batchAnalyzeCancelled.value) {
+      if (!items.length && ensureBatchImportState(targetCategoryId).analyzeCancelled) {
         showNotifyByType('info', '批量导入', '已停止分析')
       }
     } finally {
-      batchAnalyzeRunning.value = false
-      batchAnalyzeInBackground.value = false
-      showBatchImportLoading.value = false
-      batchAnalyzeToastDismissed.value = false
-      clearBatchImportOngoingCenter()
+      patchBatchImportState(targetCategoryId, {
+        analyzeRunning: false,
+        analyzeInBackground: false,
+        showLoading: false,
+        analyzeToastDismissed: false
+      })
+      clearBatchImportOngoingCenter(targetCategoryId)
     }
   })()
 }
 
 const handleBatchImportMaskClick = () => {
-  if (!batchAnalyzeRunning.value) {
+  if (!batchProgressRunning.value) {
     return
   }
 
@@ -1149,7 +1303,7 @@ const handleBatchImportMaskClick = () => {
 }
 
 const handleBatchImportRunInBackground = () => {
-  if (!batchAnalyzeRunning.value) {
+  if (!batchProgressRunning.value) {
     return
   }
 
@@ -1160,7 +1314,7 @@ const handleBatchImportRunInBackground = () => {
 }
 
 const handleReopenBatchImportProgress = () => {
-  if (!batchAnalyzeRunning.value) {
+  if (!batchProgressRunning.value) {
     return
   }
 
@@ -1175,18 +1329,18 @@ const handleDismissBatchImportProgressToast = () => {
 }
 
 const handleStopBatchImportAnalysis = () => {
-  if (!batchAnalyzeRunning.value) {
+  if (!batchProgressRunning.value) {
     return
   }
 
   batchAnalyzeCancelled.value = true
-  batchAnalyzeMessage.value = '正在停止分析，请稍候...'
+  batchAnalyzeMessage.value = batchProgressStage.value === 'import' ? '正在停止导入，请稍候...' : '正在停止分析，请稍候...'
 }
 
 watch(
-  [batchAnalyzeRunning, batchAnalyzeCurrent, batchAnalyzeTotal, batchAnalyzeMessage, batchAnalyzeInBackground],
+  [batchAnalyzeRunning, batchImportRunning, batchAnalyzeCurrent, batchAnalyzeTotal, batchAnalyzeMessage, batchAnalyzeInBackground],
   () => {
-    if (batchAnalyzeRunning.value) {
+    if (batchProgressRunning.value) {
       syncBatchImportOngoingCenter()
     } else {
       clearBatchImportOngoingCenter()
@@ -1199,8 +1353,7 @@ const handleCloseBatchImportModal = () => {
     return
   }
 
-  showBatchImportModal.value = false
-  batchImportItems.value = []
+  resetBatchImportState(categoryId.value)
 }
 
 const handleSelectBatchLaunchFile = (index: number) => {
@@ -1262,6 +1415,7 @@ const handleToggleBatchImportItem = (index: number) => {
 
 const handleConfirmBatchImport = () => {
   void (async () => {
+    const targetCategoryId = categoryId.value
     const selectedItems = batchImportItems.value
       .filter((item) => item.checked && item.launchFilePath)
       .map((item) => ({
@@ -1269,7 +1423,7 @@ const handleConfirmBatchImport = () => {
         launchFilePath: item.launchFilePath,
         websiteType: item.websiteType,
         gameId: item.gameId,
-        fetchInfoEnabled: item.fetchInfoEnabled !== false
+        fetchInfoEnabled: batchImportFetchInfoEnabled.value
       }))
 
     if (!selectedItems.length) {
@@ -1279,12 +1433,19 @@ const handleConfirmBatchImport = () => {
 
     try {
       isBatchImportSubmitting.value = true
-      showBatchImportLoading.value = true
-      batchAnalyzeTotal.value = selectedItems.length
-      batchAnalyzeCurrent.value = selectedItems.length
-      batchAnalyzeMessage.value = `正在导入 ${selectedItems.length} 个游戏，请稍候...`
+      patchBatchImportState(targetCategoryId, {
+        importRunning: true,
+        showLoading: true,
+        showPreview: false,
+        analyzeTotal: selectedItems.length,
+        analyzeCurrent: 0,
+        analyzeMessage: '正在准备导入，请稍候...',
+        analyzeInBackground: false,
+        analyzeToastDismissed: false
+      })
+      syncBatchImportOngoingCenter(targetCategoryId)
 
-      const result = await window.api.service.importBatchGameDirectories(categoryId.value, selectedItems)
+      const result = await window.api.service.importBatchGameDirectories(targetCategoryId, selectedItems)
       const resultType = result?.type ?? 'info'
       const resultMessage = result?.message ?? '批量导入完成'
       const resultItems = Array.isArray(result?.data) ? result.data : []
@@ -1325,7 +1486,13 @@ const handleConfirmBatchImport = () => {
       showNotifyByType('error', '批量导入', error instanceof Error ? error.message : '批量导入失败')
     } finally {
       isBatchImportSubmitting.value = false
-      showBatchImportLoading.value = false
+      patchBatchImportState(targetCategoryId, {
+        importRunning: false,
+        showLoading: false,
+        analyzeInBackground: false,
+        analyzeToastDismissed: false
+      })
+      clearBatchImportOngoingCenter(targetCategoryId)
     }
   })()
 }
@@ -1608,6 +1775,18 @@ const appendInputValues = (field: 'tags' | 'types', input: string) => {
   ])
 }
 
+const appendBatchLabelValues = (input: string) => {
+  const items = splitManualValues(input)
+  if (!items.length) {
+    return
+  }
+
+  batchLabelValues.value = normalizeSelectedValues([
+    ...batchLabelValues.value,
+    ...items
+  ])
+}
+
 const handleTagInputCommit = () => {
   appendInputValues('tags', tagInputValue.value)
   tagInputValue.value = ''
@@ -1637,6 +1816,25 @@ const handleSelectInputKeydown = (event: KeyboardEvent, field: 'tags' | 'types')
   handleTypeInputCommit()
 }
 
+const handleBatchLabelInputCommit = () => {
+  appendBatchLabelValues(batchLabelInputValue.value)
+  batchLabelInputValue.value = ''
+}
+
+const handleBatchLabelInputKeydown = (event: KeyboardEvent) => {
+  if (![' ', ',', '，', '、', 'Enter'].includes(event.key)) {
+    return
+  }
+
+  event.preventDefault()
+  const target = event.target as HTMLInputElement | null
+  if (target) {
+    target.value = ''
+  }
+
+  handleBatchLabelInputCommit()
+}
+
 const createSelectOption = (label: string) => {
   const value = label.trim()
   return {
@@ -1651,6 +1849,10 @@ const handleTagSearch = (value: string) => {
 
 const handleTypeSearch = (value: string) => {
   typeInputValue.value = value
+}
+
+const handleBatchLabelSearch = (value: string) => {
+  batchLabelInputValue.value = value
 }
 
 const handleFetchGameInfo = async () => {
@@ -1761,12 +1963,55 @@ const handleStopResource = async (resource: any) => {
 }
 
 const handleZoneLaunchResource = (resource: any) => {
-  if (!canZoneLaunch.value) {
-    showNotifyByType('warning', '转区启动', '请先在设置中配置 LE 转区工具路径')
+  void (async () => {
+    if (!canZoneLaunch.value) {
+      showNotifyByType('warning', '转区启动', '请先在设置中配置 LE 转区工具路径')
+      return
+    }
+
+    try {
+      const result = await window.api.service.launchResourceWithLocaleEmulator(
+        String(resource?.id ?? ''),
+        String(resource?.basePath ?? ''),
+        String(resource?.fileName ?? resource?.filename ?? '') || undefined
+      )
+      const resultType = result?.type ?? 'info'
+      const resultMessage = result?.message ?? `已通过 LE 转区启动“${resource?.title ?? categoryName.value}”`
+
+      showNotifyByType(resultType, '转区启动', resultMessage)
+
+      if (resultType !== 'error') {
+        await fetchData()
+      }
+    } catch (error) {
+      showNotifyByType('error', '转区启动', error instanceof Error ? error.message : 'LE 转区启动失败')
+    }
+  })()
+}
+
+const handleMtoolLaunchResource = async (resource: any) => {
+  if (!canMtoolLaunch.value) {
+    showNotifyByType('warning', 'MTool 启动', '请先在设置中配置 MTool 路径')
     return
   }
 
-  showNotifyByType('info', '转区启动', `“${resource?.title ?? categoryName.value}”转区启动功能待实现`)
+  try {
+    const result = await window.api.service.launchResourceWithMtool(
+      String(resource?.id ?? ''),
+      String(resource?.basePath ?? ''),
+      String(resource?.fileName ?? resource?.filename ?? '') || undefined
+    )
+    const resultType = result?.type ?? 'info'
+    const resultMessage = result?.message ?? `已通过 MTool 启动“${resource?.title ?? categoryName.value}”`
+
+    showNotifyByType(resultType, 'MTool 启动', resultMessage)
+
+    if (resultType !== 'error') {
+      await fetchData()
+    }
+  } catch (error) {
+    showNotifyByType('error', 'MTool 启动', error instanceof Error ? error.message : '通过 MTool 启动失败')
+  }
 }
 
 const handleShowResourceDetail = (resource: any) => {
@@ -2011,9 +2256,6 @@ const handleToggleSelectResource = (resource: any) => {
 
   if (selectedResourceIds.value.includes(resourceId)) {
     selectedResourceIds.value = selectedResourceIds.value.filter((id) => id !== resourceId)
-    if (!selectedResourceIds.value.length) {
-      selectionModeManuallyEnabled.value = false
-    }
     return
   }
 
@@ -2021,17 +2263,260 @@ const handleToggleSelectResource = (resource: any) => {
 }
 
 const handleBatchSelectionAction = () => {
+  if (resourceSelectionMode.value) {
+    if (!selectedResourceCount.value) {
+      handleExitSelectionMode()
+      return
+    }
+
+    handleDeleteSelectedResources()
+    return
+  }
+
   if (!selectedResourceCount.value) {
     selectionModeManuallyEnabled.value = true
     return
   }
+}
 
-  handleDeleteSelectedResources()
+const handleToggleSelectionMode = () => {
+  if (resourceSelectionMode.value) {
+    handleExitSelectionMode()
+    return
+  }
+
+  selectionModeManuallyEnabled.value = true
+}
+
+const BATCH_ANALYZE_CONCURRENCY = Math.max(2, Math.min(6, (navigator.hardwareConcurrency || 4) - 2 || 2))
+
+function syncBatchImportRefsFromState(targetCategoryId: string) {
+  const state = ensureBatchImportState(targetCategoryId)
+  batchImportItems.value = Array.isArray(state.items) ? state.items : []
+  batchImportFetchInfoEnabled.value = state.fetchInfoEnabled !== false
+  batchAnalyzeCurrent.value = state.analyzeCurrent
+  batchAnalyzeTotal.value = state.analyzeTotal
+  batchAnalyzeMessage.value = state.analyzeMessage
+  batchAnalyzeRunning.value = state.analyzeRunning
+  batchImportRunning.value = state.importRunning
+  batchAnalyzeCancelled.value = state.analyzeCancelled
+  batchAnalyzeInBackground.value = state.analyzeInBackground
+  batchAnalyzeToastDismissed.value = state.analyzeToastDismissed
+  showBatchImportLoading.value = state.showLoading
+  showBatchImportModal.value = state.showPreview
+}
+
+function syncBatchImportStateFromRefs(targetCategoryId: string) {
+  if (!targetCategoryId) {
+    return
+  }
+
+  batchImportStateStore[targetCategoryId] = {
+    items: batchImportItems.value,
+    fetchInfoEnabled: batchImportFetchInfoEnabled.value,
+    analyzeCurrent: batchAnalyzeCurrent.value,
+    analyzeTotal: batchAnalyzeTotal.value,
+    analyzeMessage: batchAnalyzeMessage.value,
+    analyzeRunning: batchAnalyzeRunning.value,
+    importRunning: batchImportRunning.value,
+    analyzeCancelled: batchAnalyzeCancelled.value,
+    analyzeInBackground: batchAnalyzeInBackground.value,
+    analyzeToastDismissed: batchAnalyzeToastDismissed.value,
+    showLoading: showBatchImportLoading.value,
+    showPreview: showBatchImportModal.value
+  }
+}
+
+function patchBatchImportState(targetCategoryId: string, patch: Partial<BatchImportState>) {
+  const currentState = ensureBatchImportState(targetCategoryId)
+  batchImportStateStore[targetCategoryId] = {
+    ...currentState,
+    ...patch
+  }
+
+  if (targetCategoryId === categoryId.value) {
+    syncBatchImportRefsFromState(targetCategoryId)
+  }
+}
+
+function resetBatchImportState(targetCategoryId: string) {
+  batchImportStateStore[targetCategoryId] = createBatchImportState()
+
+  if (targetCategoryId === categoryId.value) {
+    syncBatchImportRefsFromState(targetCategoryId)
+  }
+}
+
+const analyzeBatchImportDirectories = async (targetCategoryId: string, directoryPaths: string[]) => {
+  const items: any[] = new Array(directoryPaths.length)
+  let nextIndex = 0
+  let completedCount = 0
+
+  const updateAnalyzeProgress = (directoryPath?: string, index?: number) => {
+    const currentDirectoryName = getResourceNameFromBasePath(directoryPath || '') || directoryPath || '正在准备分析目录'
+    const currentIndex = typeof index === 'number'
+      ? Math.min(directoryPaths.length, index + 1)
+      : Math.min(directoryPaths.length, completedCount + 1)
+
+    patchBatchImportState(targetCategoryId, {
+      analyzeCurrent: completedCount,
+      analyzeMessage: `正在分析第 ${currentIndex} / ${directoryPaths.length} 个目录\n${currentDirectoryName}`
+    })
+    syncBatchImportOngoingCenter()
+  }
+
+  const worker = async () => {
+    while (!ensureBatchImportState(targetCategoryId).analyzeCancelled) {
+      const currentIndex = nextIndex
+      nextIndex += 1
+
+      if (currentIndex >= directoryPaths.length) {
+        return
+      }
+
+      const directoryPath = directoryPaths[currentIndex]
+      const directoryName = getResourceNameFromBasePath(directoryPath)
+      updateAnalyzeProgress(directoryName || directoryPath, currentIndex)
+
+      try {
+        const analysis = await window.api.service.analyzeGameDirectory(directoryPath)
+        items[currentIndex] = await enrichBatchImportItem({
+          ...analysis,
+          checked: !analysis?.exists && !analysis?.errorMessage && !!analysis?.launchFilePath
+        })
+      } catch (error) {
+        items[currentIndex] = {
+          directoryPath,
+          directoryName,
+          launchFilePath: '',
+          launchFileName: '',
+          exists: false,
+          checked: false,
+          errorMessage: error instanceof Error ? error.message : '分析失败'
+        }
+      } finally {
+        completedCount += 1
+        patchBatchImportState(targetCategoryId, {
+          analyzeCurrent: completedCount
+        })
+        syncBatchImportOngoingCenter()
+      }
+    }
+  }
+
+  const workerCount = Math.min(directoryPaths.length, BATCH_ANALYZE_CONCURRENCY)
+  await Promise.all(Array.from({ length: workerCount }, () => worker()))
+
+  return items.filter(Boolean)
+}
+
+const getBatchProgressDirectoryName = () => {
+  const [, secondLine] = String(batchAnalyzeMessage.value ?? '').split('\n')
+  return getResourceNameFromBasePath(secondLine || batchAnalyzeMessage.value || '')
+    || secondLine
+    || batchAnalyzeMessage.value
+    || '正在准备分析目录'
 }
 
 const handleExitSelectionMode = () => {
   selectionModeManuallyEnabled.value = false
   selectedResourceIds.value = []
+}
+
+const resetBatchLabelDialog = () => {
+  batchLabelValues.value = []
+  batchLabelInputValue.value = ''
+  isBatchLabelSubmitting.value = false
+}
+
+const openBatchLabelDialog = (field: 'tags' | 'types', mode: 'add' | 'remove') => {
+  if (!selectedResourceCount.value) {
+    showNotifyByType('warning', '批量编辑', `请先选择需要批量修改的${categoryName.value}`)
+    return
+  }
+
+  batchLabelField.value = field
+  batchLabelMode.value = mode
+  resetBatchLabelDialog()
+  showBatchLabelModal.value = true
+}
+
+const closeBatchLabelDialog = () => {
+  showBatchLabelModal.value = false
+  resetBatchLabelDialog()
+}
+
+const handleBatchLabelValuesChange = (values: string[]) => {
+  batchLabelValues.value = normalizeSelectedValues(values)
+}
+
+const handleSubmitBatchLabelAction = async () => {
+  if (!selectedResourceIds.value.length) {
+    showNotifyByType('warning', batchLabelTitle.value, `请先选择需要批量修改的${categoryName.value}`)
+    return
+  }
+
+  if (!batchLabelValues.value.length) {
+    showNotifyByType('warning', batchLabelTitle.value, batchLabelField.value === 'tags' ? '请先选择或输入标签' : '请先选择或输入分类')
+    return
+  }
+
+  try {
+    isBatchLabelSubmitting.value = true
+    const result = await window.api.service.batchUpdateResourceLabels(
+      [...selectedResourceIds.value],
+      batchLabelField.value,
+      batchLabelMode.value,
+      [...batchLabelValues.value]
+    )
+    const resultType = result?.type ?? 'info'
+    const affectedCount = Number(result?.data?.affectedIds?.length ?? 0)
+    const valueNames = batchLabelValues.value.join('、')
+    const resultMessage = typeof result?.message === 'string' && result.message
+      ? buildBatchLabelResultMessage({
+          field: batchLabelField.value,
+          mode: batchLabelMode.value,
+          categoryName: categoryName.value,
+          affectedCount,
+          valueNames,
+          fallbackMessage: result.message
+        })
+      : `${batchLabelTitle.value}完成`
+
+    showNotifyByType(resultType, batchLabelTitle.value, resultMessage)
+
+    if (resultType !== 'error') {
+      closeBatchLabelDialog()
+      await fetchData()
+    }
+  } catch (error) {
+    showNotifyByType('error', batchLabelTitle.value, error instanceof Error ? error.message : `${batchLabelTitle.value}失败`)
+  } finally {
+    isBatchLabelSubmitting.value = false
+  }
+}
+
+const buildBatchLabelResultMessage = (params: {
+  field: 'tags' | 'types'
+  mode: 'add' | 'remove'
+  categoryName: string
+  affectedCount: number
+  valueNames: string
+  fallbackMessage: string
+}) => {
+  const { field, mode, categoryName, affectedCount, valueNames, fallbackMessage } = params
+  const normalizedCategoryName = String(categoryName ?? '').trim() || '资源'
+  const normalizedValueNames = String(valueNames ?? '').trim()
+
+  if (!normalizedValueNames) {
+    return fallbackMessage
+  }
+
+  if (field === 'tags') {
+    return `已批量${mode === 'add' ? '添加' : '移除'}${affectedCount}个${normalizedCategoryName}的${normalizedValueNames}标签`
+  }
+
+  return `已批量${mode === 'add' ? '添加' : '移除'}${affectedCount}个${normalizedCategoryName}的${normalizedValueNames}分类`
 }
 
 const handleSelectAllResources = () => {
@@ -2058,39 +2543,37 @@ const handleDeleteSelectedResources = () => {
       return
     }
 
+    const selectedResources = resourceList.value.filter((item) =>
+      selectedResourceIds.value.includes(String(item?.id ?? ''))
+    )
+    const runningCount = selectedResources.filter((item) => item?.isRunning).length
+
     const confirmed = await confirmDialog(
       `批量删除${categoryName.value}`,
-      `确认删除选中的 ${selectedResourceIds.value.length} 个${categoryName.value}吗？`
+      runningCount > 0
+        ? `确认删除选中的 ${selectedResourceIds.value.length} 个${categoryName.value}吗？其中 ${runningCount} 个正在运行，将在真正删除时自动跳过。`
+        : `确认删除选中的 ${selectedResourceIds.value.length} 个${categoryName.value}吗？`
     )
 
     if (!confirmed) {
       return
     }
 
-    let successCount = 0
-    let failedCount = 0
+    try {
+      isBatchDeleting.value = true
+      const result = await window.api.service.deleteResources([...selectedResourceIds.value])
+      const resultType = result?.type ?? 'info'
+      const resultMessage = result?.message ?? '批量删除完成'
 
-    for (const resourceId of selectedResourceIds.value) {
-      try {
-        const result = await window.api.service.deleteResource(resourceId)
-        if (String(result?.type ?? '') === 'error') {
-          failedCount += 1
-        } else {
-          successCount += 1
-        }
-      } catch {
-        failedCount += 1
-      }
+      showNotifyByType(resultType, `批量删除${categoryName.value}`, resultMessage)
+      await fetchData()
+      selectedResourceIds.value = []
+      selectionModeManuallyEnabled.value = false
+    } catch (error) {
+      showNotifyByType('error', `批量删除${categoryName.value}`, error instanceof Error ? error.message : '批量删除失败')
+    } finally {
+      isBatchDeleting.value = false
     }
-
-    showNotifyByType(
-      failedCount > 0 && successCount === 0 ? 'error' : 'success',
-      `批量删除${categoryName.value}`,
-      `已删除 ${successCount} 个，失败 ${failedCount} 个`
-    )
-    await fetchData()
-    selectedResourceIds.value = []
-    selectionModeManuallyEnabled.value = false
   })()
 }
 
@@ -2292,42 +2775,71 @@ const handleToggleCompleted = async (resource: any) => {
             <div class="detail-header__title">{{ categoryName ?? '分类详情' }}</div>
             <div class="detail-header__subtitle" :style="titleMetaStyle">当前共 {{ totalResources }} 条资源</div>
           </div>
-          <n-space class="detail-header__actions" :size="12">
-            <n-button
-              v-if="resourceSelectionMode"
-              @click="handleExitSelectionMode"
+          <div class="detail-header__search">
+            <n-input
+              v-model:value="keyword"
+              clearable
+              placeholder="按名称搜索"
             >
-              退出多选模式
-            </n-button>
-            <n-button
-              v-if="resourceSelectionMode"
-              @click="handleSelectAllResources"
-            >
+              <template #prefix>
+                <n-icon :component="SearchOutline" />
+              </template>
+            </n-input>
+          </div>
+          <div class="detail-header__actions">
+            <n-space :size="12">
+              <n-button
+                :type="resourceSelectionMode ? 'warning' : 'default'"
+                @click="handleToggleSelectionMode"
+              >
+                {{ resourceSelectionMode ? '退出多选' : '多选模式' }}
+              </n-button>
+              <n-button v-if="showBatchImportButton" @click="handleBatchImportClick">
+                批量导入
+              </n-button>
+              <n-button type="primary" :disabled="currentCategoryBatchInBackground" @click="handleAddResource">
+                添加{{ categoryName ?? '资源' }}
+              </n-button>
+            </n-space>
+          </div>
+        </div>
+
+        <div
+          v-if="resourceSelectionMode"
+          class="detail-selection-bar"
+          :style="headerStyle"
+        >
+          <div class="detail-selection-bar__meta" :style="titleMetaStyle">
+            已选择 {{ selectedResourceCount }} 个{{ categoryName ?? '资源' }}
+          </div>
+          <n-space class="detail-selection-bar__actions" :size="12">
+            <n-button @click="handleSelectAllResources">
               全选
             </n-button>
-            <n-button
-              v-if="resourceSelectionMode"
-              @click="handleDeselectAllResources"
-            >
+            <n-button @click="handleDeselectAllResources">
               取消全选
             </n-button>
-            <n-button
-              v-if="resourceSelectionMode"
-              @click="handleInvertSelectedResources"
-            >
+            <n-button @click="handleInvertSelectedResources">
               反选
             </n-button>
+            <n-button @click="openBatchLabelDialog('tags', 'add')">
+              添加标签
+            </n-button>
+            <n-button @click="openBatchLabelDialog('tags', 'remove')">
+              移除标签
+            </n-button>
+            <n-button @click="openBatchLabelDialog('types', 'add')">
+              添加分类
+            </n-button>
+            <n-button @click="openBatchLabelDialog('types', 'remove')">
+              移除分类
+            </n-button>
             <n-button
-              :type="resourceSelectionMode ? 'error' : 'default'"
+              type="error"
+              :loading="isBatchDeleting"
               @click="handleBatchSelectionAction"
             >
-              {{ resourceSelectionMode ? `批量删除（${selectedResourceCount}）` : '批量操作' }}
-            </n-button>
-            <n-button v-if="showBatchImportButton" @click="handleBatchImportClick">
-              批量导入
-            </n-button>
-            <n-button type="primary" @click="handleAddResource">
-              添加{{ categoryName ?? '资源' }}
+              {{ `批量删除（${selectedResourceCount}）` }}
             </n-button>
           </n-space>
         </div>
@@ -2337,7 +2849,7 @@ const handleToggleCompleted = async (resource: any) => {
             <div class="detail-content__inner">
             <n-empty v-if="resourceList.length === 0" :description="`暂无${categoryName || ''}资源，点击按钮添加吧！`">
               <template #extra>
-                <n-button type="primary" @click="handleAddResource">
+                <n-button type="primary" :disabled="currentCategoryBatchInBackground" @click="handleAddResource">
                   添加第一{{categorySettings.addFirst}}{{ categoryName ?? '资源' }}
                 </n-button>
               </template>
@@ -2351,6 +2863,8 @@ const handleToggleCompleted = async (resource: any) => {
                 :category-name="categoryName"
                 :author-label="categorySettings.authorText || '作者'"
                 :start-text="startText"
+                :show-mtool-launch="showMtoolLaunch"
+                :can-mtool-launch="canMtoolLaunch"
                 :show-zone-launch="showZoneLaunch"
                 :can-zone-launch="canZoneLaunch"
                 :show-screenshot-folder="showScreenshotFolder"
@@ -2358,6 +2872,7 @@ const handleToggleCompleted = async (resource: any) => {
                 :selected="selectedResourceIds.includes(String(resource?.id ?? ''))"
                 :selection-mode="resourceSelectionMode"
                 @launch="handleLaunchResource"
+                @mtool-launch="handleMtoolLaunchResource"
                 @stop="handleStopResource"
                 @zone-launch="handleZoneLaunchResource"
                 @show-detail="handleShowResourceDetail"
@@ -2715,7 +3230,7 @@ const handleToggleCompleted = async (resource: any) => {
       v-model:show="showBatchImportLoading"
       preset="card"
       title="批量导入"
-      :mask-closable="batchAnalyzeRunning"
+      :mask-closable="batchProgressRunning"
       :closable="false"
       :auto-focus="false"
       @mask-click="handleBatchImportMaskClick"
@@ -2736,10 +3251,14 @@ const handleToggleCompleted = async (resource: any) => {
           </div>
         </div>
         <div class="batch-import-loading__title">
-          <template v-if="batchAnalyzeRunning && batchAnalyzeTotal > 0">
-            <span class="batch-import-loading__title-text">正在分析第 {{ batchAnalyzeCurrent }} / {{ batchAnalyzeTotal }} 个目录</span>
-            <span class="batch-import-loading__title-directory" :title="getResourceNameFromBasePath(batchAnalyzeMessage.split('\n')[1] || '') || (batchAnalyzeMessage.split('\n')[1] || '')">
-              {{ getResourceNameFromBasePath(batchAnalyzeMessage.split('\n')[1] || '') || (batchAnalyzeMessage.split('\n')[1] || '') }}
+          <template v-if="batchProgressRunning && batchAnalyzeTotal > 0">
+            <span class="batch-import-loading__title-text">
+              {{ batchProgressStage === 'import'
+                ? `正在导入第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个游戏`
+                : `正在分析第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个目录` }}
+            </span>
+            <span class="batch-import-loading__title-directory" :title="getBatchProgressDirectoryName()">
+              {{ getBatchProgressDirectoryName() }}
             </span>
           </template>
           <template v-else>
@@ -2750,7 +3269,9 @@ const handleToggleCompleted = async (resource: any) => {
       <template #footer>
         <div class="modal-footer">
           <n-space justify="end">
-            <n-button type="warning" @click="handleStopBatchImportAnalysis">停止分析</n-button>
+            <n-button type="warning" @click="batchProgressStage === 'import' ? handleBatchImportRunInBackground() : handleStopBatchImportAnalysis()">
+              {{ batchProgressStage === 'import' ? '后台运行' : '停止分析' }}
+            </n-button>
           </n-space>
         </div>
       </template>
@@ -2785,12 +3306,14 @@ const handleToggleCompleted = async (resource: any) => {
         <div class="batch-import-toast__progress-text">{{ batchAnalyzePercent }}%</div>
       </div>
       <div class="batch-import-toast__content">
-        <div class="batch-import-toast__title">正在后台分析游戏目录</div>
+        <div class="batch-import-toast__title">{{ batchProgressStage === 'import' ? '正在后台导入游戏' : '正在后台分析游戏目录' }}</div>
         <div class="batch-import-toast__subtitle">
-          第 {{ batchAnalyzeCurrent }} / {{ batchAnalyzeTotal }} 个目录
+          {{ batchProgressStage === 'import'
+            ? `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个游戏`
+            : `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个目录` }}
         </div>
-        <div class="batch-import-toast__subtitle" :title="getResourceNameFromBasePath(batchAnalyzeMessage.split('\n')[1] || '') || (batchAnalyzeMessage.split('\n')[1] || '')">
-          {{ getResourceNameFromBasePath(batchAnalyzeMessage.split('\n')[1] || '') || (batchAnalyzeMessage.split('\n')[1] || '') }}
+        <div class="batch-import-toast__subtitle" :title="getBatchProgressDirectoryName()">
+          {{ getBatchProgressDirectoryName() }}
         </div>
       </div>
     </div>
@@ -2889,15 +3412,6 @@ const handleToggleCompleted = async (resource: any) => {
                         @update:value="(value) => { batchImportItems[index].gameId = value }"
                       />
                     </div>
-                    <div class="batch-import-item__field batch-import-item__field--checkbox">
-                      <n-checkbox
-                        :checked="item.fetchInfoEnabled !== false"
-                        @click.stop
-                        @update:checked="(value: boolean) => { batchImportItems[index].fetchInfoEnabled = value }"
-                      >
-                        通过插件获取作品信息
-                      </n-checkbox>
-                    </div>
                   </div>
                   <div
                     v-if="item.importResultMessage"
@@ -2917,14 +3431,61 @@ const handleToggleCompleted = async (resource: any) => {
       </template>
       <template #footer>
         <div class="modal-footer">
+          <div class="modal-footer__split">
+            <n-checkbox v-model:checked="batchImportFetchInfoEnabled">
+              通过插件获取作品信息
+            </n-checkbox>
+            <n-space justify="end">
+              <n-button @click="handleCloseBatchImportModal">退出</n-button>
+              <n-button type="primary" :loading="isBatchImportSubmitting" @click="handleConfirmBatchImport">
+                确认导入
+              </n-button>
+            </n-space>
+          </div>
+        </div>
+      </template>
+    </n-modal>
+
+    <n-modal
+      v-model:show="showBatchLabelModal"
+      preset="card"
+      :title="batchLabelTitle"
+      :style="{ width: '560px' }"
+      @after-leave="resetBatchLabelDialog"
+    >
+      <n-space vertical :size="16">
+        <n-alert type="info" :show-icon="false">
+          当前已选择 {{ selectedResourceCount }} 个{{ categoryName ?? '资源' }}
+        </n-alert>
+        <n-form-item :label="batchLabelField === 'tags' ? `${categoryName}标签` : `${categoryName}分类`">
+          <n-select
+            :value="batchLabelValues"
+            multiple
+            filterable
+            tag
+            clearable
+            :options="batchLabelOptions"
+            :input-props="{
+              onKeydown: handleBatchLabelInputKeydown,
+              onBlur: handleBatchLabelInputCommit
+            }"
+            :placeholder="batchLabelPlaceholder"
+            :on-search="handleBatchLabelSearch"
+            :on-create="createSelectOption"
+            @update:value="handleBatchLabelValuesChange"
+          />
+        </n-form-item>
+        <div class="batch-label-modal__footer">
           <n-space justify="end">
-            <n-button @click="handleCloseBatchImportModal">退出</n-button>
-            <n-button type="primary" :loading="isBatchImportSubmitting" @click="handleConfirmBatchImport">
-              确认导入
+            <n-button @click="closeBatchLabelDialog">
+              取消
+            </n-button>
+            <n-button type="primary" :loading="isBatchLabelSubmitting" @click="handleSubmitBatchLabelAction">
+              确认
             </n-button>
           </n-space>
         </div>
-      </template>
+      </n-space>
     </n-modal>
 
     <n-modal
@@ -3419,18 +3980,31 @@ const handleToggleCompleted = async (resource: any) => {
   padding: 0 20px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 16px;
   border-bottom: 1px solid rgba(128, 128, 128, 0.16);
   box-sizing: border-box;
 }
 
 .detail-header__info {
+  flex: 0 1 auto;
   min-width: 0;
+}
+
+.detail-header__search {
+  flex: 0 0 260px;
+  min-width: 200px;
 }
 
 .detail-header__actions {
   flex: 0 0 auto;
+  margin-left: auto;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.detail-header__actions :deep(.n-space) {
+  justify-content: flex-end;
 }
 
 .detail-header__title {
@@ -3445,6 +4019,32 @@ const handleToggleCompleted = async (resource: any) => {
   opacity: 0.65;
 }
 
+.detail-selection-bar {
+  position: absolute;
+  top: 56px;
+  left: 0;
+  right: 0;
+  min-height: 52px;
+  padding: 10px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.16);
+  box-sizing: border-box;
+}
+
+.detail-selection-bar__meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.detail-selection-bar__actions {
+  flex: 0 0 auto;
+}
+
 .detail-content {
   position: absolute;
   top: 56px;
@@ -3453,6 +4053,10 @@ const handleToggleCompleted = async (resource: any) => {
   left: 0;
   overflow: hidden;
   min-height: 0;
+}
+
+.detail-selection-bar + .detail-content {
+  top: 108px;
 }
 
 .detail-scrollbar {
@@ -3693,11 +4297,16 @@ const handleToggleCompleted = async (resource: any) => {
 }
 
 .batch-import-modal__toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+  padding-bottom: 8px;
+  background: rgb(36, 36, 36);
 }
 
 .batch-import-modal__summary {
@@ -3946,6 +4555,79 @@ const handleToggleCompleted = async (resource: any) => {
   }
 }
 
+@media (max-width: 1180px) {
+  .detail-header {
+    height: auto;
+    min-height: 104px;
+    padding: 10px 20px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    row-gap: 12px;
+  }
+
+  .detail-header__info {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .detail-header__search {
+    flex: 0 1 260px;
+    min-width: 220px;
+  }
+
+  .detail-header__actions {
+    flex: 1 1 100%;
+    width: 100%;
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+
+  .detail-header__actions :deep(.n-space) {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .detail-content {
+    top: 104px;
+  }
+
+  .detail-selection-bar {
+    top: 104px;
+    min-height: 116px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    row-gap: 12px;
+  }
+
+  .detail-selection-bar__meta {
+    width: 100%;
+  }
+
+  .detail-selection-bar__actions {
+    width: 100%;
+  }
+
+  .detail-selection-bar__actions :deep(.n-space) {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .detail-selection-bar + .detail-content {
+    top: 232px;
+  }
+}
+
+@media (max-width: 820px) {
+  .detail-selection-bar {
+    min-height: 168px;
+  }
+
+  .detail-selection-bar + .detail-content {
+    top: 284px;
+  }
+}
+
 .modal-footer {
   display: flex;
   align-items: center;
@@ -3953,6 +4635,14 @@ const handleToggleCompleted = async (resource: any) => {
   gap: 12px;
   padding-top: 20px;
   border-top: 1px solid rgba(128, 128, 128, 0.2);
+}
+
+.modal-footer__split {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }
 
 .cover-field {

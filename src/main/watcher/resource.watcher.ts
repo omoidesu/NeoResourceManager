@@ -59,16 +59,20 @@ export class ResourceWatcher {
       return
     }
 
+    const everythingEnabled = await this.isEverythingEnabled()
+
     if (process.platform === 'win32') {
       this.everythingClient = await EverythingService.detectClient()
 
-      if (!this.everythingClient.available) {
+      if (!this.everythingClient.available && everythingEnabled) {
         NotificationQueueService.getInstance().enqueue(
           'warning',
           'Everything 未检测到',
           '未检测到可用的 Everything HTTP 或 CLI，资源失效后将无法自动重定位。'
         )
         logWatcher('everything not found, auto relocation disabled')
+      } else if (!this.everythingClient.available) {
+        logWatcher('everything unavailable but disabled in settings, skip notification')
       } else {
         logWatcher('everything detected', {
           mode: this.everythingClient.mode,
@@ -396,6 +400,14 @@ export class ResourceWatcher {
     }
 
     if (!this.everythingClient.available) {
+      if (!await this.isEverythingEnabled()) {
+        logWatcher('relocation skipped: everything disabled in settings', {
+          resourceId,
+          fileName: resource.fileName,
+        })
+        return
+      }
+
       NotificationQueueService.getInstance().enqueue(
         'warning',
         '无法自动重定位',
@@ -585,6 +597,18 @@ export class ResourceWatcher {
       nextWatchPath: resolveWatchPath(normalizedResource),
       missingStatus: normalizedResource.missingStatus,
     })
+  }
+
+  private async isEverythingEnabled() {
+    const [httpSetting, cliSetting] = await Promise.all([
+      DatabaseService.getSetting(Settings.USE_EVERYTHING_HTTP),
+      DatabaseService.getSetting(Settings.USE_EVERYTHING_CLI),
+    ])
+
+    const httpEnabled = String(httpSetting?.value ?? Settings.USE_EVERYTHING_HTTP.default) === '1'
+    const cliEnabled = String(cliSetting?.value ?? Settings.USE_EVERYTHING_CLI.default) === '1'
+
+    return httpEnabled || cliEnabled
   }
 }
 

@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import {SettingDetail} from "../common/constants";
 import {ResourceForm} from "../main/model/models";
-import type { AppNotificationMessage, ResourceStateChangedMessage } from '../main/service/notification-queue.service'
+import type { AppNotificationMessage, BatchImportProgressMessage, ResourceStateChangedMessage } from '../main/service/notification-queue.service'
 
 // Custom APIs for renderer
 const api = {
@@ -57,7 +57,7 @@ const api = {
       ipcRenderer.invoke('service:update-resource', resourceId, resourceForm),
     checkResourceExistsByPath: (basePath: string) => ipcRenderer.invoke('service:check-resource-exists-by-path', basePath),
     analyzeGamePath: (basePath: string) => ipcRenderer.invoke('service:analyze-game-path', basePath),
-    detectGameEngine: (basePath: string) => ipcRenderer.invoke('service:detect-game-engine', basePath),
+    detectGameEngine: (basePath: string, resourceId?: string | null) => ipcRenderer.invoke('service:detect-game-engine', basePath, resourceId),
     detectGameLaunchFile: (basePath: string) => ipcRenderer.invoke('service:detect-game-launch-file', basePath),
     analyzeGameDirectory: (directoryPath: string, launchFilePath?: string | null) =>
       ipcRenderer.invoke('service:analyze-game-directory', directoryPath, launchFilePath),
@@ -69,8 +69,15 @@ const api = {
       ipcRenderer.invoke('service:capture-cover-screenshot', basePath),
     launchResource: (resourceId: string, basePath: string, fileName?: string | null) =>
       ipcRenderer.invoke('service:launch-resource', resourceId, basePath, fileName),
+    launchResourceWithMtool: (resourceId: string, basePath: string, fileName?: string | null) =>
+      ipcRenderer.invoke('service:launch-resource-with-mtool', resourceId, basePath, fileName),
+    launchResourceWithLocaleEmulator: (resourceId: string, basePath: string, fileName?: string | null) =>
+      ipcRenderer.invoke('service:launch-resource-with-locale-emulator', resourceId, basePath, fileName),
     stopResource: (resourceId: string) => ipcRenderer.invoke('service:stop-resource', resourceId),
     deleteResource: (resourceId: string) => ipcRenderer.invoke('service:delete-resource', resourceId),
+    deleteResources: (resourceIds: string[]) => ipcRenderer.invoke('service:delete-resources', resourceIds),
+    batchUpdateResourceLabels: (resourceIds: string[], field: 'tags' | 'types', mode: 'add' | 'remove', values: string[]) =>
+      ipcRenderer.invoke('service:batch-update-resource-labels', resourceIds, field, mode, values),
     updateResourceRating: (resourceId: string, rating: number) =>
       ipcRenderer.invoke('service:update-resource-rating', resourceId, rating),
     updateResourceFavorite: (resourceId: string, favorite: boolean) =>
@@ -98,6 +105,17 @@ const api = {
 
       return () => {
         ipcRenderer.removeListener('service:resource-state-changed', wrappedListener)
+      }
+    },
+    onBatchImportProgress: (listener: (message: BatchImportProgressMessage) => void) => {
+      const wrappedListener = (_event: Electron.IpcRendererEvent, message: BatchImportProgressMessage) => {
+        listener(message)
+      }
+
+      ipcRenderer.on('service:batch-import-progress', wrappedListener)
+
+      return () => {
+        ipcRenderer.removeListener('service:batch-import-progress', wrappedListener)
       }
     },
   }

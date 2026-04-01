@@ -15,6 +15,15 @@ export type ResourceStateChangedMessage = {
   changedAt: number
 }
 
+export type BatchImportProgressMessage = {
+  categoryId: string
+  stage: 'analyze' | 'import'
+  current: number
+  total: number
+  message: string
+  done?: boolean
+}
+
 export class NotificationQueueService {
   private static instance: NotificationQueueService | null = null
 
@@ -63,6 +72,14 @@ export class NotificationQueueService {
     }
 
     this.targetWebContents.send('service:resource-state-changed', message)
+  }
+
+  pushBatchImportProgress(message: BatchImportProgressMessage) {
+    if (!this.targetWebContents || this.targetWebContents.isDestroyed()) {
+      return
+    }
+
+    this.targetWebContents.send('service:batch-import-progress', message)
   }
 
   dispose() {

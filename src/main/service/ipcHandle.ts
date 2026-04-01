@@ -169,8 +169,8 @@ function registerService() {
     return ResourceService.analyzeGamePath(basePath)
   })
 
-  ipcMain.handle('service:detect-game-engine', async (_event, basePath: string) => {
-    return ResourceService.detectGameEngine(basePath)
+  ipcMain.handle('service:detect-game-engine', async (_event, basePath: string, resourceId?: string | null) => {
+    return ResourceService.detectGameEngine(basePath, resourceId)
   })
 
   ipcMain.handle('service:detect-game-launch-file', async (_event, basePath: string) => {
@@ -197,6 +197,14 @@ function registerService() {
     return ResourceService.launchResource(resourceId, basePath, fileName)
   })
 
+  ipcMain.handle('service:launch-resource-with-mtool', async (_event, resourceId: string, basePath: string, fileName?: string | null) => {
+    return ResourceService.launchResourceWithMtool(resourceId, basePath, fileName)
+  })
+
+  ipcMain.handle('service:launch-resource-with-locale-emulator', async (_event, resourceId: string, basePath: string, fileName?: string | null) => {
+    return ResourceService.launchResourceWithLocaleEmulator(resourceId, basePath, fileName)
+  })
+
   ipcMain.handle('service:stop-resource', async (_event, resourceId: string) => {
     return ResourceService.stopResource(resourceId)
   })
@@ -204,6 +212,17 @@ function registerService() {
   ipcMain.handle('service:delete-resource', async (_event, resourceId: string) => {
     return ResourceService.deleteResource(resourceId)
   })
+
+  ipcMain.handle('service:delete-resources', async (_event, resourceIds: string[]) => {
+    return ResourceService.deleteResources(resourceIds)
+  })
+
+  ipcMain.handle(
+    'service:batch-update-resource-labels',
+    async (_event, resourceIds: string[], field: 'tags' | 'types', mode: 'add' | 'remove', values: string[]) => {
+      return ResourceService.batchUpdateResourceLabels(resourceIds, field, mode, values)
+    }
+  )
 
   ipcMain.handle('service:update-resource-rating', async (_event, resourceId: string, rating: number) => {
     return ResourceService.updateResourceRating(resourceId, rating)

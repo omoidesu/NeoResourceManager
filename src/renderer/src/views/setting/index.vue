@@ -42,6 +42,7 @@ const appearanceSettings = [
 const pathSettings = [
   Settings.CACHE_PATH,
   Settings.LOCALE_EMULATOR_PATH,
+  Settings.MTOOL_PATH,
   Settings.EVERYTHING_CLI_PATH
 ]
 
@@ -99,6 +100,41 @@ const getSelectOptions = (setting: SettingItem) => {
       return panicModeOptions
     default:
       return []
+  }
+}
+
+const getSettingPlaceholder = (setting: SettingItem) => {
+  switch (setting.name) {
+    case Settings.CACHE_PATH.name:
+      return '请选择缓存目录'
+    case Settings.LOCALE_EMULATOR_PATH.name:
+      return '请选择 LEProc.exe 路径'
+    case Settings.MTOOL_PATH.name:
+      return '请选择 MTool.exe、nw.exe，或 MTool 根目录'
+    case Settings.EVERYTHING_CLI_PATH.name:
+      return '请选择 Everything 命令行程序路径'
+    case Settings.EVERYTHING_INTERFACE.name:
+      return '例如 127.0.0.1'
+    case Settings.EVERYTHING_HTTP_PORT.name:
+      return '例如 80'
+    case Settings.EVERYTHING_USERNAME.name:
+      return '请输入 Everything HTTP 用户名'
+    case Settings.EVERYTHING_PASSWORD.name:
+      return '请输入 Everything HTTP 密码'
+    case Settings.PROXY_HOST.name:
+      return '例如 127.0.0.1 或 http://127.0.0.1'
+    case Settings.PROXY_PORT.name:
+      return '例如 7890'
+    case Settings.SHORTCUT_PRINT_SCREEN.name:
+      return '例如 f12'
+    case Settings.SHORTCUT_PANIC_KEY.name:
+      return '例如 escape escape'
+    case Settings.PANIC_OPEN_URL.name:
+      return '例如 https://www.bilibili.com'
+    case Settings.THEME_COLOR.name:
+      return '例如 #63e2b7'
+    default:
+      return `请输入${setting.description}`
   }
 }
 
@@ -170,7 +206,7 @@ const handleSelectFolder = async (setting: SettingItem) => {
 
 const handleSelectExe = async (setting: SettingItem) => {
   try {
-    const selectedPath = await window.api.dialog.selectFile(['.exe', '.bat', '.cmd'])
+    const selectedPath = await window.api.dialog.selectFile(['exe', 'bat', 'cmd'])
     if (!selectedPath) {
       return
     }
@@ -231,6 +267,7 @@ onMounted(() => {
                     <n-select
                       :value="getSettingValue(setting)"
                       :options="getSelectOptions(setting)"
+                      :placeholder="getSettingPlaceholder(setting)"
                       @update:value="(value) => setSettingValue(setting, String(value ?? ''))"
                     />
                   </template>
@@ -239,6 +276,7 @@ onMounted(() => {
                     <div class="settings-path-field">
                       <n-input
                         :value="getSettingValue(setting)"
+                        :placeholder="getSettingPlaceholder(setting)"
                         @update:value="(value) => setSettingValue(setting, value)"
                       />
                       <n-button @click="handlePickPath(setting)">选择</n-button>
@@ -250,6 +288,7 @@ onMounted(() => {
                       :type="setting.name === Settings.EVERYTHING_PASSWORD.name ? 'password' : 'text'"
                       show-password-on="click"
                       :value="getSettingValue(setting)"
+                      :placeholder="getSettingPlaceholder(setting)"
                       @update:value="(value) => setSettingValue(setting, value)"
                     />
                   </template>

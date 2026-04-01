@@ -437,7 +437,7 @@ watch(
 
 <template>
   <n-form-item label="游戏id">
-    <n-input :value="props.metaData.gameId" @update:value="handleGameIdChange" placeholder="请输入游戏id" />
+    <n-input :value="props.metaData.gameId" @update:value="handleGameIdChange" placeholder="请输入作品ID，如 RJ123456" />
   </n-form-item>
   <n-form-item label="昵称">
     <n-input v-model:value="props.metaData.nickname" placeholder="请输入昵称" />
@@ -505,7 +505,7 @@ watch(
       <n-select
         :value="props.metaData.websiteType"
         :options="websiteSelectOptions"
-        placeholder="请选择贩售网站"
+        placeholder="请选择主贩售网站"
         @update:value="handleWebsiteTypeChange"
       />
       <n-button
@@ -529,7 +529,7 @@ watch(
       <n-input
         v-if="!showStructuredWebsite"
         v-model:value="props.metaData.website"
-        placeholder="请输入地址"
+        placeholder="选择贩售网站后自动生成地址"
         readonly
       />
       <div v-else class="website-address-group">
@@ -537,7 +537,7 @@ watch(
         <n-input
           class="website-address-group__input"
           :value="props.metaData.gameId"
-          placeholder="游戏id"
+          placeholder="作品ID"
           readonly
         />
         <span v-if="websiteSuffix" class="website-address-group__suffix" :title="websiteSuffix">{{ websiteSuffix }}</span>
@@ -553,12 +553,12 @@ watch(
         <n-select
           :value="storeItem.websiteType || null"
           :options="websiteSelectOptions"
-          placeholder="请选择贩售网站"
+          placeholder="请选择附加贩售网站"
           @update:value="(value) => handleAdditionalStoreWebsiteTypeChange(storeItem, value)"
         />
         <n-input
           :value="storeItem.workId"
-          placeholder="请输入作品id"
+          placeholder="请输入附加站点作品ID"
           @update:value="(value) => handleAdditionalStoreGameIdChange(storeItem, value)"
         />
         <n-button quaternary type="error" @click="handleRemoveAdditionalStore(index)">
@@ -573,7 +573,7 @@ watch(
         <n-input
           v-if="!getWebsiteParts(storeItem.websiteType, storeItem.workId).template"
           v-model:value="storeItem.website"
-          placeholder="请输入地址"
+          placeholder="选择贩售网站后自动生成附加地址"
           readonly
         />
         <div v-else class="website-address-group">
@@ -583,7 +583,7 @@ watch(
           <n-input
             class="website-address-group__input"
             :value="storeItem.workId"
-            placeholder="作品id"
+            placeholder="作品ID"
             readonly
           />
           <span

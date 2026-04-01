@@ -24,6 +24,8 @@ const props = defineProps<{
   startText?: string
   showZoneLaunch?: boolean
   canZoneLaunch?: boolean
+  showMtoolLaunch?: boolean
+  canMtoolLaunch?: boolean
   showScreenshotFolder?: boolean
   showCompletedToggle?: boolean
   selected?: boolean
@@ -33,6 +35,7 @@ const emit = defineEmits<{
   (event: 'launch', resource: any): void
   (event: 'stop', resource: any): void
   (event: 'zone-launch', resource: any): void
+  (event: 'mtool-launch', resource: any): void
   (event: 'show-detail', resource: any): void
   (event: 'edit', resource: any): void
   (event: 'open-folder', resource: any): void
@@ -75,6 +78,12 @@ const contextMenuOptions = computed(() => ([
     disabled: !canLaunch.value,
     icon: renderMenuIcon(Play)
   },
+  ...(props.showMtoolLaunch ? [{
+    label: '通过 MTool 启动',
+    key: 'mtool-launch',
+    disabled: !props.canMtoolLaunch || !canLaunch.value,
+    icon: renderMenuIcon(Play)
+  }] : []),
   ...(props.showZoneLaunch ? [{
     label: '转区启动',
     key: 'zone-launch',
@@ -265,6 +274,11 @@ const handleSelectMenu = (key: string) => {
 
   if (key === 'zone-launch') {
     emit('zone-launch', props.resource)
+    return
+  }
+
+  if (key === 'mtool-launch') {
+    emit('mtool-launch', props.resource)
     return
   }
 

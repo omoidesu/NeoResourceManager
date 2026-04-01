@@ -2,7 +2,7 @@ import { ElectronAPI } from '@electron-toolkit/preload'
 import {SettingDetail} from "../common/constants";
 import {settings, category} from "../main/db/schema";
 import { ResourceForm } from '../main/model/models'
-import type { AppNotificationMessage, ResourceStateChangedMessage } from '../main/service/notification-queue.service'
+import type { AppNotificationMessage, BatchImportProgressMessage, ResourceStateChangedMessage } from '../main/service/notification-queue.service'
 
 declare global {
   interface Window {
@@ -47,21 +47,26 @@ declare global {
         updateResource: (resourceId: string, resourceForm: ResourceForm) => Promise<any>,
         checkResourceExistsByPath: (basePath: string) => Promise<any>,
         analyzeGamePath: (basePath: string) => Promise<any>,
-        detectGameEngine: (basePath: string) => Promise<any>,
+        detectGameEngine: (basePath: string, resourceId?: string | null) => Promise<any>,
         detectGameLaunchFile: (basePath: string) => Promise<any>,
         analyzeGameDirectory: (directoryPath: string, launchFilePath?: string | null) => Promise<any>,
         importBatchGameDirectories: (categoryId: string, items: any[]) => Promise<any>,
         fetchResourceInfo: (websiteId: string, resourceId: string) => Promise<any>,
         captureCoverScreenshot: (basePath: string) => Promise<any>,
         launchResource: (resourceId: string, basePath: string, fileName?: string | null) => Promise<any>,
+        launchResourceWithMtool: (resourceId: string, basePath: string, fileName?: string | null) => Promise<any>,
+        launchResourceWithLocaleEmulator: (resourceId: string, basePath: string, fileName?: string | null) => Promise<any>,
         stopResource: (resourceId: string) => Promise<any>,
         deleteResource: (resourceId: string) => Promise<any>,
+        deleteResources: (resourceIds: string[]) => Promise<any>,
+        batchUpdateResourceLabels: (resourceIds: string[], field: 'tags' | 'types', mode: 'add' | 'remove', values: string[]) => Promise<any>,
         updateResourceRating: (resourceId: string, rating: number) => Promise<any>,
         updateResourceFavorite: (resourceId: string, favorite: boolean) => Promise<any>,
         updateResourceCompleted: (resourceId: string, completed: boolean) => Promise<any>,
         startNotificationPush: () => Promise<boolean>,
         onNotificationPush: (listener: (message: AppNotificationMessage) => void) => () => void,
         onResourceStateChanged: (listener: (message: ResourceStateChangedMessage) => void) => () => void,
+        onBatchImportProgress: (listener: (message: BatchImportProgressMessage) => void) => () => void,
       }
     }
   }

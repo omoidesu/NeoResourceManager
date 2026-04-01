@@ -36,7 +36,10 @@ export const seedDatabase = async () => {
 async function initDatabase(recordExist: boolean) {
   const resolveSettingDefault = (item: typeof Settings[keyof typeof Settings]) => {
     if (item.name === Settings.CACHE_PATH.name) {
-      return app.isPackaged ? path.join(app.getPath('userData'), 'cache') : path.join(__dirname, 'cache')
+      // Development should keep using the workspace-level cache directory so
+      // screenshots/thumbnails stay next to the project instead of being
+      // seeded under the compiled main-process output tree.
+      return app.isPackaged ? path.join(app.getPath('userData'), 'cache') : path.join(process.cwd(), 'cache')
     }
 
     return item.default
@@ -133,7 +136,7 @@ async function initDatabase(recordExist: boolean) {
         ], '画师', '打开')
       }, {
         id: generateId(),
-        name: '漫画',
+        name: '多图',
         description: '多图',
         value: 'multi_image',
         typeId: dictTypes[0].id,
@@ -220,7 +223,7 @@ async function initDatabase(recordExist: boolean) {
         typeId: dictTypes[1].id
       }
     ]
-    const gameEngineList = [
+        const gameEngineList = [
       // 通用游戏引擎
       {
         id: generateId(),
@@ -262,8 +265,35 @@ async function initDatabase(recordExist: boolean) {
       // galgame引擎
       {
         id: generateId(),
+        name: 'Kirikiri 2',
+        description: '吉里吉里2',
+        value: 'kirikiri2',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'krkr.png'
+        }
+      }, {
+        id: generateId(),
+        name: 'Kirikiri Z',
+        description: '吉里吉里Z 32位',
+        value: 'kirikiriz',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'krkr.png'
+        }
+      }, {
+        id: generateId(),
+        name: 'Kirikiri Z 64Bit',
+        description: '吉里吉里Z 64位',
+        value: 'kirikiriz64',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'krkr.png'
+        }
+      }, {
+        id: generateId(),
         name: 'KIRIKIRI',
-        description: '吉里吉里',
+        description: '吉里吉里（未细分）',
         value: 'kirikiri',
         typeId: dictTypes[2].id,
         extra: {
@@ -289,9 +319,18 @@ async function initDatabase(recordExist: boolean) {
         }
       }, {
         id: generateId(),
-        name: "Ren'py",
-        description: "Ren'py",
+        name: "Ren'Py",
+        description: "Ren'Py 32位/未区分",
         value: 'renpy',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'renpy.ico'
+        }
+      }, {
+        id: generateId(),
+        name: "Ren'Py x64",
+        description: "Ren'Py 64位",
+        value: 'renpy64',
         typeId: dictTypes[2].id,
         extra: {
           icon: 'renpy.ico'
@@ -334,8 +373,25 @@ async function initDatabase(recordExist: boolean) {
         extra: {
           icon: 'rmva.png'
         }
-      },
-      {
+      }, {
+        id: generateId(),
+        name: 'RPG Maker MKXP (Z)',
+        description: 'MKXP-Z / mkxp 32位',
+        value: 'mkxpz',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'rpgmaker.png'
+        }
+      }, {
+        id: generateId(),
+        name: 'RPG Maker MKXP (Z) 64Bit',
+        description: 'MKXP-Z / mkxp 64位',
+        value: 'mkxpz64',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'rpgmaker.png'
+        }
+      }, {
         id: generateId(),
         name: 'RPG Maker MV',
         description: 'RPG Maker MV',
@@ -355,8 +411,62 @@ async function initDatabase(recordExist: boolean) {
         }
       }, {
         id: generateId(),
+        name: 'Wolf RPG Ver 1.00 - 2.24',
+        description: 'Wolf RPG Editor 1.00 - 2.24',
+        value: 'wolf224',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'wolf.png'
+        }
+      }, {
+        id: generateId(),
+        name: 'Wolf RPG Ver 2.25 - 2.99',
+        description: 'Wolf RPG Editor 2.25 - 2.99',
+        value: 'wolf225',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'wolf.png'
+        }
+      }, {
+        id: generateId(),
+        name: 'Wolf RPG Ver 3.00 - 3.322',
+        description: 'Wolf RPG Editor 3.00 - 3.322',
+        value: 'wolf300',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'wolf.png'
+        }
+      }, {
+        id: generateId(),
+        name: 'Wolf RPG Ver 3.323 - 3.396',
+        description: 'Wolf RPG Editor 3.323 - 3.396',
+        value: 'wolf3322',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'wolf.png'
+        }
+      }, {
+        id: generateId(),
+        name: 'Wolf RPG Ver 3.500 - 3.611',
+        description: 'Wolf RPG Editor 3.500 - 3.611',
+        value: 'wolf350',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'wolf.png'
+        }
+      }, {
+        id: generateId(),
+        name: 'Wolf RPG Ver 3.612 - 3.684',
+        description: 'Wolf RPG Editor 3.612 - 3.684',
+        value: 'wolf3612',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'wolf.png'
+        }
+      }, {
+        id: generateId(),
         name: 'Wolf RPG Editor',
-        description: '狼头',
+        description: '狼头（未细分）',
         value: 'wolf',
         typeId: dictTypes[2].id,
         extra: {
@@ -371,8 +481,34 @@ async function initDatabase(recordExist: boolean) {
         extra: {
           icon: 'srpg.png'
         }
-      },
-      {
+      }, {
+        id: generateId(),
+        name: 'SMILE GAME BUILDER x86',
+        description: 'SMILE GAME BUILDER 原生版',
+        value: 'smilegamebuilder',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'smilegamebuilder.png'
+        }
+      }, {
+        id: generateId(),
+        name: 'SMILE GAME BUILDER +Unity x86',
+        description: 'SMILE GAME BUILDER + Unity 32位',
+        value: 'smilegamebuilder_unity',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'smilegamebuilder.png'
+        }
+      }, {
+        id: generateId(),
+        name: 'SMILE GAME BUILDER +Unity x64',
+        description: 'SMILE GAME BUILDER + Unity 64位',
+        value: 'smilegamebuilder_unity64',
+        typeId: dictTypes[2].id,
+        extra: {
+          icon: 'smilegamebuilder.png'
+        }
+      }, {
         id: generateId(),
         name: 'Pixel Game Maker MV',
         description: 'Pixel Game Maker MV',
@@ -598,7 +734,7 @@ async function initDatabase(recordExist: boolean) {
         sort: 3
       }, {
         id: generateId(),
-        name: '多图',
+        name: '漫画',
         emoji: '📚',
         referenceId: dictDataList[3].id,
         sort: 4
