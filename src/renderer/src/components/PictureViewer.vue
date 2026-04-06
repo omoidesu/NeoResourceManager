@@ -8,9 +8,11 @@ const props = withDefaults(defineProps<{
   imagePaths: string[]
   initialIndex?: number
   scrollMode?: string
+  allowDelete?: boolean
 }>(), {
   initialIndex: 0,
-  scrollMode: 'zoom'
+  scrollMode: 'zoom',
+  allowDelete: true
 })
 
 const emit = defineEmits<{
@@ -20,8 +22,12 @@ const emit = defineEmits<{
 
 const currentIndex = ref(0)
 const scale = ref(1)
-const imageSrcMap = ref<Record<string, string>>({})
+const fitScale = ref(1)
+const thumbSrcMap = ref<Record<string, string>>({})
+const fullImageUrlMap = ref<Record<string, string>>({})
 const stageRef = ref<HTMLDivElement | null>(null)
+const imageScrollContainerRef = ref<HTMLDivElement | null>(null)
+const imageElementRef = ref<HTMLImageElement | null>(null)
 const thumbRefs = ref<HTMLElement[]>([])
 const stageCursor = ref<'default' | 'left' | 'right' | 'grab' | 'grabbing'>('default')
 const isDragging = ref(false)
@@ -49,38 +55,79 @@ const clampIndex = (index: number) => {
 }
 
 const currentImagePath = computed(() => props.imagePaths[currentIndex.value] ?? '')
-const currentImageUrl = computed(() => imageSrcMap.value[currentImagePath.value] ?? '')
+const currentImageUrl = computed(() => fullImageUrlMap.value[currentImagePath.value] ?? '')
+const effectiveScale = computed(() => Number((fitScale.value * scale.value).toFixed(4)))
 const hasPrevious = computed(() => props.imagePaths.length > 1)
 const hasNext = computed(() => props.imagePaths.length > 1)
 
-const loadPreviewImage = async (filePath: string) => {
+const loadThumbPreviewImage = async (filePath: string) => {
   const normalizedPath = String(filePath ?? '').trim()
-  if (!normalizedPath || imageSrcMap.value[normalizedPath]) {
+  if (!normalizedPath || thumbSrcMap.value[normalizedPath]) {
     return
   }
 
   try {
-    const dataUrl = await window.api.dialog.readImageAsDataUrl(normalizedPath)
-    if (!dataUrl) {
+    const previewUrl = await window.api.dialog.getImagePreviewUrl(normalizedPath, {
+      maxWidth: 240,
+      maxHeight: 160,
+      fit: 'cover',
+      quality: 72
+    })
+    if (!previewUrl) {
       return
     }
 
-    imageSrcMap.value = {
-      ...imageSrcMap.value,
-      [normalizedPath]: dataUrl
+    thumbSrcMap.value = {
+      ...thumbSrcMap.value,
+      [normalizedPath]: previewUrl
     }
   } catch {
     // ignore preview load failure and keep fallback state
   }
 }
 
-const loadAllPreviewImages = async () => {
-  await Promise.all(props.imagePaths.map((imagePath) => loadPreviewImage(imagePath)))
+const loadMainImage = async (filePath: string) => {
+  const normalizedPath = String(filePath ?? '').trim()
+  if (!normalizedPath || fullImageUrlMap.value[normalizedPath]) {
+    return
+  }
+
+  try {
+    const imageUrl = await window.api.dialog.readImageAsDataUrl(normalizedPath)
+    if (!imageUrl) {
+      return
+    }
+
+    fullImageUrlMap.value = {
+      ...fullImageUrlMap.value,
+      [normalizedPath]: imageUrl
+    }
+  } catch {
+    // ignore full image load failure and keep fallback state
+  }
 }
 
-const getScrollbarContainer = () => {
-  return stageRef.value?.querySelector('.n-scrollbar-container') as HTMLDivElement | null
+const preloadThumbsAroundCurrent = async (radius = 8) => {
+  const tasks: Promise<void>[] = []
+  const start = Math.max(0, currentIndex.value - radius)
+  const end = Math.min(props.imagePaths.length - 1, currentIndex.value + radius)
+
+  for (let index = start; index <= end; index += 1) {
+    const imagePath = props.imagePaths[index]
+    if (imagePath) {
+      tasks.push(loadThumbPreviewImage(imagePath))
+    }
+  }
+
+  await Promise.all(tasks)
 }
+
+const clearImageCache = () => {
+  thumbSrcMap.value = {}
+  fullImageUrlMap.value = {}
+}
+
+const getScrollbarContainer = () => imageScrollContainerRef.value
 
 const setThumbRef = (element: unknown, index: number) => {
   if (!(element instanceof HTMLElement)) {
@@ -110,6 +157,7 @@ const closeViewer = () => {
 
 const resetZoom = () => {
   scale.value = 1
+  updateFitScale()
   void nextTick(() => {
     const container = getScrollbarContainer()
     if (!container) {
@@ -230,7 +278,7 @@ const updateStageCursor = (event?: MouseEvent) => {
     return
   }
 
-  if (scale.value > 1) {
+  if (effectiveScale.value > 1) {
     stageCursor.value = 'grab'
     return
   }
@@ -267,7 +315,7 @@ const handleStageMouseLeave = () => {
 }
 
 const handleStageMouseDown = (event: MouseEvent) => {
-  if (scale.value <= 1) {
+  if (effectiveScale.value <= 1) {
     return
   }
 
@@ -310,7 +358,33 @@ const stopDragging = () => {
   }
 
   isDragging.value = false
-  stageCursor.value = scale.value > 1 ? 'grab' : 'default'
+  stageCursor.value = effectiveScale.value > 1 ? 'grab' : 'default'
+}
+
+const updateFitScale = () => {
+  const stageElement = stageRef.value
+  const imageElement = imageElementRef.value
+
+  if (!stageElement || !imageElement) {
+    fitScale.value = 1
+    return
+  }
+
+  const stageWidth = Math.max(1, stageElement.clientWidth - 28)
+  const stageHeight = Math.max(1, stageElement.clientHeight)
+  const naturalWidth = Number(imageElement.naturalWidth ?? 0)
+  const naturalHeight = Number(imageElement.naturalHeight ?? 0)
+
+  if (!naturalWidth || !naturalHeight) {
+    fitScale.value = 1
+    return
+  }
+
+  fitScale.value = Math.max(0.1, Math.min(stageWidth / naturalWidth, stageHeight / naturalHeight))
+}
+
+const handleImageLoad = () => {
+  updateFitScale()
 }
 
 const handleKeydown = (event: KeyboardEvent) => {
@@ -375,6 +449,10 @@ const handleCopyImage = async () => {
 }
 
 const handleDeleteImage = () => {
+  if (!props.allowDelete) {
+    return
+  }
+
   const filePath = currentImagePath.value
   if (!filePath) {
     return
@@ -390,12 +468,14 @@ watch(
   () => props.show,
   (visible) => {
     if (!visible) {
+      clearImageCache()
       return
     }
 
     currentIndex.value = clampIndex(props.initialIndex)
     resetZoom()
-    void loadAllPreviewImages()
+    void loadMainImage(currentImagePath.value)
+    void preloadThumbsAroundCurrent()
     void scrollActiveThumbIntoView()
   },
   { immediate: true }
@@ -410,6 +490,8 @@ watch(
 
     currentIndex.value = clampIndex(value)
     resetZoom()
+    void loadMainImage(currentImagePath.value)
+    void preloadThumbsAroundCurrent()
     void scrollActiveThumbIntoView()
   }
 )
@@ -418,26 +500,33 @@ watch(
   () => props.imagePaths,
   () => {
     currentIndex.value = clampIndex(currentIndex.value)
-    void loadAllPreviewImages()
+    clearImageCache()
+    void loadMainImage(currentImagePath.value)
+    void preloadThumbsAroundCurrent()
     void scrollActiveThumbIntoView()
   },
   { deep: true }
 )
 
 watch(currentIndex, () => {
+  void loadMainImage(currentImagePath.value)
+  void preloadThumbsAroundCurrent()
   void scrollActiveThumbIntoView()
+  updateFitScale()
 })
 
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown)
   window.addEventListener('mousemove', handleGlobalMouseMove)
   window.addEventListener('mouseup', stopDragging)
+  window.addEventListener('resize', updateFitScale)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
   window.removeEventListener('mousemove', handleGlobalMouseMove)
   window.removeEventListener('mouseup', stopDragging)
+  window.removeEventListener('resize', updateFitScale)
 })
 </script>
 
@@ -527,7 +616,7 @@ onBeforeUnmount(() => {
             </template>
             默认程序打开
           </n-tooltip>
-          <n-tooltip trigger="hover">
+          <n-tooltip v-if="props.allowDelete" trigger="hover">
             <template #trigger>
               <n-button quaternary circle @click="handleDeleteImage">
                 <template #icon>
@@ -556,22 +645,24 @@ onBeforeUnmount(() => {
         @mouseleave="handleStageMouseLeave"
         @mousedown="handleStageMouseDown"
       >
-        <n-scrollbar class="picture-viewer__image-scrollbar" trigger="none">
+        <div ref="imageScrollContainerRef" class="picture-viewer__image-scroll-container">
           <div class="picture-viewer__image-center">
             <img
+              ref="imageElementRef"
               v-if="currentImageUrl"
               :src="currentImageUrl"
               :alt="currentImagePath"
               class="picture-viewer__image"
-              :style="{ transform: `scale(${scale})` }"
+              :style="{ transform: `scale(${effectiveScale})` }"
               draggable="false"
+              @load="handleImageLoad"
             />
             <div v-else class="picture-viewer__empty">
               <n-icon :component="EyeOutline" size="26" />
               <span>暂无图片</span>
             </div>
           </div>
-        </n-scrollbar>
+        </div>
       </div>
 
       <div class="picture-viewer__meta" @click.stop>
@@ -589,7 +680,7 @@ onBeforeUnmount(() => {
             :class="{ 'picture-viewer__thumb--active': index === currentIndex }"
             @click="currentIndex = index; resetZoom()"
           >
-            <img v-if="imageSrcMap[imagePath]" :src="imageSrcMap[imagePath]" :alt="imagePath" class="picture-viewer__thumb-image" />
+            <img v-if="thumbSrcMap[imagePath]" :src="thumbSrcMap[imagePath]" :alt="imagePath" class="picture-viewer__thumb-image" />
             <div v-else class="picture-viewer__thumb-placeholder">加载中</div>
           </div>
         </div>
@@ -638,12 +729,14 @@ onBeforeUnmount(() => {
 }
 
 .picture-viewer__stage {
+  position: relative;
   min-height: 0;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  padding: 0 14px;
+  padding: 0;
   cursor: pointer;
 }
 
@@ -663,35 +756,38 @@ onBeforeUnmount(() => {
   cursor: grabbing;
 }
 
-.picture-viewer__image-scrollbar {
-  width: 100%;
-  height: 100%;
+.picture-viewer__image-scroll-container {
+  position: absolute;
+  inset: 0 14px;
+  overflow: auto;
+  min-height: 0;
+  min-width: 0;
 }
 
-.picture-viewer__image-scrollbar :deep(.n-scrollbar-container),
-.picture-viewer__image-scrollbar :deep(.n-scrollbar-content) {
+.picture-viewer__image-scroll-container {
   width: 100%;
   height: 100%;
-}
-
-.picture-viewer__image-scrollbar :deep(.n-scrollbar-content) {
   display: flex;
   align-items: center;
   justify-content: center;
+  min-height: 0;
+  min-width: 0;
 }
 
 .picture-viewer__image-center {
+  box-sizing: border-box;
   width: 100%;
-  min-width: 100%;
-  min-height: 100%;
+  height: 100%;
+  max-height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
 }
 
 .picture-viewer__image {
-  max-width: 100%;
-  max-height: 100%;
+  max-width: none;
+  max-height: none;
   object-fit: contain;
   transition: transform 0.12s ease;
   transform-origin: center center;

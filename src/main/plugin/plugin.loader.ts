@@ -23,6 +23,10 @@ type PluginFetchMethod = (
 
 export type ExternalFetchPluginDefinition = {
   websiteName: string
+  dictTypeName?: string
+  websiteValue?: string
+  websiteDescription?: string
+  websiteExtra?: Record<string, unknown>
   fetchInfo: PluginFetchMethod
   beforeEnable?: PluginLifecycleHook
   afterEnable?: PluginLifecycleHook
@@ -144,6 +148,10 @@ export class PluginLoader {
 
     return new class extends FetchInfo {
       protected readonly websiteName = normalizedDefinition.websiteName
+      protected readonly websiteTypeName = normalizedDefinition.dictTypeName
+      protected readonly websiteValue = normalizedDefinition.websiteValue
+      protected readonly websiteDescription = normalizedDefinition.websiteDescription
+      protected readonly websiteExtra = normalizedDefinition.websiteExtra
 
       protected async fetchInfo(resourceId: string): Promise<FetchResourceInfoResult> {
         const result = new FetchResourceInfoResult()
@@ -159,6 +167,7 @@ export class PluginLoader {
         result.name = data.name ?? ''
         result.author = data.author ?? ''
         result.cover = data.cover ?? ''
+        result.website = data.website ?? ''
         result.tag = Array.isArray(data.tag) ? Array.from(new Set(data.tag.filter(Boolean))) : []
         result.type = Array.isArray(data.type) ? Array.from(new Set(data.type.filter(Boolean))) : []
         return result

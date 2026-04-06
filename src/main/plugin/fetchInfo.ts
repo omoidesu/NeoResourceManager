@@ -8,6 +8,10 @@ export abstract class FetchInfo {
   private websiteId!: string
   // 对应dict_data表中name字段
   protected abstract readonly websiteName: string
+  protected readonly websiteTypeName?: string
+  protected readonly websiteValue?: string
+  protected readonly websiteDescription?: string
+  protected readonly websiteExtra?: Record<string, unknown>
   protected logger: any
 
   public constructor() {
@@ -19,20 +23,7 @@ export abstract class FetchInfo {
       throw new Error(`${this.constructor.name}: websiteName field cannot be empty`);
     }
 
-    const dictType = await DatabaseService.getDictTypeByName(DictType.STORE_WEBSITE_TYPE);
-    let typeId
-    if (!dictType) {
-      // 字典类型不存在 直接重建类型
-      typeId = generateId()
-      await DatabaseService.insertDictType({
-        id: typeId,
-        name: DictType.STORE_WEBSITE_TYPE,
-        description: '贩售网站'
-      })
-    } else {
-      typeId = dictType.id
-    }
-    const dictData = await DatabaseService.getDictDataByTypeAndDataName(typeId, this.websiteName);
+    const dictData = await this.resolveWebsiteDictData()
 
     if (!dictData) {
       throw new Error(`${this.websiteName} is not registered in the database`);
@@ -83,6 +74,67 @@ export abstract class FetchInfo {
     if (!dictData.extra) dictData.extra = {}
     dictData.extra.enableFetchInfo = enable
     await DatabaseService.updateDictData(dictData)
+  }
+
+  private async resolveWebsiteDictData() {
+    const typeDefinitions = [
+      { name: DictType.GAME_SITE_TYPE, description: '贩售网站' },
+      { name: DictType.IMAGE_SITE_TYPE, description: '图片网站' },
+      { name: DictType.MANGA_SITE_TYPE, description: '漫画网站' }
+    ]
+
+    const prioritizedTypeDefinitions = this.websiteTypeName
+      ? [
+          ...typeDefinitions.filter((item) => item.name === this.websiteTypeName),
+          ...typeDefinitions.filter((item) => item.name !== this.websiteTypeName)
+        ]
+      : typeDefinitions
+
+    for (const definition of prioritizedTypeDefinitions) {
+      const typeId = await this.ensureDictType(definition.name, definition.description)
+      const dictData = await DatabaseService.getDictDataByTypeAndDataName(typeId, this.websiteName)
+      if (dictData) {
+        return dictData
+      }
+
+      if (definition.name === this.websiteTypeName) {
+        return await this.registerWebsiteDictData(typeId)
+      }
+    }
+
+    return null
+  }
+
+  private async ensureDictType(typeName: string, description: string) {
+    const dictType = await DatabaseService.getDictTypeByName(typeName)
+    if (dictType) {
+      return dictType.id
+    }
+
+    const typeId = generateId()
+    await DatabaseService.insertDictType({
+      id: typeId,
+      name: typeName,
+      description
+    })
+    return typeId
+  }
+
+  private async registerWebsiteDictData(typeId: string) {
+    const websiteId = generateId()
+    await DatabaseService.insertDictData({
+      id: websiteId,
+      typeId,
+      name: this.websiteName,
+      description: this.websiteDescription ?? '',
+      value: this.websiteValue ?? this.websiteName.trim().toLowerCase().replace(/\s+/g, '-'),
+      extra: {
+        enableFetchInfo: true,
+        ...(this.websiteExtra ?? {})
+      }
+    })
+
+    return await DatabaseService.getDictDataById(websiteId)
   }
 
   protected abstract fetchInfo(resourceId: string): Promise<FetchResourceInfoResult>

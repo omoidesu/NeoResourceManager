@@ -1,5 +1,6 @@
 import {integer, primaryKey, real, sqliteTable, text} from 'drizzle-orm/sqlite-core';
 import {relations, sql} from 'drizzle-orm';
+import { ResourceLaunchMode } from '../../common/constants'
 
 // --- 1. 基础配置与分类 ---
 
@@ -48,6 +49,7 @@ export const resourceLog = sqliteTable('resource_log', {
   endTime: integer('end_time', {mode: 'timestamp'}),
   duration: integer('duration').default(0),
   pid: integer('pid'),
+  launchMode: text('launch_mode').default(ResourceLaunchMode.NORMAL),
   isDeleted: integer('is_deleted', {mode: 'boolean'}).default(false),
 })
 
@@ -67,6 +69,7 @@ export const gameMeta = sqliteTable('game_meta', {
 export const softwareMeta = sqliteTable('software_meta', {
   resourceId: text('resource_id').primaryKey().references(() => resource.id),
   version: text('version'),
+  commandLineArgs: text('command_line_args'),
 });
 
 export const singleImageMeta = sqliteTable('single_image_meta', {
@@ -79,6 +82,8 @@ export const singleImageMeta = sqliteTable('single_image_meta', {
 export const multiImageMeta = sqliteTable('multi_image_meta', {
   resourceId: text('resource_id').primaryKey().references(() => resource.id),
   pageCount: integer('page_count'),
+  translator: text('translator'),
+  lastReadPage: integer('last_read_page').default(0),
 });
 
 export const videoMeta = sqliteTable('video_meta', {
@@ -195,6 +200,7 @@ export const dictData = sqliteTable('dict_data', {
     rule?: object;
     icon?: string;
     url?: object;
+    mtool?: boolean;
   }>(),
   isDeleted: integer('is_deleted', {mode: 'boolean'}).default(false),
 });
@@ -208,6 +214,8 @@ export const resourceRelations = relations(resource, ({one, many}) => ({
   // 扩展表关联
   gameMeta: one(gameMeta, {fields: [resource.id], references: [gameMeta.resourceId]}),
   softwareMeta: one(softwareMeta, {fields: [resource.id], references: [softwareMeta.resourceId]}),
+  singleImageMeta: one(singleImageMeta, {fields: [resource.id], references: [singleImageMeta.resourceId]}),
+  multiImageMeta: one(multiImageMeta, {fields: [resource.id], references: [multiImageMeta.resourceId]}),
   videoMeta: one(videoMeta, {fields: [resource.id], references: [videoMeta.resourceId]}),
   asmrMeta: one(asmrMeta, {fields: [resource.id], references: [asmrMeta.resourceId]}),
   // 列表关联

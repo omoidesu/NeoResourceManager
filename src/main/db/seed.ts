@@ -1,6 +1,6 @@
 import {db} from './index'
 import {category, settings, dictType, dictData} from './schema'
-import {eq} from 'drizzle-orm'
+import {and, eq} from 'drizzle-orm'
 import {generateId} from '../util/id-generator'
 import {Settings, DictType} from "../../common/constants";
 import path from 'path'
@@ -8,52 +8,214 @@ import {app} from 'electron'
 import { createLogger } from '../util/logger';
 
 const logger = createLogger('db-seed')
-
-/**
- * 初始化数据库
- */
-export const seedDatabase = async () => {
-  try {
-    // 检查setting表初始化状态
-    const initSetting = await db.query.settings.findFirst({
-      where: eq(settings.name, Settings.INIT_STATUS.name)
-    });
-
-    // 不存在该设置项表示数据库未初始化
-    if (initSetting && initSetting.value === '1') {
-      logger.info('database has been initialized')
-      return
-    }
-
-    await initDatabase(!!initSetting);
-    logger.info('initialize database successfully')
-
-  } catch (error) {
-    logger.error('initialize database failed', error);
-  }
+type SeedTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0]
+type SettingItem = typeof Settings[keyof typeof Settings]
+type SeedDefinitions = {
+  settings: Array<{ item: SettingItem; value: string }>
+  dictTypes: Array<typeof dictType.$inferInsert>
+  dictDataList: Array<typeof dictData.$inferInsert>
+  categories: Array<typeof category.$inferInsert>
 }
 
-async function initDatabase(recordExist: boolean) {
-  const resolveSettingDefault = (item: typeof Settings[keyof typeof Settings]) => {
-    if (item.name === Settings.CACHE_PATH.name) {
-      // Development should keep using the workspace-level cache directory so
-      // screenshots/thumbnails stay next to the project instead of being
-      // seeded under the compiled main-process output tree.
-      return app.isPackaged ? path.join(app.getPath('userData'), 'cache') : path.join(process.cwd(), 'cache')
-    }
-
-    return item.default
+function resolveCurrentAppVersion() {
+  const configuredVersion = String(Settings.VERSION.default ?? '').trim()
+  if (configuredVersion && configuredVersion !== '__VERSION__') {
+    return configuredVersion
   }
 
-  const createCategoryExtra = (
-    extendTable: string,
-    resourcePathType: string | null,
-    addFirst: string,
-    extensions?: string[],
-    authorText?: string,
-    startText?: string,
-    enableFetchInfo: boolean = false
-  ) => ({
+  const appVersion = String(app.getVersion?.() ?? '').trim()
+  return appVersion || '0.0.0'
+}
+
+function compareVersion(left: string, right: string) {
+  const normalize = (input: string) => String(input ?? '')
+    .trim()
+    .replace(/^[^0-9]*/, '')
+    .split('.')
+    .map((part) => {
+      const matched = part.match(/\d+/)
+      return matched ? Number(matched[0]) : 0
+    })
+
+  const leftParts = normalize(left)
+  const rightParts = normalize(right)
+  const maxLength = Math.max(leftParts.length, rightParts.length)
+
+  for (let index = 0; index < maxLength; index += 1) {
+    const leftValue = leftParts[index] ?? 0
+    const rightValue = rightParts[index] ?? 0
+
+    if (leftValue > rightValue) return 1
+    if (leftValue < rightValue) return -1
+  }
+
+  return 0
+}
+
+function upsertSetting(
+  tx: SeedTransaction,
+  item: typeof Settings[keyof typeof Settings],
+  value: string
+) {
+  const existing = tx
+    .select()
+    .from(settings)
+    .where(eq(settings.name, item.name))
+    .get()
+
+  if (existing) {
+    const nextValue = item.name === Settings.INIT_STATUS.name || item.name === Settings.VERSION.name
+      ? value
+      : existing.value
+
+    tx.update(settings)
+      .set({
+        description: item.description,
+        value: nextValue,
+        isDeleted: false
+      })
+      .where(eq(settings.id, existing.id))
+      .run()
+
+    return existing.id
+  }
+
+  const id = generateId()
+  tx.insert(settings).values({
+    id,
+    name: item.name,
+    description: item.description,
+    value
+  }).run()
+
+  return id
+}
+
+function upsertDictType(
+  tx: SeedTransaction,
+  item: typeof dictType.$inferInsert
+) {
+  const existing = tx
+    .select()
+    .from(dictType)
+    .where(eq(dictType.name, String(item.name)))
+    .get()
+
+  if (existing) {
+    tx.update(dictType)
+      .set({
+        description: item.description,
+        isDeleted: false
+      })
+      .where(eq(dictType.id, existing.id))
+      .run()
+
+    return existing.id
+  }
+
+  const id = String(item.id ?? generateId())
+  tx.insert(dictType).values({
+    ...item,
+    id
+  }).run()
+  return id
+}
+
+function upsertDictData(
+  tx: SeedTransaction,
+  item: typeof dictData.$inferInsert
+) {
+  const existing = tx
+    .select()
+    .from(dictData)
+    .where(and(
+      eq(dictData.typeId, String(item.typeId)),
+      eq(dictData.value, String(item.value))
+    ))
+    .get()
+
+  if (existing) {
+    tx.update(dictData)
+      .set({
+        name: item.name,
+        description: item.description,
+        extra: item.extra,
+        isDeleted: false
+      })
+      .where(eq(dictData.id, existing.id))
+      .run()
+
+    return existing.id
+  }
+
+  const id = String(item.id ?? generateId())
+  tx.insert(dictData).values({
+    ...item,
+    id
+  }).run()
+  return id
+}
+
+function insertCategoryIfMissing(
+  tx: SeedTransaction,
+  item: typeof category.$inferInsert
+) {
+  const existing = tx
+    .select()
+    .from(category)
+    .where(eq(category.name, String(item.name)))
+    .get()
+
+  if (existing) {
+    tx.update(category)
+      .set({
+        emoji: item.emoji ?? existing.emoji,
+        referenceId: item.referenceId ?? existing.referenceId,
+        sort: item.sort ?? existing.sort,
+        isDeleted: false
+      })
+      .where(eq(category.id, existing.id))
+      .run()
+    return existing.id
+  }
+
+  const id = String(item.id ?? generateId())
+  tx.insert(category).values({
+    ...item,
+    id
+  }).run()
+  return id
+}
+
+function resolveSettingDefault(item: SettingItem, currentVersion: string) {
+  if (item.name === Settings.CACHE_PATH.name) {
+    // Development should keep using the workspace-level cache directory so
+    // screenshots/thumbnails stay next to the project instead of being
+    // seeded under the compiled main-process output tree.
+    return app.isPackaged ? path.join(app.getPath('userData'), 'cache') : path.join(process.cwd(), 'cache')
+  }
+
+  if (item.name === Settings.VERSION.name) {
+    return currentVersion
+  }
+
+  if (item.name === Settings.INIT_STATUS.name) {
+    return '1'
+  }
+
+  return item.default
+}
+
+function createCategoryExtra(
+  extendTable: string,
+  resourcePathType: string | null,
+  addFirst: string,
+  extensions?: string[],
+  authorText?: string,
+  startText?: string,
+  enableFetchInfo: boolean = false
+) {
+  return {
     extendTable,
     resourcePathType,
     ...(extensions ? { extensions } : {}),
@@ -61,715 +223,786 @@ async function initDatabase(recordExist: boolean) {
     authorText,
     startText,
     enableFetchInfo
+  }
+}
+
+function createEngineExtra(icon: string, mtool: boolean = false) {
+  return {
+    icon,
+    ...(mtool ? { mtool: true } : {})
+  }
+}
+
+function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
+  const settingsList = Object.values(Settings).map((item) => ({
+    item,
+    value: resolveSettingDefault(item, currentVersion)
+  }))
+
+  const dictTypes = [
+    {
+      id: generateId(),
+      name: DictType.RESOURCE_TYPE,
+      description: '资源基础类型'
+    }, {
+      id: generateId(),
+      name: DictType.LANGUAGE_TYPE,
+      description: '资源语言'
+    }, {
+      id: generateId(),
+      name: DictType.GAME_ENGINE_TYPE,
+      description: '游戏引擎'
+    }, {
+      id: generateId(),
+      name: DictType.GAME_SITE_TYPE,
+      description: '游戏贩售网站'
+    }, {
+      id: generateId(),
+      name: DictType.IMAGE_SITE_TYPE,
+      description: '图片网站'
+    }, {
+      id: generateId(),
+      name: DictType.MANGA_SITE_TYPE,
+      description: '漫画网站'
+    }
+  ]
+
+  const dictTypeIds = {
+    resource: dictTypes[0].id,
+    language: dictTypes[1].id,
+    engine: dictTypes[2].id,
+    gameSite: dictTypes[3].id,
+    imageSite: dictTypes[4].id,
+    mangaSite: dictTypes[5].id,
+  }
+
+  const categoryList = [
+    {
+      id: generateId(),
+      name: '游戏',
+      description: '游戏',
+      value: 'games',
+      typeId: dictTypeIds.resource,
+      extra: createCategoryExtra('game_meta', 'file', '个', ['exe', 'swf', 'html', 'bat'], '开发商/社团', '启动'),
+    }, {
+      id: generateId(),
+      name: '软件',
+      description: '软件',
+      value: 'software',
+      typeId: dictTypeIds.resource,
+      extra: createCategoryExtra('software_meta', 'file', '个', ['exe', 'bat', 'ps1', 'lnk'], '开发者', '运行')
+    }, {
+      id: generateId(),
+      name: '单图',
+      description: '单图',
+      value: 'single_image',
+      typeId: dictTypeIds.resource,
+      extra: createCategoryExtra('single_image_meta', 'file', '个', [
+        'png',
+        'jpg',
+        'jpeg',
+        'webp',
+        'gif',
+        'bmp',
+        'svg'
+      ], '画师', '打开')
+    }, {
+      id: generateId(),
+      name: '多图',
+      description: '多图',
+      value: 'multi_image',
+      typeId: dictTypeIds.resource,
+      extra: createCategoryExtra('multi_image_meta', 'folder', '个', [], '画师', '阅读')
+    }, {
+      id: generateId(),
+      name: '视频',
+      description: '视频',
+      value: 'video',
+      typeId: dictTypeIds.resource,
+      extra: createCategoryExtra('video_meta', 'file', '个', [
+        'mp4',
+        'avi',
+        'mkv',
+        'mov',
+        'wmv',
+        'flv',
+        'webm',
+        'm4v'
+      ], '发行商/制作者', '播放')
+    }, {
+      id: generateId(),
+      name: '番剧',
+      description: '番剧',
+      value: 'mulit_video',
+      typeId: dictTypeIds.resource,
+      extra: createCategoryExtra('video_meta', 'folder', '个', [], '发行商/制作者', '播放')
+    }, {
+      id: generateId(),
+      name: '音声',
+      description: '音声',
+      value: 'asmr',
+      typeId: dictTypeIds.resource,
+      extra: createCategoryExtra('asmr_meta', 'file', '个', [
+        'mp3',
+        'wav',
+        'flac',
+        'aac',
+        'ogg',
+        'm4a',
+        'wma',
+        'opus'
+      ], '制作社团', '播放')
+    }, {
+      id: generateId(),
+      name: '小说',
+      description: '小说',
+      value: 'novel',
+      typeId: dictTypeIds.resource,
+      extra: createCategoryExtra('novel_meta', 'file', '本', ['txt', 'epub', 'mobi', 'pdf'], '作者', '阅读')
+    }, {
+      id: generateId(),
+      name: '网站',
+      description: '网站',
+      value: 'website',
+      typeId: dictTypeIds.resource,
+      extra: createCategoryExtra('website_meta', null, '个', [], '', '访问')
+    }
+  ]
+
+  const languageList = [
+    {
+      id: generateId(),
+      name: '中文',
+      description: '中文',
+      value: 'zh',
+      typeId: dictTypeIds.language
+    }, {
+      id: generateId(),
+      name: '英文',
+      description: '英文',
+      value: 'en',
+      typeId: dictTypeIds.language
+    }, {
+      id: generateId(),
+      name: '日语',
+      description: '日语',
+      value: 'ja',
+      typeId: dictTypeIds.language
+    }, {
+      id: generateId(),
+      name: '其他',
+      description: '其他',
+      value: 'other',
+      typeId: dictTypeIds.language
+    }
+  ]
+
+  const gameEngineList = [
+    {
+      id: generateId(),
+      name: 'Unity',
+      description: 'Unity',
+      value: 'unity',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('unity.ico')
+    },{
+      id: generateId(),
+      name: 'Unreal Engine',
+      description: '虚幻引擎',
+      value: 'unreal',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('unreal.png')
+    }, {
+      id: generateId(),
+      name: 'Cocos',
+      description: 'Cocos系列',
+      value: 'cocos',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('cocos.ico')
+    }, {
+      id: generateId(),
+      name: 'Godot',
+      description: 'Godot',
+      value: 'godot',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('godot.png')
+    },
+    {
+      id: generateId(),
+      name: 'Kirikiri 2',
+      description: '吉里吉里2',
+      value: 'kirikiri2',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('krkr.png', true)
+    }, {
+      id: generateId(),
+      name: 'Kirikiri Z',
+      description: '吉里吉里Z 32位',
+      value: 'kirikiriz',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('krkr.png', true)
+    }, {
+      id: generateId(),
+      name: 'Kirikiri Z 64Bit',
+      description: '吉里吉里Z 64位',
+      value: 'kirikiriz64',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('krkr.png', true)
+    }, {
+      id: generateId(),
+      name: 'KIRIKIRI',
+      description: '吉里吉里（未细分）',
+      value: 'kirikiri',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('krkr.png', true)
+    }, {
+      id: generateId(),
+      name: 'NScripter',
+      description: 'NScripter',
+      value: 'nscripter',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('nscripter.ico')
+    }, {
+      id: generateId(),
+      name: 'Tyrano',
+      description: 'TyranoScript/TyranoBuilder',
+      value: 'tyrano',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('tyrano.ico', true)
+    }, {
+      id: generateId(),
+      name: "Ren'Py",
+      description: "Ren'Py 32位/未区分",
+      value: 'renpy',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('renpy.ico', true)
+    }, {
+      id: generateId(),
+      name: "Ren'Py x64",
+      description: "Ren'Py 64位",
+      value: 'renpy64',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('renpy.ico', true)
+    },
+    {
+      id: generateId(),
+      name: 'RPG Maker 2000/2003',
+      description: 'RPG Maker 远古版本',
+      value: 'rm2k',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('rm2k.png')
+    }, {
+      id: generateId(),
+      name: 'RPG Maker XP',
+      description: '太阳',
+      value: 'rmxp',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('rmxp.png', true)
+    }, {
+      id: generateId(),
+      name: 'RPG Maker VX',
+      description: '马头',
+      value: 'rmvx',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('rmvx.png', true)
+    }, {
+      id: generateId(),
+      name: 'RPG Maker VX Ace',
+      description: '龙头',
+      value: 'rmva',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('rmva.png', true)
+    }, {
+      id: generateId(),
+      name: 'RPG Maker MKXP (Z)',
+      description: 'MKXP-Z / mkxp 32位',
+      value: 'mkxpz',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('rpgmaker.png', true)
+    }, {
+      id: generateId(),
+      name: 'RPG Maker MKXP (Z) 64Bit',
+      description: 'MKXP-Z / mkxp 64位',
+      value: 'mkxpz64',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('rpgmaker.png', true)
+    }, {
+      id: generateId(),
+      name: 'RPG Maker MV',
+      description: 'RPG Maker MV',
+      value: 'rmmv',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('rmmv.png', true)
+    }, {
+      id: generateId(),
+      name: 'RPG Maker MZ',
+      description: 'RPG Maker MZ',
+      value: 'rmmz',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('rmmz.png', true)
+    }, {
+      id: generateId(),
+      name: 'Wolf RPG Ver 1.00 - 2.24',
+      description: 'Wolf RPG Editor 1.00 - 2.24',
+      value: 'wolf224',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('wolf.png', true)
+    }, {
+      id: generateId(),
+      name: 'Wolf RPG Ver 2.25 - 2.99',
+      description: 'Wolf RPG Editor 2.25 - 2.99',
+      value: 'wolf225',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('wolf.png', true)
+    }, {
+      id: generateId(),
+      name: 'Wolf RPG Ver 3.00 - 3.322',
+      description: 'Wolf RPG Editor 3.00 - 3.322',
+      value: 'wolf300',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('wolf.png', true)
+    }, {
+      id: generateId(),
+      name: 'Wolf RPG Ver 3.323 - 3.396',
+      description: 'Wolf RPG Editor 3.323 - 3.396',
+      value: 'wolf3322',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('wolf.png', true)
+    }, {
+      id: generateId(),
+      name: 'Wolf RPG Ver 3.500 - 3.611',
+      description: 'Wolf RPG Editor 3.500 - 3.611',
+      value: 'wolf350',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('wolf.png', true)
+    }, {
+      id: generateId(),
+      name: 'Wolf RPG Ver 3.612 - 3.684',
+      description: 'Wolf RPG Editor 3.612 - 3.684',
+      value: 'wolf3612',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('wolf.png', true)
+    }, {
+      id: generateId(),
+      name: 'Wolf RPG Editor',
+      description: '狼头（未细分）',
+      value: 'wolf',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('wolf.png', true)
+    }, {
+      id: generateId(),
+      name: 'SRPG Studio',
+      description: '战棋游戏',
+      value: 'srpg',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('srpg.png', true)
+    }, {
+      id: generateId(),
+      name: 'SMILE GAME BUILDER x86',
+      description: 'SMILE GAME BUILDER 原生版',
+      value: 'smilegamebuilder',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('smilegamebuilder.png', true)
+    }, {
+      id: generateId(),
+      name: 'SMILE GAME BUILDER +Unity x86',
+      description: 'SMILE GAME BUILDER + Unity 32位',
+      value: 'smilegamebuilder_unity',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('smilegamebuilder.png', true)
+    }, {
+      id: generateId(),
+      name: 'SMILE GAME BUILDER +Unity x64',
+      description: 'SMILE GAME BUILDER + Unity 64位',
+      value: 'smilegamebuilder_unity64',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('smilegamebuilder.png', true)
+    }, {
+      id: generateId(),
+      name: 'Pixel Game Maker MV',
+      description: 'Pixel Game Maker MV',
+      value: 'pgmv',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('pixel.png', true)
+    }, {
+      id: generateId(),
+      name: 'RPG Developer Bakin',
+      description: 'RPG Developer Bakin',
+      value: 'bakin',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('bakin.png', true)
+    },
+    {
+      id: generateId(),
+      name: 'Flash',
+      description: 'Flash',
+      value: 'flash',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('flash.png')
+    }, {
+      id: generateId(),
+      name: '网页游戏',
+      description: '网页游戏',
+      value: 'web',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('html.svg')
+    },
+    {
+      id: generateId(),
+      name: 'C#',
+      description: 'C sharp不是c井',
+      value: 'csharp',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('csharp.ico')
+    }, {
+      id: generateId(),
+      name: 'C++',
+      description: 'C艹',
+      value: 'cplusplus',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('cplusplus.ico')
+    }, {
+      id: generateId(),
+      name: 'Java',
+      description: '爪哇',
+      value: 'java',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('java.ico')
+    }, {
+      id: generateId(),
+      name: 'Python',
+      description: '屁眼通红',
+      value: 'python',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('python.ico')
+    }, {
+      id: generateId(),
+      name: 'JavaScript',
+      description: '女子小学生！',
+      value: 'javascript',
+      typeId: dictTypeIds.engine,
+      extra: createEngineExtra('javascript.png')
+    }, {
+      id: generateId(),
+      name: '其他',
+      description: '其他',
+      value: 'other',
+      typeId: dictTypeIds.engine
+    }
+  ]
+
+  const gameSiteList = [
+    {
+      id: generateId(),
+      name: 'DLsite',
+      description: '',
+      value: 'dlsite',
+      typeId: dictTypeIds.gameSite,
+      extra: {
+        rule: {
+          startsWith: {
+            maniax: 'RJ',
+            boots: 'BJ',
+            pro: 'VJ'
+          }
+        },
+        icon: 'dlsite.ico',
+        url: {
+          games: 'https://www.dlsite.com/{rule}/work/=/product_id/{}.html'
+        }
+      }
+    }, {
+      id: generateId(),
+      name: 'FANZA',
+      description: '',
+      value: 'fanza',
+      typeId: dictTypeIds.gameSite,
+      extra: {
+        icon: 'fanza.ico',
+        url: {
+          games: 'https://www.dmm.co.jp/dc/doujin/-/detail/=/cid={}',
+          video: 'https://video.dmm.co.jp/av/content/?id={}'
+        }
+      }
+    }, {
+      id: generateId(),
+      name: 'Steam',
+      description: '',
+      value: 'steam',
+      typeId: dictTypeIds.gameSite,
+      extra: {
+        icon: 'steam.ico',
+        url: {
+          games: 'https://store.steampowered.com/app/{}'
+        }
+      }
+    }, {
+      id: generateId(),
+      name: 'bokiboki',
+      description: '',
+      value: 'bokiboki',
+      typeId: dictTypeIds.gameSite,
+      extra: {
+        icon: 'bokiboki.png',
+        url: {
+          games: 'https://boki2.fun/r18/proitem?obj_id={}'
+        }
+      }
+    }, {
+      id: generateId(),
+      name: '072 Project',
+      description: '',
+      value: '072project',
+      typeId: dictTypeIds.gameSite,
+      extra: {
+        icon: '072project.ico',
+        url: {
+          games: 'https://072project.com/r18/cn/shop/{}'
+        }
+      }
+    }, {
+      id: generateId(),
+      name: 'Getchu',
+      description: '',
+      value: 'getchu',
+      typeId: dictTypeIds.gameSite,
+      extra: {
+        icon: 'getchu.ico',
+        url: {
+          games: 'https://www.getchu.com/item/{}'
+        }
+      }
+    }, {
+      id: generateId(),
+      name: 'Booth',
+      description: '',
+      value: 'booth',
+      typeId: dictTypeIds.gameSite,
+      extra: {
+        icon: 'booth.ico',
+        url: {
+          games: 'https://booth.pm/ja/items/{}'
+        }
+      }
+    }, {
+      id: generateId(),
+      name: 'Freem',
+      description: '',
+      value: 'freem',
+      typeId: dictTypeIds.gameSite,
+      extra: {
+        icon: 'freem.ico',
+        url: {
+          games: 'https://www.freem.ne.jp/win/game/{}'
+        }
+      }
+    }
+  ]
+
+  const imageSiteList = [
+    {
+      id: generateId(),
+      name: 'Pixiv',
+      description: '',
+      value: 'pixiv',
+      typeId: dictTypeIds.imageSite,
+      extra: {
+        url: {
+          image: 'https://www.pixiv.net/artworks/{}'
+        }
+      }
+    }
+  ]
+
+  const mangaSiteList = [
+    {
+      id: generateId(),
+      name: 'ComicMeta',
+      description: '综合搜索漫画信息',
+      value: 'comic-meta',
+      typeId: dictTypeIds.mangaSite,
+      extra: {
+        enableFetchInfo: true
+      }
+    }, {
+      id: generateId(),
+      name: 'E-Hentai',
+      description: 'ComicMeta 子来源：E-Hentai',
+      value: 'e-hentai',
+      typeId: dictTypeIds.mangaSite,
+      extra: {
+        enableFetchInfo: false,
+        url: {
+          manga: 'https://e-hentai.org/?f_search={}'
+        }
+      }
+    }, {
+      id: generateId(),
+      name: 'nhentai',
+      description: 'ComicMeta 子来源：nhentai',
+      value: 'nhentai',
+      typeId: dictTypeIds.mangaSite,
+      extra: {
+        enableFetchInfo: false,
+        url: {
+          manga: 'https://nhentai.net/search/?q={}'
+        }
+      }
+    }
+  ]
+
+  const dictDataList = [
+    ...categoryList,
+    ...languageList,
+    ...gameEngineList,
+    ...gameSiteList,
+    ...imageSiteList,
+    ...mangaSiteList,
+  ]
+
+  const categoryDefinitions = [
+    { name: '游戏', emoji: '🎮', value: 'games', sort: 1 },
+    { name: '软件', emoji: '💻', value: 'software', sort: 2 },
+    { name: '图片', emoji: '🖼️', value: 'single_image', sort: 3 },
+    { name: '漫画', emoji: '📚', value: 'multi_image', sort: 4 },
+    { name: '电影', emoji: '🎬', value: 'video', sort: 5 },
+    { name: '番剧', emoji: '📺', value: 'mulit_video', sort: 6 },
+    { name: '音声', emoji: '🎧', value: 'asmr', sort: 7 },
+    { name: '小说', emoji: '📖', value: 'novel', sort: 8 },
+    { name: '网站', emoji: '🌐', value: 'website', sort: 9 }
+  ]
+
+  const categories = categoryDefinitions.map((item) => ({
+    id: generateId(),
+    name: item.name,
+    emoji: item.emoji,
+    referenceId: dictDataList.find((dictItem) => dictItem.typeId === dictTypeIds.resource && dictItem.value === item.value)?.id,
+    sort: item.sort
+  }))
+
+  return {
+    settings: settingsList,
+    dictTypes,
+    dictDataList,
+    categories
+  }
+}
+
+function syncSeedData(tx: SeedTransaction, definitions: SeedDefinitions, options: { includeCategories: boolean }) {
+  definitions.settings.forEach(({ item, value }) => {
+    upsertSetting(tx, item, value)
   })
 
-  db.transaction((tx) => {
-    if (!recordExist) {
-      const defaultSettings = Object.values(Settings).map(item => (
-        {
-          id: generateId(),
-          name: item.name,
-          description: item.description,
-          value: resolveSettingDefault(item)
-        }
-      ));
+  const dictTypeIdMap = new Map<string, string>()
+  definitions.dictTypes.forEach((item) => {
+    const id = upsertDictType(tx, item)
+    dictTypeIdMap.set(String(item.name), id)
+  })
 
-      tx.insert(settings).values(defaultSettings).run()
-    } else {
-      tx.update(settings)
-        .set({value: '1'})
-        .where(eq(settings.name, 'initStatus')).run()
+  const dictDataIdMap = new Map<string, string>()
+  definitions.dictDataList.forEach((item) => {
+    const resolvedTypeId = dictTypeIdMap.get(String(item.typeId)) ?? String(item.typeId)
+    const id = upsertDictData(tx, {
+      ...item,
+      typeId: resolvedTypeId
+    })
+    dictDataIdMap.set(`${resolvedTypeId}:${item.value}`, id)
+  })
+
+  if (!options.includeCategories) {
+    return
+  }
+
+  definitions.categories.forEach((item) => {
+    const referenceId = item.referenceId
+      ? dictDataIdMap.get(`${definitions.dictTypes[0].id}:${definitions.dictDataList.find((dictItem) => dictItem.id === item.referenceId)?.value}`)
+      : undefined
+
+    insertCategoryIfMissing(tx, {
+      ...item,
+      referenceId: referenceId ?? item.referenceId
+    })
+  })
+}
+
+function ensureBaseSeed(tx: SeedTransaction, currentVersion: string, options: { includeCategories: boolean }) {
+  const definitions = buildSeedDefinitions(currentVersion)
+  syncSeedData(tx, definitions, options)
+}
+
+function applyVersionSeedPatches(
+  tx: SeedTransaction,
+  options: {
+    fromVersion: string
+    toVersion: string
+    includeCategories: boolean
+  }
+) {
+  if (compareVersion(options.fromVersion, options.toVersion) >= 0) {
+    return
+  }
+
+  ensureBaseSeed(tx, options.toVersion, {
+    includeCategories: options.includeCategories
+  })
+}
+
+/**
+ * 初始化数据库
+ */
+export const seedDatabase = async () => {
+  try {
+    const currentVersion = resolveCurrentAppVersion()
+
+    // 检查setting表初始化状态
+    const initSetting = await db.query.settings.findFirst({
+      where: eq(settings.name, Settings.INIT_STATUS.name)
+    });
+    const versionSetting = await db.query.settings.findFirst({
+      where: eq(settings.name, Settings.VERSION.name)
+    });
+
+    const storedVersion = String(versionSetting?.value ?? '').trim() || '0.0.0'
+    const initialized = initSetting?.value === '1'
+    const needsUpgrade = !versionSetting || compareVersion(currentVersion, storedVersion) > 0
+
+    // 不存在该设置项表示数据库未初始化
+    if (initialized && !needsUpgrade) {
+      logger.info('database seed is up to date', {
+        currentVersion,
+        databaseVersion: storedVersion
+      })
+      return
     }
 
-    // 字典类型
-    const dictTypes = [
-      {
-        id: generateId(),
-        name: DictType.RESOURCE_TYPE,
-        description: '资源基础类型'
-      }, {
-        id: generateId(),
-        name: DictType.LANGUAGE_TYPE,
-        description: '资源语言'
-      }, {
-        id: generateId(),
-        name: DictType.GAME_ENGINE_TYPE,
-        description: '游戏引擎'
-      }, {
-        id: generateId(),
-        name: DictType.STORE_WEBSITE_TYPE,
-        description: '贩售网站'
-      }
-    ]
-    tx.insert(dictType).values(dictTypes).run()
+    await initDatabase({
+      includeCategories: !initialized,
+      fromVersion: storedVersion,
+      currentVersion
+    });
+    logger.info('initialize database successfully', {
+      currentVersion,
+      databaseVersion: storedVersion,
+      mode: initialized ? 'upgrade' : 'initialize'
+    })
 
-    // 字典数据
-    const categoryList = [
-      {
-        id: generateId(),
-        name: '游戏',
-        description: '游戏',
-        value: 'games',
-        typeId: dictTypes[0].id,
-        extra: createCategoryExtra('game_meta', 'file', '个', ['exe', 'swf', 'html', 'bat'], '开发商/社团', '启动'),
-      }, {
-        id: generateId(),
-        name: '软件',
-        description: '软件',
-        value: 'software',
-        typeId: dictTypes[0].id,
-        extra: createCategoryExtra('software_meta', 'file', '个', ['exe', 'bat', 'ps1'], '开发者', '运行')
-      }, {
-        id: generateId(),
-        name: '单图',
-        description: '单图',
-        value: 'single_image',
-        typeId: dictTypes[0].id,
-        extra: createCategoryExtra('single_image_meta', 'file', '个', [
-          'png',
-          'jpg',
-          'jpeg',
-          'webp',
-          'gif',
-          'bmp',
-          'svg'
-        ], '画师', '打开')
-      }, {
-        id: generateId(),
-        name: '多图',
-        description: '多图',
-        value: 'multi_image',
-        typeId: dictTypes[0].id,
-        extra: createCategoryExtra('multi_image_meta', 'folder', '个', [], '画师', '阅读')
-      }, {
-        id: generateId(),
-        name: '视频',
-        description: '视频',
-        value: 'video',
-        typeId: dictTypes[0].id,
-        extra: createCategoryExtra('video_meta', 'file', '个', [
-          'mp4',
-          'avi',
-          'mkv',
-          'mov',
-          'wmv',
-          'flv',
-          'webm',
-          'm4v'
-        ], '发行商/制作者', '播放')
-      }, {
-        id: generateId(),
-        name: '番剧',
-        description: '番剧',
-        value: 'mulit_video',
-        typeId: dictTypes[0].id,
-        extra: createCategoryExtra('video_meta', 'folder', '个', [], '发行商/制作者', '播放')
-      }, {
-        id: generateId(),
-        name: '音声',
-        description: '音声',
-        value: 'asmr',
-        typeId: dictTypes[0].id,
-        extra: createCategoryExtra('asmr_meta', 'file', '个', [
-          'mp3',
-          'wav',
-          'flac',
-          'aac',
-          'ogg',
-          'm4a',
-          'wma',
-          'opus'
-        ], '制作社团', '播放')
-      }, {
-        id: generateId(),
-        name: '小说',
-        description: '小说',
-        value: 'novel',
-        typeId: dictTypes[0].id,
-        extra: createCategoryExtra('novel_meta', 'file', '本', ['txt', 'epub', 'mobi', 'pdf'], '作者', '阅读')
-      }, {
-        id: generateId(),
-        name: '网站',
-        description: '网站',
-        value: 'website',
-        typeId: dictTypes[0].id,
-        extra: createCategoryExtra('website_meta', null, '个', [], '', '访问')
-      }
-    ]
-    const languageList = [
-      {
-        id: generateId(),
-        name: '中文',
-        description: '中文',
-        value: 'zh',
-        typeId: dictTypes[1].id
-      }, {
-        id: generateId(),
-        name: '英文',
-        description: '英文',
-        value: 'en',
-        typeId: dictTypes[1].id
-      }, {
-        id: generateId(),
-        name: '日语',
-        description: '日语',
-        value: 'ja',
-        typeId: dictTypes[1].id
-      }, {
-        id: generateId(),
-        name: '其他',
-        description: '其他',
-        value: 'other',
-        typeId: dictTypes[1].id
-      }
-    ]
-        const gameEngineList = [
-      // 通用游戏引擎
-      {
-        id: generateId(),
-        name: 'Unity',
-        description: 'Unity',
-        value: 'unity',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'unity.ico'
-        }
-      },{
-        id: generateId(),
-        name: 'Unreal Engine',
-        description: '虚幻引擎',
-        value: 'unreal',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'unreal.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'Cocos',
-        description: 'Cocos系列',
-        value: 'cocos',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'cocos.ico'
-        }
-      }, {
-        id: generateId(),
-        name: 'Godot',
-        description: 'Godot',
-        value: 'godot',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'godot.png'
-        }
-      },
-      // galgame引擎
-      {
-        id: generateId(),
-        name: 'Kirikiri 2',
-        description: '吉里吉里2',
-        value: 'kirikiri2',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'krkr.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'Kirikiri Z',
-        description: '吉里吉里Z 32位',
-        value: 'kirikiriz',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'krkr.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'Kirikiri Z 64Bit',
-        description: '吉里吉里Z 64位',
-        value: 'kirikiriz64',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'krkr.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'KIRIKIRI',
-        description: '吉里吉里（未细分）',
-        value: 'kirikiri',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'krkr.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'NScripter',
-        description: 'NScripter',
-        value: 'nscripter',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'nscripter.ico'
-        }
-      }, {
-        id: generateId(),
-        name: 'Tyrano',
-        description: 'TyranoScript/TyranoBuilder',
-        value: 'tyrano',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'tyrano.ico'
-        }
-      }, {
-        id: generateId(),
-        name: "Ren'Py",
-        description: "Ren'Py 32位/未区分",
-        value: 'renpy',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'renpy.ico'
-        }
-      }, {
-        id: generateId(),
-        name: "Ren'Py x64",
-        description: "Ren'Py 64位",
-        value: 'renpy64',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'renpy.ico'
-        }
-      },
-      // rpg 引擎
-      {
-        id: generateId(),
-        name: 'RPG Maker 2000/2003',
-        description: 'RPG Maker 远古版本',
-        value: 'rm2k',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'rm2k.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'RPG Maker XP',
-        description: '太阳',
-        value: 'rmxp',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'rmxp.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'RPG Maker VX',
-        description: '马头',
-        value: 'rmvx',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'rmvx.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'RPG Maker VX Ace',
-        description: '龙头',
-        value: 'rmva',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'rmva.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'RPG Maker MKXP (Z)',
-        description: 'MKXP-Z / mkxp 32位',
-        value: 'mkxpz',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'rpgmaker.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'RPG Maker MKXP (Z) 64Bit',
-        description: 'MKXP-Z / mkxp 64位',
-        value: 'mkxpz64',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'rpgmaker.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'RPG Maker MV',
-        description: 'RPG Maker MV',
-        value: 'rmmv',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'rmmv.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'RPG Maker MZ',
-        description: 'RPG Maker MZ',
-        value: 'rmmz',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'rmmz.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'Wolf RPG Ver 1.00 - 2.24',
-        description: 'Wolf RPG Editor 1.00 - 2.24',
-        value: 'wolf224',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'wolf.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'Wolf RPG Ver 2.25 - 2.99',
-        description: 'Wolf RPG Editor 2.25 - 2.99',
-        value: 'wolf225',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'wolf.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'Wolf RPG Ver 3.00 - 3.322',
-        description: 'Wolf RPG Editor 3.00 - 3.322',
-        value: 'wolf300',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'wolf.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'Wolf RPG Ver 3.323 - 3.396',
-        description: 'Wolf RPG Editor 3.323 - 3.396',
-        value: 'wolf3322',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'wolf.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'Wolf RPG Ver 3.500 - 3.611',
-        description: 'Wolf RPG Editor 3.500 - 3.611',
-        value: 'wolf350',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'wolf.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'Wolf RPG Ver 3.612 - 3.684',
-        description: 'Wolf RPG Editor 3.612 - 3.684',
-        value: 'wolf3612',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'wolf.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'Wolf RPG Editor',
-        description: '狼头（未细分）',
-        value: 'wolf',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'wolf.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'SRPG Studio',
-        description: '战棋游戏',
-        value: 'srpg',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'srpg.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'SMILE GAME BUILDER x86',
-        description: 'SMILE GAME BUILDER 原生版',
-        value: 'smilegamebuilder',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'smilegamebuilder.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'SMILE GAME BUILDER +Unity x86',
-        description: 'SMILE GAME BUILDER + Unity 32位',
-        value: 'smilegamebuilder_unity',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'smilegamebuilder.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'SMILE GAME BUILDER +Unity x64',
-        description: 'SMILE GAME BUILDER + Unity 64位',
-        value: 'smilegamebuilder_unity64',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'smilegamebuilder.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'Pixel Game Maker MV',
-        description: 'Pixel Game Maker MV',
-        value: 'pgmv',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'pixel.png'
-        }
-      }, {
-        id: generateId(),
-        name: 'RPG Developer Bakin',
-        description: 'RPG Developer Bakin',
-        value: 'bakin',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'bakin.png'
-        }
-      },
-      // 其他
-      {
-        id: generateId(),
-        name: 'Flash',
-        description: 'Flash',
-        value: 'flash',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'flash.png'
-        }
-      }, {
-        id: generateId(),
-        name: '网页游戏',
-        description: '网页游戏',
-        value: 'web',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'html.svg'
-        }
-      },
-      // 编程语言
-      {
-        id: generateId(),
-        name: 'C#',
-        description: 'C sharp不是c井',
-        value: 'csharp',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'csharp.ico'
-        }
-      }, {
-        id: generateId(),
-        name: 'C++',
-        description: 'C艹',
-        value: 'cplusplus',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'cplusplus.ico'
-        }
-      }, {
-        id: generateId(),
-        name: 'Java',
-        description: '爪哇',
-        value: 'java',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'java.ico'
-        }
-      }, {
-        id: generateId(),
-        name: 'Python',
-        description: '屁眼通红',
-        value: 'python',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'python.ico'
-        }
-      }, {
-        id: generateId(),
-        name: 'JavaScript',
-        description: '女子小学生！',
-        value: 'javascript',
-        typeId: dictTypes[2].id,
-        extra: {
-          icon: 'javascript.png'
-        }
-      }, {
-        id: generateId(),
-        name: '其他',
-        description: '其他',
-        value: 'other',
-        typeId: dictTypes[2].id
-      }
-    ]
-    const storeWebsiteList = [
-      {
-        id: generateId(),
-        name: 'DLsite',
-        description: '',
-        value: 'dlsite',
-        typeId: dictTypes[3].id,
-        extra: {
-          rule: {
-            startsWith: {
-              maniax: 'RJ',
-              boots: 'BJ',
-              pro: 'VJ'
-            }
-          },
-          icon: 'dlsite.ico',
-          url: {
-            games: 'https://www.dlsite.com/{rule}/work/=/product_id/{}.html'
-          }
-        }
-      }, {
-        id: generateId(),
-        name: 'FANZA',
-        description: '',
-        value: 'fanza',
-        typeId: dictTypes[3].id,
-        extra: {
-          icon: 'fanza.ico',
-          url: {
-            games: 'https://www.dmm.co.jp/dc/doujin/-/detail/=/cid={}',
-            video: 'https://video.dmm.co.jp/av/content/?id={}'
-          }
-        }
-      }, {
-        id: generateId(),
-        name: 'Steam',
-        description: '',
-        value: 'steam',
-        typeId: dictTypes[3].id,
-        extra: {
-          icon: 'steam.ico',
-          url: {
-            games: 'https://store.steampowered.com/app/{}'
-          }
-        }
-      }, {
-        id: generateId(),
-        name: 'bokiboki',
-        description: '',
-        value: 'bokiboki',
-        typeId: dictTypes[3].id,
-        extra: {
-          icon: 'bokiboki.png',
-          url: {
-            games: 'https://boki2.fun/r18/proitem?obj_id={}'
-          }
-        }
-      }, {
-        id: generateId(),
-        name: '072 Project',
-        description: '',
-        value: '072project',
-        typeId: dictTypes[3].id,
-        extra: {
-          icon: '072project.ico',
-          url: {
-            games: 'https://072project.com/r18/cn/shop/{}'
-          }
-        }
-      }, {
-        id: generateId(),
-        name: 'Getchu',
-        description: '',
-        value: 'getchu',
-        typeId: dictTypes[3].id,
-        extra: {
-          icon: 'getchu.ico',
-          url: {
-            games: 'https://www.getchu.com/item/{}'
-          }
-        }
-      }, {
-        id: generateId(),
-        name: 'Booth',
-        description: '',
-        value: 'booth',
-        typeId: dictTypes[3].id,
-        extra: {
-          icon: 'booth.ico',
-          url: {
-            games: 'https://booth.pm/ja/items/{}'
-          }
-        }
-      }, {
-        id: generateId(),
-        name: 'Freem',
-        description: '',
-        value: 'freem',
-        typeId: dictTypes[3].id,
-        extra: {
-          icon: 'freem.ico',
-          url: {
-            games: 'https://www.freem.ne.jp/win/game/{}'
-          }
-        }
-      }
-    ]
-    const dictDataList = [...categoryList, ...languageList, ...gameEngineList, ...storeWebsiteList]
+  } catch (error) {
+    logger.error('initialize database failed', error);
+  }
+}
 
-    tx.insert(dictData).values(dictDataList).run()
+async function initDatabase(options: {
+  includeCategories: boolean
+  fromVersion: string
+  currentVersion: string
+}) {
+  const { includeCategories, fromVersion, currentVersion } = options
 
-    // 默认分类：游戏 软件 单图 多图 电影 番剧 ASMR 小说 网站
-    const categories = [
-      {
-        id: generateId(),
-        name: '游戏',
-        emoji: '🎮',
-        referenceId: dictDataList[0].id,
-        sort: 1
-      }, {
-        id: generateId(),
-        name: '软件',
-        emoji: '💻',
-        referenceId: dictDataList[1].id,
-        sort: 2
-      }, {
-        id: generateId(),
-        name: '单图',
-        emoji: '🖼️',
-        referenceId: dictDataList[2].id,
-        sort: 3
-      }, {
-        id: generateId(),
-        name: '漫画',
-        emoji: '📚',
-        referenceId: dictDataList[3].id,
-        sort: 4
-      }, {
-        id: generateId(),
-        name: '电影',
-        emoji: '🎬',
-        referenceId: dictDataList[4].id,
-        sort: 5
-      }, {
-        id: generateId(),
-        name: '番剧',
-        emoji: '📺',
-        referenceId: dictDataList[5].id,
-        sort: 6
-      }, {
-        id: generateId(),
-        name: '音声',
-        emoji: '🎧',
-        referenceId: dictDataList[6].id,
-        sort: 7
-      }, {
-        id: generateId(),
-        name: '小说',
-        emoji: '📖',
-        referenceId: dictDataList[7].id,
-        sort: 8
-      }, {
-        id: generateId(),
-        name: '网站',
-        emoji: '🌐',
-        referenceId: dictDataList[8].id,
-        sort: 9
-      }
-    ]
-    tx.insert(category).values(categories).run()
+  db.transaction((tx) => {
+    applyVersionSeedPatches(tx, {
+      fromVersion,
+      toVersion: currentVersion,
+      includeCategories
+    })
   })
 }

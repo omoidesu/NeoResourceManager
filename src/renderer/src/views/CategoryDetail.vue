@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, defineAsyncComponent, h, inject, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch} from 'vue'
+import {computed, h, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch} from 'vue'
 import type { ComputedRef } from 'vue'
 import { useRoute } from 'vue-router'
 import { CheckmarkOutline, ChevronBackOutline, ChevronForwardOutline, CloseOutline, EyeOutline, FolderOpenOutline, FunnelOutline, Play, SearchOutline, Stop, TrashOutline } from '@vicons/ionicons5'
@@ -7,8 +7,12 @@ import { confirmDialog, notify } from '../utils/notification'
 import { removeOngoingCenterItem, upsertOngoingCenterItem } from '../utils/notification-center'
 import ResourceCard from '../components/card/ResourceCard.vue'
 import PictureViewer from '../components/PictureViewer.vue'
+import ComicReader from '../components/ComicReader.vue'
 import RichTextEditor from '../components/RichTextEditor.vue'
-import { DictType, Settings } from '../../../common/constants'
+import { createEmptyMetaByType } from '../components/meta/meta-factory'
+import { resolveMetaFormComponent } from '../components/meta/registry'
+import { DictType, ResourceLaunchMode, ResourceLogSpecialTime, Settings } from '../../../common/constants'
+import type { ResourceForm, ResourceMeta } from '../../../main/model/models'
 
 const route = useRoute()
 const injectedIsDark = inject<ComputedRef<boolean>>('appIsDark', computed(() => true))
@@ -30,6 +34,7 @@ const showEditModal = ref(false)
 const showBatchImportLoading = ref(false)
 const showBatchImportModal = ref(false)
 const showBatchLabelModal = ref(false)
+const fetchResourceInfoLoading = ref(false)
 const formData = ref<any>({ name: '', meta: {} })
 const editingResourceId = ref('')
 const editInitialFormData = ref<any | null>(null)
@@ -52,15 +57,27 @@ const detailScreenshotPreviewSrc = ref('')
 const detailDescriptionContentRef = ref<HTMLElement | null>(null)
 const detailDescriptionHeight = ref(400)
 const showPictureViewer = ref(false)
+const showComicReader = ref(false)
 const pictureViewerScrollMode = ref(String(Settings.PICTURE_READ_SCROLL_MODE.default ?? 'zoom'))
+const pictureViewerImagePaths = ref<string[]>([])
+const pictureViewerInitialIndex = ref(0)
+const pictureViewerAllowDelete = ref(true)
+const comicReaderImagePaths = ref<string[]>([])
+const comicReaderInitialIndex = ref(0)
+const currentComicReaderResourceId = ref('')
 const tagInputValue = ref('')
 const typeInputValue = ref('')
 const batchLabelInputValue = ref('')
 const showDetailDrawer = ref(false)
 const selectedDetailResource = ref<any>(null)
 const detailScreenshotPaths = ref<string[]>([])
+const detailGalleryImageUrls = ref<Record<string, string>>({})
 const currentScreenshotIndex = ref(0)
 const showDeleteScreenshotConfirm = ref(false)
+const showSoftwareScriptModal = ref(false)
+const softwareScriptDraft = ref('')
+const softwareScriptRuntimePath = ref('')
+const softwareScriptRuntimes = ref<Array<{ label: string; value: string; shellType: 'powershell' | 'cmd' }>>([])
 const visibleLogCount = ref(5)
 const detailRatingDraft = ref(-1)
 const isDragOver = ref(false)
@@ -184,12 +201,6 @@ const renderWebsiteOptionLabel = (icon: string, rawLabel: string) =>
     ]
   )
 
-const GameForm = defineAsyncComponent(() => import('../components/modal/AddGameModal.vue'))
-
-const MODAL_COMPONENTS: Record<string, any> = {
-  'game_meta': markRaw(GameForm)
-}
-
 const categorySettings = computed(() => categoryInfo.value?.meta?.extra ?? {
   extendTable: '',
   resourcePathType: null,
@@ -197,8 +208,7 @@ const categorySettings = computed(() => categoryInfo.value?.meta?.extra ?? {
 })
 
 const modelComponent = computed(() => {
-  const extend = categorySettings.value.extendTable
-  return MODAL_COMPONENTS[extend] ?? null
+  return resolveMetaFormComponent(String(categorySettings.value.extendTable ?? ''))
 })
 
 const modelComponentKey = computed(() => categorySettings.value.extendTable || 'empty-meta')
@@ -210,29 +220,8 @@ const createEmptyFormData = () => ({
   basePath: '',
   tags: [] as string[],
   types: [] as string[],
-  meta: createEmptyMeta()
+  meta: createEmptyMetaByType(String(categorySettings.value.extendTable ?? ''))
 })
-
-const createEmptyMeta = () => {
-  switch (categorySettings.value.extendTable) {
-    case 'game_meta':
-      return {
-        nickname: '',
-        nameZh: '',
-        nameJp: '',
-        nameEn: '',
-        language: '',
-        version: '1.0.0',
-        engine: '',
-        websiteType: '',
-        gameId: '',
-        website: '',
-        additionalStores: [] as Array<{ websiteType: string; workId: string; website: string }>
-      }
-    default:
-      return {}
-  }
-}
 
 const buildDisplayBasePath = (resource: any) => {
   const basePath = String(resource?.basePath ?? '')
@@ -249,32 +238,45 @@ const buildDisplayBasePath = (resource: any) => {
   return `${basePath.replace(/[\\/]+$/, '')}\\${fileName}`
 }
 
-const mapResourceDetailToFormData = (resource: any) => ({
-  name: resource?.title ?? '',
-  description: resource?.description ?? '',
-  coverPath: resource?.coverPath ?? '',
-  basePath: buildDisplayBasePath(resource),
-  author: Array.isArray(resource?.authors) ? String(resource.authors[0]?.name ?? '') : '',
-  tags: Array.isArray(resource?.tags) ? resource.tags.map((item: any) => String(item?.name ?? '')).filter(Boolean) : [],
-  types: Array.isArray(resource?.types) ? resource.types.map((item: any) => String(item?.name ?? '')).filter(Boolean) : [],
-  meta: {
-    ...createEmptyMeta(),
-    ...(resource?.gameMeta ?? {}),
-    ...(resource?.softwareMeta ?? {}),
-    ...(resource?.videoMeta ?? {}),
-    ...(resource?.asmrMeta ?? {}),
-    websiteType: String(resource?.stores?.[0]?.storeId ?? ''),
-    gameId: String(resource?.stores?.[0]?.workId ?? ''),
-    website: String(resource?.stores?.[0]?.url ?? ''),
-    additionalStores: Array.isArray(resource?.stores)
-      ? resource.stores.slice(1).map((item: any) => ({
-          websiteType: String(item?.storeId ?? ''),
-          workId: String(item?.workId ?? ''),
-          website: String(item?.url ?? '')
-        }))
-      : [],
+const mapResourceDetailToFormData = (resource: any) => {
+  const stores = Array.isArray(resource?.stores) ? resource.stores : []
+  const pixivStore = stores.find((item: any) => String(item?.store?.value ?? '').trim().toLowerCase() === 'pixiv')
+  const primaryStore = stores.find((item: any) => String(item?.id ?? '') !== String(pixivStore?.id ?? '')) ?? stores[0]
+  const additionalStores = stores.filter((item: any) => {
+    const itemId = String(item?.id ?? '')
+    const primaryStoreId = String(primaryStore?.id ?? '')
+    const pixivStoreId = String(pixivStore?.id ?? '')
+    return itemId && itemId !== primaryStoreId && itemId !== pixivStoreId
+  })
+
+  return {
+    name: resource?.title ?? '',
+    description: resource?.description ?? '',
+    coverPath: resource?.coverPath ?? '',
+    basePath: buildDisplayBasePath(resource),
+    author: Array.isArray(resource?.authors) ? String(resource.authors[0]?.name ?? '') : '',
+    tags: Array.isArray(resource?.tags) ? resource.tags.map((item: any) => String(item?.name ?? '')).filter(Boolean) : [],
+    types: Array.isArray(resource?.types) ? resource.types.map((item: any) => String(item?.name ?? '')).filter(Boolean) : [],
+    meta: {
+      ...createEmptyMetaByType(String(categorySettings.value.extendTable ?? '')),
+      ...(resource?.gameMeta ?? {}),
+      ...(resource?.softwareMeta ?? {}),
+      ...(resource?.singleImageMeta ?? {}),
+      ...(resource?.multiImageMeta ?? {}),
+      ...(resource?.videoMeta ?? {}),
+      ...(resource?.asmrMeta ?? {}),
+      pixivId: String(pixivStore?.workId ?? ''),
+      websiteType: String(primaryStore?.storeId ?? ''),
+      gameId: String(primaryStore?.workId ?? ''),
+      website: String(primaryStore?.url ?? ''),
+      additionalStores: additionalStores.map((item: any) => ({
+        websiteType: String(item?.storeId ?? ''),
+        workId: String(item?.workId ?? ''),
+        website: String(item?.url ?? '')
+      })),
+    }
   }
-})
+}
 
 const cloneFormData = (value: any) => JSON.parse(JSON.stringify(toRaw(value ?? createEmptyFormData())))
 
@@ -306,7 +308,7 @@ const sortBy = ref('createTime-desc')
 const localeEmulatorPath = ref('')
 const mtoolPath = ref('')
 
-const showBatchImportButton = computed(() => categorySettings.value.extendTable === 'game_meta')
+const showBatchImportButton = computed(() => ['game_meta', 'single_image_meta', 'multi_image_meta'].includes(String(categorySettings.value.extendTable ?? '')))
 const getBatchImportOngoingId = (targetCategoryId: string) => `batch-import-analysis:${targetCategoryId}`
 const batchProgressRunning = computed(() => batchAnalyzeRunning.value || batchImportRunning.value)
 const batchProgressStage = computed(() => (batchImportRunning.value ? 'import' : 'analyze'))
@@ -326,7 +328,12 @@ const showBatchImportProgressToast = computed(() =>
   batchProgressRunning.value && batchAnalyzeInBackground.value && !batchAnalyzeToastDismissed.value
 )
 const selectableBatchImportItems = computed(() =>
-  batchImportItems.value.filter((item) => !item.exists && !item.errorMessage && item.launchFilePath)
+  batchImportItems.value.filter((item) => {
+    const canImport = detailIsManga.value
+      ? Number(item?.imageCount ?? 0) > 0
+      : !!item?.launchFilePath
+    return !item.exists && !item.errorMessage && canImport
+  })
 )
 const selectedBatchImportCount = computed(() =>
   batchImportItems.value.filter((item) => item.checked).length
@@ -446,14 +453,37 @@ const categoryName = computed(() => {
   return categoryInfo.value?.name || '资源'
 })
 
-const startText = computed(() => categorySettings.value.startText || '启动')
+const isSingleImageCategory = computed(() => categorySettings.value.extendTable === 'single_image_meta')
+const startText = computed(() => {
+  if (isSingleImageCategory.value) {
+    return '查看'
+  }
+
+  if (categorySettings.value.extendTable === 'multi_image_meta') {
+    return '阅读'
+  }
+
+  return categorySettings.value.startText || '启动'
+})
 const showZoneLaunch = computed(() => categorySettings.value.extendTable === 'game_meta')
 const canZoneLaunch = computed(() => Boolean(localeEmulatorPath.value.trim()))
+const showAdminLaunch = computed(() => categorySettings.value.extendTable === 'software_meta')
 const showMtoolLaunch = computed(() => categorySettings.value.extendTable === 'game_meta')
 const canMtoolLaunch = computed(() => Boolean(mtoolPath.value.trim()))
 const showScreenshotFolder = computed(() => categorySettings.value.extendTable === 'game_meta')
 const showCompletedToggle = computed(() => categorySettings.value.extendTable === 'game_meta')
+const showCardCover = computed(() => categorySettings.value.extendTable !== 'software_meta')
+const showDeleteFiles = computed(() => categorySettings.value.extendTable === 'game_meta')
 const showEngineFilter = computed(() => categorySettings.value.extendTable === 'game_meta')
+const isSoftwareCategory = computed(() => categorySettings.value.extendTable === 'software_meta')
+const softwareScriptShellType = computed<'powershell' | 'cmd'>(() =>
+  softwareScriptRuntimes.value.find((item) => item.value === softwareScriptRuntimePath.value)?.shellType ?? 'powershell'
+)
+const softwareScriptPlaceholder = computed(() =>
+  softwareScriptShellType.value === 'powershell'
+    ? '例如：\nSet-Location d:/myDir\n. .\\venv\\Scripts\\Activate.ps1\npy -3.10 run.py'
+    : '例如：\ncd /d d:/myDir\ncall .\\venv\\Scripts\\activate\npy -3.10 run.py'
+)
 const filterSectionsStyle = computed(() => ({
   gridTemplateRows: `repeat(${showEngineFilter.value ? 4 : 3}, minmax(0, 1fr))`
 }))
@@ -470,6 +500,36 @@ const visibleDetailLogs = computed(() => detailLogs.value.slice(0, visibleLogCou
 const hasMoreDetailLogs = computed(() => visibleLogCount.value < detailLogs.value.length)
 const noMore = computed(() => detailLogs.value.length > 5 && !hasMoreDetailLogs.value)
 const detailStats = computed(() => selectedDetailResource.value?.stats ?? null)
+const detailUsesBrowseTerms = computed(() => isSingleImageCategory.value || detailIsManga.value)
+const detailStatsText = computed(() => ({
+  firstAccess: detailUsesBrowseTerms.value ? '第一次浏览' : '第一次启动',
+  lastAccess: detailUsesBrowseTerms.value ? '最后一次浏览' : '最后一次启动',
+  accessCount: detailUsesBrowseTerms.value ? '浏览次数' : '启动次数',
+  totalRuntime: detailUsesBrowseTerms.value ? '浏览总时长' : '运行总时长',
+}))
+const detailPreviewSectionTitle = computed(() => detailIsManga.value ? '' : '游戏截图')
+const detailGallerySectionTitle = computed(() => detailIsManga.value ? '图片预览' : '启动日志')
+const detailReadingProgressText = computed(() => {
+  if (!detailIsManga.value) {
+    return ''
+  }
+
+  const lastReadPage = Math.max(0, Number(selectedDetailResource.value?.multiImageMeta?.lastReadPage ?? 0))
+  const totalPages = Math.max(0, detailScreenshotPaths.value.length)
+
+  if (!totalPages) {
+    return '0 / 0'
+  }
+
+  return `${Math.min(lastReadPage + 1, totalPages)} / ${totalPages}`
+})
+const detailGalleryItems = computed(() =>
+  detailScreenshotPaths.value.map((filePath, index) => ({
+    filePath,
+    index,
+    url: detailGalleryImageUrls.value[filePath] ?? ''
+  }))
+)
 const detailDescriptionBoxStyle = computed(() => ({
   height: `${detailDescriptionHeight.value}px`
 }))
@@ -481,6 +541,9 @@ const detailCanLaunch = computed(() => {
 const detailCanStop = computed(() => {
   return Boolean(selectedDetailResource.value?.isRunning)
 })
+const detailIsSoftware = computed(() => categorySettings.value.extendTable === 'software_meta')
+const detailIsManga = computed(() => categorySettings.value.extendTable === 'multi_image_meta')
+const detailOpenFolderText = computed(() => `打开${categoryName.value || '资源'}文件夹`)
 const detailMetaItems = computed(() => {
   const resource = selectedDetailResource.value
   if (!resource) {
@@ -516,6 +579,7 @@ const detailMetaItems = computed(() => {
     pushItem(items, '引擎', engineName, engineItem?.icon)
   } else if (extendTable === 'software_meta') {
     pushItem(items, '版本', resource.softwareMeta?.version)
+    pushItem(items, '命令行参数', resource.softwareMeta?.commandLineArgs)
   } else if (extendTable === 'video_meta') {
     pushItem(items, '年份', resource.videoMeta?.year)
   } else if (extendTable === 'asmr_meta') {
@@ -538,6 +602,7 @@ const detailStores = computed(() =>
       .filter((item: any) => item.name)
     : []
 )
+const detailDisplayPath = computed(() => buildDisplayBasePath(selectedDetailResource.value))
 const ratingComment = computed(() => getRatingComment(detailRatingDraft.value))
 const hasPendingRatingChange = computed(() => {
   if (!selectedDetailResource.value) {
@@ -685,6 +750,15 @@ const formatDateTime = (value: string | number | Date | null | undefined) => {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`
 }
 
+const isUnknownEndTime = (value: string | number | Date | null | undefined) => {
+  if (!value) {
+    return false
+  }
+
+  const date = new Date(value)
+  return !Number.isNaN(date.getTime()) && date.getTime() === new Date(ResourceLogSpecialTime.UNKNOWN_END_TIME).getTime()
+}
+
 const formatDuration = (seconds: number | null | undefined) => {
   const totalSeconds = Math.max(0, Number(seconds ?? 0))
   const hours = Math.floor(totalSeconds / 3600)
@@ -700,6 +774,36 @@ const formatDuration = (seconds: number | null | undefined) => {
   }
 
   return `${remainSeconds}秒`
+}
+
+const formatLogEndTime = (value: string | number | Date | null | undefined) => {
+  if (isUnknownEndTime(value)) {
+    return '未检测到结束时间'
+  }
+
+  return formatDateTime(value)
+}
+
+const formatLogDuration = (logItem: { endTime?: string | number | Date | null; duration?: number | null }) => {
+  if (isUnknownEndTime(logItem?.endTime)) {
+    return '未知'
+  }
+
+  return formatDuration(logItem?.duration)
+}
+
+const formatLaunchMode = (launchMode: string | null | undefined) => {
+  switch (String(launchMode ?? '').trim()) {
+    case ResourceLaunchMode.ADMIN:
+      return '管理员启动'
+    case ResourceLaunchMode.MTOOL:
+      return 'MTool 启动'
+    case ResourceLaunchMode.LOCALE_EMULATOR:
+      return 'LE 转区启动'
+    case ResourceLaunchMode.NORMAL:
+    default:
+      return '普通启动'
+  }
 }
 
 const getRatingComment = (rating: number | null | undefined) => {
@@ -786,6 +890,259 @@ const getResourceNameFromBasePath = (basePath: string) => {
   return lastSegment
 }
 
+const getFileNameWithoutExtension = (basePath: string) => {
+  const normalizedPath = String(basePath ?? '').replace(/\\/g, '/')
+  const fileName = normalizedPath.split('/').pop() ?? ''
+
+  if (!fileName) {
+    return ''
+  }
+
+  const dotIndex = fileName.lastIndexOf('.')
+  if (dotIndex <= 0) {
+    return fileName
+  }
+
+  return fileName.slice(0, dotIndex)
+}
+
+const readComicProgress = async (resourceId: string) => {
+  const normalizedResourceId = String(resourceId ?? '').trim()
+  if (!normalizedResourceId) {
+    return 0
+  }
+
+  try {
+    const result = await window.api.service.getMultiImageReadingProgress(normalizedResourceId)
+    return Math.max(0, Math.floor(Number(result?.data?.lastReadPage ?? 0)))
+  } catch {
+    return 0
+  }
+}
+
+const writeComicProgress = async (resourceId: string, pageIndex: number) => {
+  const normalizedResourceId = String(resourceId ?? '').trim()
+  if (!normalizedResourceId) {
+    return
+  }
+
+  try {
+    await window.api.service.updateMultiImageReadingProgress(
+      normalizedResourceId,
+      Math.max(0, Math.floor(Number(pageIndex ?? 0)))
+    )
+  } catch {
+    // ignore progress persistence failure
+  }
+}
+
+const startComicReadingSession = async (resource: any) => {
+  const resourceId = String(resource?.id ?? '').trim()
+  if (!resourceId) {
+    return false
+  }
+
+  const result = await window.api.service.startReadingResource(resourceId)
+  const resultType = result?.type ?? 'info'
+  if (resultType === 'error' || resultType === 'warning') {
+    showNotifyByType(resultType, '开始阅读', result?.message ?? '开始阅读失败')
+    return false
+  }
+
+  return true
+}
+
+const stopComicReadingSession = async () => {
+  const resourceId = String(currentComicReaderResourceId.value ?? '').trim()
+  if (!resourceId) {
+    return
+  }
+
+  currentComicReaderResourceId.value = ''
+  const result = await window.api.service.stopResource(resourceId)
+  if (result?.type === 'error') {
+    showNotifyByType('error', '结束阅读', result?.message ?? '结束阅读失败')
+    return
+  }
+
+  await fetchData()
+}
+
+const openComicReader = async (resource: any, pageIndex?: number | null) => {
+  const resourceId = String(resource?.id ?? '').trim()
+  if (!resourceId) {
+    showNotifyByType('warning', '漫画阅读', '当前漫画资源无效')
+    return
+  }
+
+  if (showComicReader.value && currentComicReaderResourceId.value && currentComicReaderResourceId.value !== resourceId) {
+    await stopComicReadingSession()
+  }
+
+  await refreshDetailScreenshots(
+    Number.isFinite(Number(pageIndex)) ? Number(pageIndex) : await readComicProgress(resourceId),
+    resource
+  )
+  if (!detailScreenshotPaths.value.length) {
+    showNotifyByType('warning', '漫画阅读', '当前漫画目录中没有可阅读的图片')
+    return
+  }
+
+  const started = await startComicReadingSession(resource)
+  if (!started) {
+    return
+  }
+
+  const preferredIndex = Number.isFinite(Number(pageIndex)) ? Number(pageIndex) : await readComicProgress(resourceId)
+  const resolvedIndex = Math.min(
+    Math.max(0, Math.floor(preferredIndex)),
+    Math.max(0, detailScreenshotPaths.value.length - 1)
+  )
+
+  currentScreenshotIndex.value = resolvedIndex
+  currentComicReaderResourceId.value = resourceId
+  comicReaderImagePaths.value = [...detailScreenshotPaths.value]
+  comicReaderInitialIndex.value = resolvedIndex
+  showPictureViewer.value = false
+  showComicReader.value = true
+  await writeComicProgress(resourceId, resolvedIndex)
+  await fetchData()
+}
+
+const handleComicReaderPageChange = (index: number) => {
+  currentScreenshotIndex.value = Math.max(0, Math.floor(Number(index ?? 0)))
+  void writeComicProgress(currentComicReaderResourceId.value, currentScreenshotIndex.value)
+}
+
+const getFileName = (basePath: string) => {
+  const normalizedPath = String(basePath ?? '').replace(/\\/g, '/')
+  return normalizedPath.split('/').pop() ?? ''
+}
+
+const detectPixivIdFromFilePath = (filePath: string) => {
+  const fileStem = getFileNameWithoutExtension(filePath)
+  const matched = fileStem.match(/^(\d+)_p\d+$/i)
+  return matched?.[1] ?? ''
+}
+
+const getResourceFilePath = (resource: any) => {
+  return String(buildDisplayBasePath(resource) ?? '').trim()
+}
+
+const normalizeSoftwareScript = (script: string) => {
+  return String(script ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+const normalizeSoftwareScriptForShell = (script: string, shellType: 'powershell' | 'cmd') => {
+  const lines = normalizeSoftwareScript(script)
+  return lines.join(shellType === 'cmd' ? ' && ' : '; ')
+}
+
+const denormalizeSoftwareScript = (command: string) => {
+  return String(command ?? '')
+    .replace(/\s*&&\s*/g, '\n')
+    .replace(/\s*;\s*/g, '\n')
+    .trim()
+}
+
+const resolveSoftwareScriptShell = (basePath: string) => {
+  const normalizedPath = String(basePath ?? '').replace(/\\/g, '/').toLowerCase()
+  return normalizedPath.endsWith('/powershell.exe') || normalizedPath.endsWith('/pwsh.exe') ? 'powershell' : 'cmd'
+}
+
+const ensureSoftwareScriptRuntimes = async () => {
+  const runtimes = await window.api.dialog.getAvailableScriptRuntimes()
+  softwareScriptRuntimes.value = Array.isArray(runtimes) ? runtimes : []
+  return softwareScriptRuntimes.value
+}
+
+const applyDefaultPathName = (basePath: string) => {
+  if (categorySettings.value.extendTable === 'single_image_meta') {
+    const fileStem = getFileNameWithoutExtension(basePath)
+    if (fileStem) {
+      formData.value.name = fileStem
+    }
+    return
+  }
+
+  if (categorySettings.value.extendTable === 'software_meta') {
+    const fileStem = getFileNameWithoutExtension(basePath)
+    if (fileStem) {
+      formData.value.name = fileStem
+    }
+    return
+  }
+
+  if (categorySettings.value.extendTable === 'multi_image_meta') {
+    const resourceName = getResourceNameFromBasePath(basePath)
+    if (resourceName) {
+      formData.value.name = resourceName
+    }
+    return
+  }
+
+  if (categorySettings.value.resourcePathType !== 'file') {
+    return
+  }
+
+  const resourceName = getResourceNameFromBasePath(basePath)
+  if (resourceName) {
+    formData.value.name = resourceName
+  }
+}
+
+const handleOpenSoftwareScriptModal = () => {
+  void (async () => {
+    if (!isSoftwareCategory.value) {
+      return
+    }
+
+    const runtimes = await ensureSoftwareScriptRuntimes()
+    const currentBasePath = String(formData.value?.basePath ?? '').trim()
+    const normalizedCurrentBasePath = currentBasePath.toLowerCase()
+    const matchedRuntime = runtimes.find((item) => String(item.value ?? '').trim().toLowerCase() === normalizedCurrentBasePath)
+    const fallbackShellType = resolveSoftwareScriptShell(currentBasePath)
+    const fallbackRuntime = matchedRuntime
+      ?? runtimes.find((item) => item.shellType === fallbackShellType)
+      ?? runtimes.find((item) => item.shellType === 'powershell')
+      ?? runtimes[0]
+
+    softwareScriptRuntimePath.value = String(fallbackRuntime?.value ?? '')
+    softwareScriptDraft.value = denormalizeSoftwareScript(String(formData.value?.meta?.commandLineArgs ?? ''))
+    showSoftwareScriptModal.value = true
+  })()
+}
+
+const handleConfirmSoftwareScript = async () => {
+  const normalizedCommand = normalizeSoftwareScriptForShell(softwareScriptDraft.value, softwareScriptShellType.value)
+  if (!normalizedCommand) {
+    showNotifyByType('warning', '脚本执行', '请先输入至少一条命令')
+    return
+  }
+
+  if (!String(softwareScriptRuntimePath.value ?? '').trim()) {
+    showNotifyByType('warning', '脚本执行', '请先选择脚本运行器')
+    return
+  }
+
+  formData.value.basePath = softwareScriptRuntimePath.value
+  formData.value.meta = {
+    ...(formData.value.meta ?? {}),
+    commandLineArgs: normalizedCommand
+  }
+
+  if (!String(formData.value.name ?? '').trim() || String(formData.value.name ?? '').trim().toLowerCase() === 'cmd') {
+    formData.value.name = '脚本启动'
+  }
+
+  showSoftwareScriptModal.value = false
+  await nextTick()
+  await basePathFormItemRef.value?.validate({ trigger: 'change' })
+}
+
 const applyGamePathAnalysis = async (basePath: string) => {
   if (categorySettings.value.extendTable !== 'game_meta') {
     return
@@ -821,6 +1178,14 @@ const showNotifyByType = (type: string, title: string, content: string) => {
 }
 
 const enrichBatchImportItem = async (item: any) => {
+  if (detailIsManga.value) {
+    return {
+      ...item,
+      launchFileIcon: '',
+      fetchInfoEnabled: item.fetchInfoEnabled !== false
+    }
+  }
+
   if (!item?.launchFilePath) {
     return {
       ...item,
@@ -886,7 +1251,9 @@ const fetchData = async () => {
 
     // 1. 获取分类元数据
     categoryInfo.value = await window.api.db.getCategoryById(categoryId.value)
-    websiteTypeOptions.value = await window.api.db.getSelectDictData(DictType.STORE_WEBSITE_TYPE)
+    websiteTypeOptions.value = await window.api.db.getSelectDictData(
+      detailIsManga.value ? DictType.MANGA_SITE_TYPE : DictType.GAME_SITE_TYPE
+    )
     const localeEmulatorSetting = await window.api.db.getSetting(Settings.LOCALE_EMULATOR_PATH)
     localeEmulatorPath.value = String(localeEmulatorSetting?.value ?? '')
     const mtoolSetting = await window.api.db.getSetting(Settings.MTOOL_PATH)
@@ -1053,6 +1420,9 @@ const updateDetailDescriptionHeight = async () => {
 }
 
 onBeforeUnmount(() => {
+  if (showComicReader.value) {
+    void stopComicReadingSession()
+  }
   stopResourceStateListener?.()
   stopResourceStateListener = null
   stopBatchImportProgressListener?.()
@@ -1086,7 +1456,12 @@ watch(
     }
 
     try {
-      coverPreviewSrc.value = (await window.api.dialog.readImageAsDataUrl(coverPath)) ?? ''
+      coverPreviewSrc.value = (await window.api.dialog.getImagePreviewUrl(coverPath, {
+        maxWidth: 720,
+        maxHeight: 480,
+        fit: 'inside',
+        quality: 82
+      })) ?? ''
     } catch (error) {
       showNotifyByType('error', '预览失败', error instanceof Error ? error.message : '加载封面预览失败')
       coverPreviewSrc.value = ''
@@ -1110,7 +1485,12 @@ watch(
     }
 
     try {
-      detailCoverPreviewSrc.value = (await window.api.dialog.readImageAsDataUrl(coverPath)) ?? ''
+      detailCoverPreviewSrc.value = (await window.api.dialog.getImagePreviewUrl(coverPath, {
+        maxWidth: 960,
+        maxHeight: 720,
+        fit: 'inside',
+        quality: 84
+      })) ?? ''
     } catch {
       detailCoverPreviewSrc.value = ''
     }
@@ -1127,10 +1507,42 @@ watch(
     }
 
     try {
-      detailScreenshotPreviewSrc.value = (await window.api.dialog.readImageAsDataUrl(filePath)) ?? ''
+      detailScreenshotPreviewSrc.value = (await window.api.dialog.getImagePreviewUrl(filePath, {
+        maxWidth: 960,
+        maxHeight: 720,
+        fit: 'inside',
+        quality: 84
+      })) ?? ''
     } catch {
       detailScreenshotPreviewSrc.value = ''
     }
+  },
+  { immediate: true }
+)
+
+watch(
+  () => [...detailScreenshotPaths.value],
+  async (paths) => {
+    if (!paths.length) {
+      detailGalleryImageUrls.value = {}
+      return
+    }
+
+    const urlEntries = await Promise.all(paths.map(async (filePath) => {
+      try {
+        const previewUrl = await window.api.dialog.getImagePreviewUrl(filePath, {
+          maxWidth: 360,
+          maxHeight: 480,
+          fit: 'cover',
+          quality: 76
+        })
+        return [filePath, previewUrl ?? ''] as const
+      } catch {
+        return [filePath, ''] as const
+      }
+    }))
+
+    detailGalleryImageUrls.value = Object.fromEntries(urlEntries.filter(([, url]) => url))
   },
   { immediate: true }
 )
@@ -1155,6 +1567,14 @@ watch(showEditModal, (visible) => {
     editingResourceId.value = ''
     editInitialFormData.value = null
   }
+})
+
+watch(showComicReader, (visible, previousVisible) => {
+  if (visible || !previousVisible) {
+    return
+  }
+
+  void stopComicReadingSession()
 })
 
 watch(
@@ -1237,6 +1657,16 @@ const clearBatchImportOngoingCenter = (targetCategoryId = categoryId.value) => {
 const handleBatchImportClick = () => {
   void (async () => {
     const targetCategoryId = categoryId.value
+    if (isSingleImageCategory.value) {
+      await handleBatchImportImages()
+      return
+    }
+
+    if (detailIsManga.value) {
+      await handleBatchImportComics()
+      return
+    }
+
     const currentState = ensureBatchImportState(targetCategoryId)
 
     if (currentState.analyzeRunning || currentState.importRunning) {
@@ -1292,6 +1722,267 @@ const handleBatchImportClick = () => {
       clearBatchImportOngoingCenter(targetCategoryId)
     }
   })()
+}
+
+const analyzeBatchImportComicDirectories = async (targetCategoryId: string, directoryPaths: string[]) => {
+  const items: any[] = new Array(directoryPaths.length)
+  let nextIndex = 0
+  let completedCount = 0
+
+  const updateAnalyzeProgress = (directoryPath?: string, index?: number) => {
+    const currentDirectoryName = getResourceNameFromBasePath(directoryPath || '') || directoryPath || '正在准备分析目录'
+    const currentIndex = typeof index === 'number'
+      ? Math.min(directoryPaths.length, index + 1)
+      : Math.min(directoryPaths.length, completedCount + 1)
+
+    patchBatchImportState(targetCategoryId, {
+      analyzeCurrent: completedCount,
+      analyzeMessage: `正在分析第 ${currentIndex} / ${directoryPaths.length} 个漫画目录\n${currentDirectoryName}`
+    })
+    syncBatchImportOngoingCenter()
+  }
+
+  const worker = async () => {
+    while (!ensureBatchImportState(targetCategoryId).analyzeCancelled) {
+      const currentIndex = nextIndex
+      nextIndex += 1
+
+      if (currentIndex >= directoryPaths.length) {
+        return
+      }
+
+      const directoryPath = directoryPaths[currentIndex]
+      const directoryName = getResourceNameFromBasePath(directoryPath)
+      updateAnalyzeProgress(directoryName || directoryPath, currentIndex)
+
+      try {
+        const analysisResult = await window.api.service.analyzeMultiImageDirectory(directoryPath)
+        const analysisData = analysisResult?.data ?? {}
+        const imageCount = Math.max(0, Number(analysisData?.imageCount ?? 0))
+        items[currentIndex] = await enrichBatchImportItem({
+          directoryPath: String(analysisData?.directoryPath ?? directoryPath),
+          directoryName: String(analysisData?.directoryName ?? directoryName ?? ''),
+          coverPath: String(analysisData?.coverPath ?? ''),
+          imageCount,
+          exists: Boolean(analysisData?.exists),
+          existingResourceTitle: String(analysisData?.existingResourceTitle ?? ''),
+          checked: !analysisData?.exists && imageCount > 0,
+          errorMessage: analysisResult?.type === 'error' ? String(analysisResult?.message ?? '') : ''
+        })
+      } catch (error) {
+        items[currentIndex] = {
+          directoryPath,
+          directoryName,
+          coverPath: '',
+          imageCount: 0,
+          exists: false,
+          checked: false,
+          errorMessage: error instanceof Error ? error.message : '分析失败'
+        }
+      } finally {
+        completedCount += 1
+        patchBatchImportState(targetCategoryId, {
+          analyzeCurrent: completedCount
+        })
+        syncBatchImportOngoingCenter()
+      }
+    }
+  }
+
+  const workerCount = Math.min(directoryPaths.length, BATCH_ANALYZE_CONCURRENCY)
+  await Promise.all(Array.from({ length: workerCount }, () => worker()))
+
+  return items.filter(Boolean)
+}
+
+const handleBatchImportComics = async () => {
+  const targetCategoryId = categoryId.value
+  const currentState = ensureBatchImportState(targetCategoryId)
+
+  if (currentState.analyzeRunning || currentState.importRunning) {
+    patchBatchImportState(targetCategoryId, {
+      analyzeInBackground: false,
+      analyzeToastDismissed: false,
+      showLoading: true
+    })
+    syncBatchImportOngoingCenter(targetCategoryId)
+    return
+  }
+
+  try {
+    const directoryPaths = await window.api.dialog.selectFolders()
+    if (!directoryPaths?.length) {
+      return
+    }
+
+    patchBatchImportState(targetCategoryId, {
+      items: [],
+      fetchInfoEnabled: true,
+      analyzeTotal: directoryPaths.length,
+      analyzeCurrent: 0,
+      analyzeMessage: '正在分析漫画目录，请稍候...',
+      analyzeCancelled: false,
+      analyzeInBackground: false,
+      analyzeToastDismissed: false,
+      analyzeRunning: true,
+      importRunning: false,
+      showLoading: true,
+      showPreview: false
+    })
+    syncBatchImportOngoingCenter(targetCategoryId)
+
+    const items = await analyzeBatchImportComicDirectories(targetCategoryId, directoryPaths)
+
+    patchBatchImportState(targetCategoryId, {
+      items,
+      showPreview: items.length > 0,
+      showLoading: false
+    })
+
+    if (!items.length && ensureBatchImportState(targetCategoryId).analyzeCancelled) {
+      showNotifyByType('info', '批量导入漫画', '已停止分析')
+    }
+  } finally {
+    patchBatchImportState(targetCategoryId, {
+      analyzeRunning: false,
+      analyzeInBackground: false,
+      showLoading: false,
+      analyzeToastDismissed: false
+    })
+    clearBatchImportOngoingCenter(targetCategoryId)
+  }
+}
+
+const handleBatchImportImages = async () => {
+  try {
+    const extensions = [...(categorySettings.value.extensions ?? [])]
+    const filePaths = await window.api.dialog.selectFiles(extensions)
+
+    if (!Array.isArray(filePaths) || !filePaths.length) {
+      return
+    }
+
+    const imageSiteOptions = await window.api.db.getSelectDictData(DictType.IMAGE_SITE_TYPE)
+    const pixivWebsiteId = String(
+      imageSiteOptions.find((item: any) => String(item?.label ?? '').trim().toLowerCase() === 'pixiv')?.value ?? ''
+    ).trim()
+    const pixivMatches = filePaths
+      .map((item) => detectPixivIdFromFilePath(String(item ?? '').trim()))
+      .filter(Boolean)
+    const shouldFetchPixivInfo = pixivMatches.length > 0
+      ? await confirmDialog(
+          '批量导入图片',
+          `检测到 ${pixivMatches.length} 个文件名符合 Pixiv 格式，是否在导入时自动获取 Pixiv 信息？`
+        )
+      : false
+
+    let successCount = 0
+    let skippedCount = 0
+    let failedCount = 0
+    let pixivFetchedCount = 0
+
+    for (const filePath of filePaths) {
+      const normalizedPath = String(filePath ?? '').trim()
+      if (!normalizedPath) {
+        skippedCount += 1
+        continue
+      }
+
+      if (!validateBasePathExtension(normalizedPath)) {
+        skippedCount += 1
+        continue
+      }
+
+      const existsResult = await window.api.service.checkResourceExistsByPath(normalizedPath)
+      if (existsResult?.exists) {
+        skippedCount += 1
+        continue
+      }
+
+      if (existsResult?.type === 'error') {
+        failedCount += 1
+        continue
+      }
+
+      const pixivId = detectPixivIdFromFilePath(normalizedPath)
+      const fileStem = getFileNameWithoutExtension(normalizedPath)
+      const baseMeta = createEmptyMetaByType('single_image_meta') as unknown as ResourceMeta
+      let fetchedPixivData: any = null
+
+      if (shouldFetchPixivInfo && pixivId && pixivWebsiteId) {
+        const fetchResult = await window.api.service.fetchResourceInfo(pixivWebsiteId, pixivId)
+        if (fetchResult?.type === 'success' || fetchResult?.type === 'warning') {
+          fetchedPixivData = fetchResult?.data ?? null
+          if (fetchResult?.type === 'success') {
+            pixivFetchedCount += 1
+          }
+        }
+      }
+
+      const payload: ResourceForm = {
+        name: String(fetchedPixivData?.name ?? '').trim() || fileStem || getFileName(normalizedPath),
+        description: '',
+        coverPath: String(fetchedPixivData?.cover ?? '').trim() || normalizedPath,
+        basePath: normalizedPath,
+        author: String(fetchedPixivData?.author ?? '').trim(),
+        tags: Array.isArray(fetchedPixivData?.tag) ? fetchedPixivData.tag : [],
+        types: Array.isArray(fetchedPixivData?.type) ? fetchedPixivData.type : [],
+        categoryId: categoryInfo.value.id,
+        meta: {
+          ...baseMeta,
+          pixivId,
+          websiteType: pixivId ? pixivWebsiteId : '',
+          gameId: pixivId,
+          website: pixivId ? `https://www.pixiv.net/artworks/${pixivId}` : '',
+          format: String(normalizedPath.match(/\.([^.\\/]+)$/)?.[1] ?? '').toLowerCase()
+        }
+      }
+
+      const result = await window.api.service.saveResource(payload)
+      if (result?.type === 'error') {
+        failedCount += 1
+      } else {
+        successCount += 1
+      }
+    }
+
+    const notifyType = failedCount > 0 && successCount === 0 ? 'error' : 'success'
+    showNotifyByType(
+      notifyType,
+      '批量导入图片',
+      `导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}${shouldFetchPixivInfo ? `，获取 Pixiv 信息 ${pixivFetchedCount}` : ''}`
+    )
+
+    if (successCount > 0) {
+      await fetchData()
+    }
+  } catch (error) {
+    showNotifyByType('error', '批量导入图片', error instanceof Error ? error.message : '批量导入图片失败')
+  }
+}
+
+const applyMultiImageDirectoryAnalysis = async (basePath: string) => {
+  if (categorySettings.value.extendTable !== 'multi_image_meta') {
+    return
+  }
+
+  try {
+    const result = await window.api.service.analyzeMultiImageDirectory(basePath)
+    const directoryName = String(result?.data?.directoryName ?? '').trim()
+    const coverPath = String(result?.data?.coverPath ?? '').trim()
+
+    if (directoryName) {
+      formData.value.name = directoryName
+    }
+
+    if (coverPath) {
+      formData.value.coverPath = coverPath
+    } else {
+      formData.value.coverPath = ''
+    }
+  } catch {
+    formData.value.coverPath = ''
+  }
 }
 
 const handleBatchImportMaskClick = () => {
@@ -1383,7 +2074,7 @@ const handleSelectBatchLaunchFile = (index: number) => {
 const handleBatchImportSelectAll = () => {
   batchImportItems.value = batchImportItems.value.map((item) => ({
     ...item,
-    checked: !item.exists && !item.errorMessage && !!item.launchFilePath
+    checked: !item.exists && !item.errorMessage && (detailIsManga.value ? Number(item?.imageCount ?? 0) > 0 : !!item.launchFilePath)
   }))
 }
 
@@ -1397,12 +2088,14 @@ const handleBatchImportDeselectAll = () => {
 const handleBatchImportInvert = () => {
   batchImportItems.value = batchImportItems.value.map((item) => ({
     ...item,
-    checked: !item.exists && !item.errorMessage && !!item.launchFilePath ? !item.checked : false
+    checked: !item.exists && !item.errorMessage && (detailIsManga.value ? Number(item?.imageCount ?? 0) > 0 : !!item.launchFilePath)
+      ? !item.checked
+      : false
   }))
 }
 
 const canToggleBatchImportItem = (item: any) =>
-  !item?.exists && !item?.errorMessage && !!item?.launchFilePath
+  !item?.exists && !item?.errorMessage && (detailIsManga.value ? Number(item?.imageCount ?? 0) > 0 : !!item?.launchFilePath)
 
 const handleToggleBatchImportItem = (index: number) => {
   const item = batchImportItems.value[index]
@@ -1417,14 +2110,19 @@ const handleConfirmBatchImport = () => {
   void (async () => {
     const targetCategoryId = categoryId.value
     const selectedItems = batchImportItems.value
-      .filter((item) => item.checked && item.launchFilePath)
-      .map((item) => ({
-        directoryPath: item.directoryPath,
-        launchFilePath: item.launchFilePath,
-        websiteType: item.websiteType,
-        gameId: item.gameId,
-        fetchInfoEnabled: batchImportFetchInfoEnabled.value
-      }))
+      .filter((item) => item.checked && (detailIsManga.value ? Number(item?.imageCount ?? 0) > 0 : item.launchFilePath))
+      .map((item) => detailIsManga.value
+        ? {
+            directoryPath: item.directoryPath,
+            fetchInfoEnabled: batchImportFetchInfoEnabled.value
+          }
+        : {
+            directoryPath: item.directoryPath,
+            launchFilePath: item.launchFilePath,
+            websiteType: item.websiteType,
+            gameId: item.gameId,
+            fetchInfoEnabled: batchImportFetchInfoEnabled.value
+          })
 
     if (!selectedItems.length) {
       showNotifyByType('warning', '批量导入', '请至少选择一个可导入的目录')
@@ -1445,7 +2143,9 @@ const handleConfirmBatchImport = () => {
       })
       syncBatchImportOngoingCenter(targetCategoryId)
 
-      const result = await window.api.service.importBatchGameDirectories(targetCategoryId, selectedItems)
+      const result = detailIsManga.value
+        ? await window.api.service.importBatchMultiImageDirectories(targetCategoryId, selectedItems)
+        : await window.api.service.importBatchGameDirectories(targetCategoryId, selectedItems)
       const resultType = result?.type ?? 'info'
       const resultMessage = result?.message ?? '批量导入完成'
       const resultItems = Array.isArray(result?.data) ? result.data : []
@@ -1453,14 +2153,18 @@ const handleConfirmBatchImport = () => {
       if (resultItems.length) {
         const resultMap = new Map<string, any>(
           resultItems.map((item: any) => [
-            `${String(item?.directoryPath ?? '').trim()}::${String(item?.launchFilePath ?? '').trim()}`,
+            detailIsManga.value
+              ? String(item?.directoryPath ?? '').trim()
+              : `${String(item?.directoryPath ?? '').trim()}::${String(item?.launchFilePath ?? '').trim()}`,
             item
           ])
         )
 
         batchImportItems.value = batchImportItems.value.map((item) => {
           const matchedResult = resultMap.get(
-            `${String(item?.directoryPath ?? '').trim()}::${String(item?.launchFilePath ?? '').trim()}`
+            detailIsManga.value
+              ? String(item?.directoryPath ?? '').trim()
+              : `${String(item?.directoryPath ?? '').trim()}::${String(item?.launchFilePath ?? '').trim()}`
           )
 
           if (!matchedResult) {
@@ -1533,7 +2237,7 @@ const handleSubmitResource = async () => {
   }
 
   formData.value['categoryId'] = categoryInfo.value.id
-  const payload = structuredClone(toRaw(formData.value))
+  const payload = cloneFormData(formData.value)
   const result = await window.api.service.saveResource(payload)
   const resultType = result?.type ?? 'info'
   const resultMessage = result?.message ?? '操作完成'
@@ -1606,7 +2310,9 @@ const handleDropResourceFile = (event: DragEvent) => {
     editInitialFormData.value = null
     formData.value = createEmptyFormData()
     formData.value.basePath = droppedPath
+    applyDefaultPathName(droppedPath)
     await applyGamePathAnalysis(droppedPath)
+    await applyMultiImageDirectoryAnalysis(droppedPath)
     showModal.value = true
     await nextTick()
     await basePathFormItemRef.value?.validate({ trigger: 'change' })
@@ -1629,7 +2335,7 @@ const handleSubmitEditResource = async () => {
   }
 
   formData.value.categoryId = categoryInfo.value.id
-  const payload = structuredClone(toRaw(formData.value))
+  const payload = cloneFormData(formData.value)
   const result = await window.api.service.updateResource(editingResourceId.value, payload)
   const resultType = result?.type ?? 'info'
   const resultMessage = result?.message ?? '操作完成'
@@ -1748,7 +2454,9 @@ const handleSelectBasePath = async () => {
 
       formData.value.basePath = resourcePath
       await basePathFormItemRef.value?.validate({ trigger: 'change' })
+      applyDefaultPathName(resourcePath)
       await applyGamePathAnalysis(resourcePath)
+      await applyMultiImageDirectoryAnalysis(resourcePath)
     }
   } catch (error) {
     showNotifyByType('error', '选择失败', error instanceof Error ? error.message : '选择资源路径失败')
@@ -1856,49 +2564,82 @@ const handleBatchLabelSearch = (value: string) => {
 }
 
 const handleFetchGameInfo = async () => {
-  const websiteId = String(formData.value?.meta?.websiteType ?? '').trim()
-  const gameId = String(formData.value?.meta?.gameId ?? '').trim()
-
-  const result = await window.api.service.fetchResourceInfo(websiteId, gameId)
-  const resultType = result?.type ?? 'info'
-  const resultMessage = result?.message ?? '获取资源信息完成'
-
-  if (resultType === 'error' || resultType === 'warning') {
-    showNotifyByType(resultType, '获取资源信息', resultMessage)
+  if (fetchResourceInfoLoading.value) {
     return
   }
 
-  const data = result?.data ?? {}
-  if (data.name) {
-    formData.value.name = data.name
-    if (categorySettings.value.extendTable === 'game_meta' && !formData.value.meta.nameJp) {
-      formData.value.meta.nameJp = data.name
+  fetchResourceInfoLoading.value = true
+
+  try {
+    const extendTable = String(categorySettings.value.extendTable ?? '').trim()
+    let websiteId = String(formData.value?.meta?.websiteType ?? '').trim()
+
+    if (extendTable === 'single_image_meta') {
+      const imageSiteOptions = await window.api.db.getSelectDictData(DictType.IMAGE_SITE_TYPE)
+      websiteId = String(
+        imageSiteOptions.find((item: any) => String(item?.label ?? '').trim().toLowerCase() === 'pixiv')?.value ?? ''
+      ).trim()
     }
-  }
 
-  if (data.author) {
-    formData.value.author = data.author
-  }
+    const gameId = extendTable === 'single_image_meta'
+      ? String(formData.value?.meta?.pixivId ?? '').trim()
+      : String(formData.value?.meta?.gameId ?? '').trim()
 
-  if (data.cover) {
-    formData.value.coverPath = data.cover
-  }
+    const result = await window.api.service.fetchResourceInfo(websiteId, gameId)
+    const resultType = result?.type ?? 'info'
+    const resultMessage = result?.message ?? '获取资源信息完成'
 
-  if (Array.isArray(data.tag) && data.tag.length) {
-    formData.value.tags = normalizeSelectedValues([
-      ...(formData.value.tags ?? []),
-      ...data.tag
-    ])
-  }
+    if (resultType === 'error' || resultType === 'warning') {
+      showNotifyByType(resultType, '获取资源信息', resultMessage)
+      return
+    }
 
-  if (Array.isArray(data.type) && data.type.length) {
-    formData.value.types = normalizeSelectedValues([
-      ...(formData.value.types ?? []),
-      ...data.type
-    ])
-  }
+    const data = result?.data ?? {}
+    if (data.name) {
+      formData.value.name = data.name
+      if (categorySettings.value.extendTable === 'game_meta' && !formData.value.meta.nameJp) {
+        formData.value.meta.nameJp = data.name
+      }
+    }
 
-  showNotifyByType('success', '获取资源信息', resultMessage)
+    if (data.author) {
+      formData.value.author = data.author
+    }
+
+    if (extendTable === 'multi_image_meta' && data.translator) {
+      formData.value.meta.translator = data.translator
+    }
+
+    if (data.cover && extendTable !== 'multi_image_meta') {
+      formData.value.coverPath = data.cover
+    }
+
+    if (data.website) {
+      formData.value.meta.website = data.website
+    }
+
+    if (extendTable === 'single_image_meta' && !String(formData.value?.meta?.source ?? '').trim()) {
+      formData.value.meta.source = 'Pixiv'
+    }
+
+    if (Array.isArray(data.tag) && data.tag.length) {
+      formData.value.tags = normalizeSelectedValues([
+        ...(formData.value.tags ?? []),
+        ...data.tag
+      ])
+    }
+
+    if (Array.isArray(data.type) && data.type.length) {
+      formData.value.types = normalizeSelectedValues([
+        ...(formData.value.types ?? []),
+        ...data.type
+      ])
+    }
+
+    showNotifyByType('success', '获取资源信息', resultMessage)
+  } finally {
+    fetchResourceInfoLoading.value = false
+  }
 }
 
 const handleCheckGameEngine = async () => {
@@ -1927,6 +2668,16 @@ const handleCheckGameEngine = async () => {
 }
 
 const handleLaunchResource = async (resource: any) => {
+  if (isSingleImageCategory.value) {
+    await handlePreviewSingleImageResource(resource)
+    return
+  }
+
+  if (detailIsManga.value) {
+    await openComicReader(resource)
+    return
+  }
+
   try {
     const result = await window.api.service.launchResource(
       String(resource?.id ?? ''),
@@ -1946,6 +2697,46 @@ const handleLaunchResource = async (resource: any) => {
   }
 }
 
+const handlePreviewSingleImageResource = async (resource: any) => {
+  const resourceId = String(resource?.id ?? '').trim()
+  const fallbackPath = getResourceFilePath(resource)
+
+  if (!resourceId && !fallbackPath) {
+    showNotifyByType('warning', '查看图片', '当前图片路径无效')
+    return
+  }
+
+  try {
+    const pageSize = Math.max(totalResources.value, resourceList.value.length, 1)
+    const result = await window.api.db.getResourceByCategoryId(categoryId.value, {
+      page: 1,
+      pageSize,
+      sortBy: sortBy.value,
+    })
+    const allResources = Array.isArray(result?.items) && result.items.length ? result.items : resourceList.value
+    const imageResources = allResources.filter((item: any) => !item?.missingStatus && getResourceFilePath(item))
+    const imagePaths = imageResources.map((item: any) => getResourceFilePath(item))
+
+    if (!imagePaths.length) {
+      showNotifyByType('warning', '查看图片', '当前分类下没有可预览的图片')
+      return
+    }
+
+    let initialIndex = imageResources.findIndex((item: any) => String(item?.id ?? '').trim() === resourceId)
+    if (initialIndex < 0 && fallbackPath) {
+      initialIndex = imagePaths.findIndex((filePath) => filePath === fallbackPath)
+    }
+
+    pictureViewerImagePaths.value = imagePaths
+    pictureViewerInitialIndex.value = Math.max(0, initialIndex)
+    pictureViewerAllowDelete.value = false
+    await loadPictureViewerScrollMode()
+    showPictureViewer.value = true
+  } catch (error) {
+    showNotifyByType('error', '查看图片', error instanceof Error ? error.message : '打开图片预览失败')
+  }
+}
+
 const handleStopResource = async (resource: any) => {
   try {
     const result = await window.api.service.stopResource(String(resource?.id ?? ''))
@@ -1955,6 +2746,10 @@ const handleStopResource = async (resource: any) => {
     showNotifyByType(resultType, '停止资源', resultMessage)
 
     if (resultType !== 'error') {
+      if (String(resource?.id ?? '') === String(currentComicReaderResourceId.value ?? '')) {
+        currentComicReaderResourceId.value = ''
+        showComicReader.value = false
+      }
       await fetchData()
     }
   } catch (error) {
@@ -2024,14 +2819,11 @@ const handleShowResourceDetail = (resource: any) => {
     }
     showDetailDrawer.value = true
     showPictureViewer.value = false
+    showComicReader.value = false
     visibleLogCount.value = 5
     currentScreenshotIndex.value = 0
 
-    try {
-      detailScreenshotPaths.value = await window.api.dialog.getScreenshotImages(String((selectedDetailResource.value ?? resource)?.id ?? ''))
-    } catch {
-      detailScreenshotPaths.value = []
-    }
+    await refreshDetailScreenshots(0)
   })()
 }
 
@@ -2053,6 +2845,15 @@ const handleOpenPictureViewer = async (index: number = currentScreenshotIndex.va
     Math.max(0, index),
     Math.max(0, detailScreenshotPaths.value.length - 1)
   )
+
+  if (detailIsManga.value) {
+    await openComicReader(selectedDetailResource.value, currentScreenshotIndex.value)
+    return
+  }
+
+  pictureViewerImagePaths.value = [...detailScreenshotPaths.value]
+  pictureViewerInitialIndex.value = currentScreenshotIndex.value
+  pictureViewerAllowDelete.value = !detailIsManga.value
   await loadPictureViewerScrollMode()
   showPictureViewer.value = true
 }
@@ -2194,6 +2995,12 @@ const handleOpenDetailScreenshotFolder = async () => {
     return
   }
 
+  if (detailIsManga.value) {
+    await handleOpenDetailResourcePath()
+    await refreshDetailScreenshots()
+    return
+  }
+
   await handleOpenScreenshotFolder(selectedDetailResource.value)
   await refreshDetailScreenshots()
 }
@@ -2223,7 +3030,7 @@ const handleDeleteResource = (resource: any) => {
     const resourceTitle = resource?.title ?? categoryName.value
     const confirmed = await confirmDialog(
       `删除${categoryName.value}`,
-      `确认删除“${resourceTitle}”吗？`
+      `确认删除“${resourceTitle}”吗？\n\n这只会删除数据库记录，不会删除本地文件。\n\n此操作仍然有风险，是否继续？`
     )
 
     if (!confirmed) {
@@ -2276,6 +3083,54 @@ const handleBatchSelectionAction = () => {
   if (!selectedResourceCount.value) {
     selectionModeManuallyEnabled.value = true
     return
+  }
+}
+
+const handleDeleteResourceFiles = (resource: any) => {
+  void (async () => {
+    const resourceTitle = resource?.title ?? categoryName.value
+    const targetDirectory = String(resource?.basePath ?? '').trim()
+    const confirmed = await confirmDialog(
+      `删除${categoryName.value}文件`,
+      `高危操作：将会删除“${resourceTitle}”对应目录下的所有文件，并同步删除数据库记录。\n\n目标目录：${targetDirectory || '未知'}\n\n此操作不可恢复，请确认目录无误后再继续。`
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    try {
+      const result = await window.api.service.deleteResourceWithFiles(String(resource?.id ?? ''))
+      const resultType = result?.type ?? 'info'
+      const resultMessage = result?.message ?? '操作完成'
+
+      showNotifyByType(resultType, `删除${categoryName.value}文件`, resultMessage)
+      if (resultType === 'success' || resultType === 'warning') {
+        await fetchData()
+      }
+    } catch (error) {
+      showNotifyByType('error', `删除${categoryName.value}文件`, error instanceof Error ? error.message : '删除失败')
+    }
+  })()
+}
+
+const handleAdminLaunchResource = async (resource: any) => {
+  try {
+    const result = await window.api.service.launchResourceAsAdmin(
+      String(resource?.id ?? ''),
+      String(resource?.basePath ?? ''),
+      String(resource?.fileName ?? resource?.filename ?? '') || undefined
+    )
+    const resultType = result?.type ?? 'info'
+    const resultMessage = result?.message ?? `已请求以管理员身份运行“${resource?.title ?? categoryName.value}”`
+
+    showNotifyByType(resultType, '以管理员身份运行', resultMessage)
+
+    if (resultType !== 'error') {
+      await fetchData()
+    }
+  } catch (error) {
+    showNotifyByType('error', '以管理员身份运行', error instanceof Error ? error.message : '以管理员身份运行失败')
   }
 }
 
@@ -2595,9 +3450,16 @@ const handleToggleFavorite = async (resource: any) => {
   }
 }
 
-const refreshDetailScreenshots = async (nextIndex: number = currentScreenshotIndex.value) => {
+const refreshDetailScreenshots = async (
+  nextIndex: number = currentScreenshotIndex.value,
+  targetResource: any = selectedDetailResource.value
+) => {
   try {
-    detailScreenshotPaths.value = await window.api.dialog.getScreenshotImages(String(selectedDetailResource.value?.id ?? ''))
+    if (detailIsManga.value) {
+      detailScreenshotPaths.value = await window.api.dialog.getDirectoryImages(String(targetResource?.basePath ?? ''))
+    } else {
+      detailScreenshotPaths.value = await window.api.dialog.getScreenshotImages(String(targetResource?.id ?? ''))
+    }
   } catch {
     detailScreenshotPaths.value = []
   }
@@ -2605,6 +3467,7 @@ const refreshDetailScreenshots = async (nextIndex: number = currentScreenshotInd
   if (!detailScreenshotPaths.value.length) {
     currentScreenshotIndex.value = 0
     showPictureViewer.value = false
+    showComicReader.value = false
     return
   }
 
@@ -2867,11 +3730,15 @@ const handleToggleCompleted = async (resource: any) => {
                 :can-mtool-launch="canMtoolLaunch"
                 :show-zone-launch="showZoneLaunch"
                 :can-zone-launch="canZoneLaunch"
+                :show-admin-launch="showAdminLaunch"
+                :show-cover="showCardCover"
                 :show-screenshot-folder="showScreenshotFolder"
                 :show-completed-toggle="showCompletedToggle"
+                :show-delete-files="showDeleteFiles"
                 :selected="selectedResourceIds.includes(String(resource?.id ?? ''))"
                 :selection-mode="resourceSelectionMode"
                 @launch="handleLaunchResource"
+                @admin-launch="handleAdminLaunchResource"
                 @mtool-launch="handleMtoolLaunchResource"
                 @stop="handleStopResource"
                 @zone-launch="handleZoneLaunchResource"
@@ -2883,6 +3750,7 @@ const handleToggleCompleted = async (resource: any) => {
                 @toggle-completed="handleToggleCompleted"
                 @toggle-select="handleToggleSelectResource"
                 @delete="handleDeleteResource"
+                @delete-files="handleDeleteResourceFiles"
               />
             </div>
             </div>
@@ -2930,8 +3798,8 @@ const handleToggleCompleted = async (resource: any) => {
       <n-drawer-content :title="selectedDetailResource?.title || `${categoryName}详情`" closable>
         <div class="detail-drawer__resize-handle" @mousedown.prevent="handleDetailDrawerResizeStart" />
         <n-scrollbar style="max-height: 100%;">
-            <div v-if="selectedDetailResource" class="detail-drawer">
-            <div class="detail-drawer__cover">
+            <div v-if="selectedDetailResource" class="detail-drawer" :class="{ 'detail-drawer--software': detailIsSoftware }">
+            <div v-if="!detailIsSoftware" class="detail-drawer__cover">
               <img
                 v-if="detailCoverPreviewSrc"
                 :src="detailCoverPreviewSrc"
@@ -2957,6 +3825,10 @@ const handleToggleCompleted = async (resource: any) => {
                 <div class="detail-drawer__item">
                   <span class="detail-drawer__label">{{ categorySettings.authorText || '作者' }}</span>
                   <span class="detail-drawer__value">{{ (selectedDetailResource.authors ?? []).map((item: any) => item.name).join('、') || '暂无' }}</span>
+                </div>
+                <div v-if="detailIsManga" class="detail-drawer__item">
+                  <span class="detail-drawer__label">汉化者</span>
+                  <span class="detail-drawer__value">{{ selectedDetailResource.multiImageMeta?.translator || '暂无' }}</span>
                 </div>
                 <div class="detail-drawer__item">
                   <span class="detail-drawer__label">评分</span>
@@ -3022,10 +3894,10 @@ const handleToggleCompleted = async (resource: any) => {
                     </div>
                     <span v-else class="detail-drawer__value">暂无</span>
                   </div>
-                  <div class="detail-drawer__item detail-drawer__item--full">
-                    <span class="detail-drawer__label">路径</span>
+                <div class="detail-drawer__item detail-drawer__item--full">
+                  <span class="detail-drawer__label">路径</span>
                     <div class="detail-drawer__path-row">
-                    <span class="detail-drawer__value detail-drawer__value--path">{{ selectedDetailResource.basePath || '暂无' }}</span>
+                    <span class="detail-drawer__value detail-drawer__value--path">{{ detailDisplayPath || '暂无' }}</span>
                     <n-button type="primary" ghost class="detail-drawer__path-button" @click="handleOpenDetailResourcePath">
                       <template #icon>
                         <n-icon :component="FolderOpenOutline" />
@@ -3033,7 +3905,7 @@ const handleToggleCompleted = async (resource: any) => {
                     </n-button>
                   </div>
                 </div>
-                <div v-if="detailStores.length" class="detail-drawer__item detail-drawer__item--full">
+                <div v-if="!detailIsSoftware && !detailIsManga && detailStores.length" class="detail-drawer__item detail-drawer__item--full">
                   <span class="detail-drawer__label">贩售网站</span>
                   <div class="detail-drawer__store-list">
                     <button
@@ -3059,13 +3931,24 @@ const handleToggleCompleted = async (resource: any) => {
                   v-for="metaItem in detailMetaItems"
                   :key="`${selectedDetailResource.id}-meta-${metaItem.label}`"
                   class="detail-drawer__item"
+                  :class="{ 'detail-drawer__item--full': detailIsSoftware }"
                 >
                   <span class="detail-drawer__label">{{ metaItem.label }}</span>
-                  <span v-if="metaItem.icon" class="detail-drawer__value detail-drawer__meta-with-icon">
+                  <span
+                    v-if="metaItem.icon"
+                    class="detail-drawer__value detail-drawer__meta-with-icon"
+                    :class="{ 'detail-drawer__value--multiline': detailIsSoftware }"
+                  >
                     <img :src="metaItem.icon" :alt="metaItem.value" class="detail-drawer__meta-icon" />
                     <span>{{ metaItem.value }}</span>
                   </span>
-                  <span v-else class="detail-drawer__value">{{ metaItem.value }}</span>
+                  <span
+                    v-else
+                    class="detail-drawer__value"
+                    :class="{ 'detail-drawer__value--multiline': detailIsSoftware }"
+                  >
+                    {{ metaItem.value }}
+                  </span>
                 </div>
               </div>
             </div>
@@ -3089,30 +3972,34 @@ const handleToggleCompleted = async (resource: any) => {
               <div class="detail-drawer__section-title">统计信息</div>
               <div class="detail-drawer__grid">
                 <div class="detail-drawer__item">
-                  <span class="detail-drawer__label">第一次启动</span>
+                  <span class="detail-drawer__label">{{ detailStatsText.firstAccess }}</span>
                   <span class="detail-drawer__value">{{ formatDateTime(detailStats?.firstAccessTime) }}</span>
                 </div>
                 <div class="detail-drawer__item">
-                  <span class="detail-drawer__label">最后一次启动</span>
+                  <span class="detail-drawer__label">{{ detailStatsText.lastAccess }}</span>
                   <span class="detail-drawer__value">{{ formatDateTime(detailStats?.lastAccessTime) }}</span>
                 </div>
                 <div class="detail-drawer__item">
-                  <span class="detail-drawer__label">启动次数</span>
+                  <span class="detail-drawer__label">{{ detailStatsText.accessCount }}</span>
                   <span class="detail-drawer__value">{{ Number(detailStats?.accessCount ?? 0) }}</span>
                 </div>
                 <div class="detail-drawer__item">
-                  <span class="detail-drawer__label">运行总时长</span>
+                  <span class="detail-drawer__label">{{ detailStatsText.totalRuntime }}</span>
                   <span class="detail-drawer__value">{{ formatDuration(detailStats?.totalRuntime) }}</span>
                 </div>
                 <div class="detail-drawer__item">
                   <span class="detail-drawer__label">添加日期</span>
                   <span class="detail-drawer__value">{{ formatDateTime(selectedDetailResource.createTime) }}</span>
                 </div>
+                <div v-if="detailIsManga" class="detail-drawer__item">
+                  <span class="detail-drawer__label">阅读进度</span>
+                  <span class="detail-drawer__value">{{ detailReadingProgressText }}</span>
+                </div>
               </div>
             </div>
 
-            <div v-if="detailScreenshotPaths.length" class="detail-drawer__section">
-              <div class="detail-drawer__section-title">游戏截图</div>
+            <div v-if="!detailIsSoftware && !detailIsManga && detailScreenshotPaths.length" class="detail-drawer__section">
+              <div class="detail-drawer__section-title">{{ detailPreviewSectionTitle }}</div>
               <div class="detail-drawer__screenshot" @click="handleOpenPictureViewer()">
                 <img
                   v-if="detailScreenshotPreviewSrc"
@@ -3139,6 +4026,7 @@ const handleToggleCompleted = async (resource: any) => {
                   </template>
                 </n-button>
                 <n-popconfirm
+                  v-if="!detailIsManga"
                   v-model:show="showDeleteScreenshotConfirm"
                   @positive-click="handleDeleteCurrentScreenshot"
                   positive-text="删除！"
@@ -3159,13 +4047,36 @@ const handleToggleCompleted = async (resource: any) => {
                   <template #icon>
                     <n-icon :component="FolderOpenOutline" />
                   </template>
-                  打开截图文件夹
+                  {{ detailIsManga ? '打开漫画文件夹' : '打开截图文件夹' }}
                 </n-button>
               </div>
             </div>
 
-              <div class="detail-drawer__section">
-                <div class="detail-drawer__section-title">启动日志</div>
+              <div v-if="detailIsManga && detailGalleryItems.length" class="detail-drawer__section">
+                <div class="detail-drawer__section-title">{{ detailGallerySectionTitle }}</div>
+                <div class="detail-drawer__gallery">
+                  <button
+                    v-for="galleryItem in detailGalleryItems"
+                    :key="`${selectedDetailResource.id}-gallery-${galleryItem.index}`"
+                    type="button"
+                    class="detail-drawer__gallery-item"
+                    @click="handleOpenPictureViewer(galleryItem.index)"
+                  >
+                    <img
+                      v-if="galleryItem.url"
+                      :src="galleryItem.url"
+                      :alt="`${selectedDetailResource.title}-${galleryItem.index + 1}`"
+                      class="detail-drawer__gallery-image"
+                      loading="lazy"
+                    />
+                    <div v-else class="detail-drawer__gallery-placeholder">加载中</div>
+                    <div class="detail-drawer__gallery-index">{{ galleryItem.index + 1 }}</div>
+                  </button>
+                </div>
+              </div>
+
+              <div v-else-if="!isSingleImageCategory && !detailIsManga" class="detail-drawer__section">
+                <div class="detail-drawer__section-title">{{ detailGallerySectionTitle }}</div>
               <n-empty v-if="!detailLogs.length" description="暂无启动日志" />
               <n-infinite-scroll
                 v-else
@@ -3176,16 +4087,20 @@ const handleToggleCompleted = async (resource: any) => {
                 <div class="detail-drawer__logs">
                   <div v-for="(logItem, index) in visibleDetailLogs" :key="`${selectedDetailResource.id}-${index}-${logItem.startTime}`" class="detail-drawer__log">
                     <div class="detail-drawer__log-row">
+                      <span class="detail-drawer__log-label">启动方式</span>
+                      <span class="detail-drawer__log-value">{{ formatLaunchMode(logItem.launchMode) }}</span>
+                    </div>
+                    <div class="detail-drawer__log-row">
                       <span class="detail-drawer__log-label">开始时间</span>
                       <span class="detail-drawer__log-value">{{ formatDateTime(logItem.startTime) }}</span>
                     </div>
                     <div class="detail-drawer__log-row">
                       <span class="detail-drawer__log-label">结束时间</span>
-                      <span class="detail-drawer__log-value">{{ formatDateTime(logItem.endTime) }}</span>
+                      <span class="detail-drawer__log-value">{{ formatLogEndTime(logItem.endTime) }}</span>
                     </div>
                     <div class="detail-drawer__log-row">
                       <span class="detail-drawer__log-label">运行时长</span>
-                      <span class="detail-drawer__log-value">{{ formatDuration(logItem.duration) }}</span>
+                      <span class="detail-drawer__log-value">{{ formatLogDuration(logItem) }}</span>
                     </div>
                   </div>
                 </div>
@@ -3218,7 +4133,7 @@ const handleToggleCompleted = async (resource: any) => {
                 编辑信息
               </n-button>
               <n-button :disabled="!selectedDetailResource" @click="handleOpenDetailResourcePath">
-                打开游戏文件夹
+                {{ detailOpenFolderText }}
               </n-button>
             </n-space>
           </div>
@@ -3254,7 +4169,7 @@ const handleToggleCompleted = async (resource: any) => {
           <template v-if="batchProgressRunning && batchAnalyzeTotal > 0">
             <span class="batch-import-loading__title-text">
               {{ batchProgressStage === 'import'
-                ? `正在导入第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个游戏`
+                ? `正在导入第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${detailIsManga ? '漫画' : '游戏'}`
                 : `正在分析第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个目录` }}
             </span>
             <span class="batch-import-loading__title-directory" :title="getBatchProgressDirectoryName()">
@@ -3306,10 +4221,10 @@ const handleToggleCompleted = async (resource: any) => {
         <div class="batch-import-toast__progress-text">{{ batchAnalyzePercent }}%</div>
       </div>
       <div class="batch-import-toast__content">
-        <div class="batch-import-toast__title">{{ batchProgressStage === 'import' ? '正在后台导入游戏' : '正在后台分析游戏目录' }}</div>
+        <div class="batch-import-toast__title">{{ batchProgressStage === 'import' ? `正在后台导入${detailIsManga ? '漫画' : '游戏'}` : `正在后台分析${detailIsManga ? '漫画' : '游戏'}目录` }}</div>
         <div class="batch-import-toast__subtitle">
           {{ batchProgressStage === 'import'
-            ? `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个游戏`
+            ? `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${detailIsManga ? '漫画' : '游戏'}`
             : `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个目录` }}
         </div>
         <div class="batch-import-toast__subtitle" :title="getBatchProgressDirectoryName()">
@@ -3354,7 +4269,7 @@ const handleToggleCompleted = async (resource: any) => {
                 <div class="batch-import-item__row">
                   <n-checkbox
                     :checked="item.checked"
-                    :disabled="item.exists || !!item.errorMessage || !item.launchFilePath"
+                    :disabled="item.exists || !!item.errorMessage || (detailIsManga ? Number(item?.imageCount ?? 0) <= 0 : !item.launchFilePath)"
                     @click.stop
                     @update:checked="(value: boolean) => { batchImportItems[index].checked = value }"
                   />
@@ -3372,14 +4287,17 @@ const handleToggleCompleted = async (resource: any) => {
                     >
                       {{ item.importResultType === 'success' ? '已导入' : item.importResultType === 'error' ? '导入失败' : '已跳过' }}
                     </n-tag>
-                    <n-button size="small" @click.stop="handleSelectBatchLaunchFile(index)">
+                    <n-button v-if="!detailIsManga" size="small" @click.stop="handleSelectBatchLaunchFile(index)">
                       手动选择
                     </n-button>
                   </n-space>
                 </div>
                 <div class="batch-import-item__detail">
-                  <div class="batch-import-item__label">启动文件</div>
-                  <div v-if="item.launchFilePath" class="batch-import-item__value">
+                  <div class="batch-import-item__label">{{ detailIsManga ? '漫画图片' : '启动文件' }}</div>
+                  <div v-if="detailIsManga" class="batch-import-item__value">
+                    {{ item.imageCount ? `共 ${item.imageCount} 张图片` : '目录中未找到可用图片' }}
+                  </div>
+                  <div v-else-if="item.launchFilePath" class="batch-import-item__value">
                     <img
                       v-if="item.launchFileIcon"
                       :src="item.launchFileIcon"
@@ -3391,7 +4309,7 @@ const handleToggleCompleted = async (resource: any) => {
                   <div v-else class="batch-import-item__value batch-import-item__value--error">
                     {{ item.errorMessage || '未分析出可用启动文件，请手动选择' }}
                   </div>
-                  <div v-if="showBatchImportButton" class="batch-import-item__fields">
+                  <div v-if="showBatchImportButton && !detailIsManga" class="batch-import-item__fields">
                     <div class="batch-import-item__field">
                       <div class="batch-import-item__label">贩售网站</div>
                       <n-select
@@ -3514,7 +4432,10 @@ const handleToggleCompleted = async (resource: any) => {
                     v-model:value="formData.basePath"
                     :placeholder="`请选择${categoryName}路径`"
                   />
-                  <n-button @click="handleSelectBasePath">选择{{categorySettings.resourcePathType === 'file' ? '文件' : '目录'}}</n-button>
+                  <div class="path-field__actions">
+                    <n-button v-if="isSoftwareCategory" @click="handleOpenSoftwareScriptModal">脚本</n-button>
+                    <n-button @click="handleSelectBasePath">选择{{categorySettings.resourcePathType === 'file' ? '文件' : '目录'}}</n-button>
+                  </div>
                 </div>
               </n-form-item>
               <component
@@ -3523,6 +4444,7 @@ const handleToggleCompleted = async (resource: any) => {
                 :key="`${modelComponentKey}-edit`"
                 v-model:metaData="formData.meta"
                 :base-path="formData.basePath"
+                :fetch-info-loading="fetchResourceInfoLoading"
                 @check-engine="handleCheckGameEngine"
                 @fetch-game-info="handleFetchGameInfo"
               />
@@ -3609,12 +4531,54 @@ const handleToggleCompleted = async (resource: any) => {
       </template>
     </n-modal>
 
+    <n-modal
+      v-model:show="showSoftwareScriptModal"
+      preset="card"
+      title="编写脚本"
+      :style="{ width: '680px' }"
+    >
+      <n-space vertical :size="16">
+        <n-alert type="info" :show-icon="false">
+          选择脚本解释器后，每一行都会按顺序执行，保存时会自动转换成一条命令。
+        </n-alert>
+        <n-form-item label="脚本运行器">
+          <n-select
+            v-model:value="softwareScriptRuntimePath"
+            :options="softwareScriptRuntimes"
+            label-field="label"
+            value-field="value"
+            placeholder="请选择 CMD 或 PowerShell"
+          />
+        </n-form-item>
+        <n-input
+          v-model:value="softwareScriptDraft"
+          type="textarea"
+          :rows="10"
+          :placeholder="softwareScriptPlaceholder"
+        />
+        <div class="batch-label-modal__footer">
+          <n-space justify="end">
+            <n-button @click="showSoftwareScriptModal = false">取消</n-button>
+            <n-button type="primary" @click="handleConfirmSoftwareScript">保存脚本</n-button>
+          </n-space>
+        </div>
+      </n-space>
+    </n-modal>
+
     <PictureViewer
       v-model:show="showPictureViewer"
-      :image-paths="detailScreenshotPaths"
-      :initial-index="currentScreenshotIndex"
+      :image-paths="pictureViewerImagePaths"
+      :initial-index="pictureViewerInitialIndex"
       :scroll-mode="pictureViewerScrollMode"
+      :allow-delete="pictureViewerAllowDelete"
       @delete-image="handleDeleteViewerScreenshot"
+    />
+
+    <ComicReader
+      v-model:show="showComicReader"
+      :image-paths="comicReaderImagePaths"
+      :initial-index="comicReaderInitialIndex"
+      @page-change="handleComicReaderPageChange"
     />
 
     <div v-if="isDragOver && categorySettings.resourcePathType === 'file'" class="drag-overlay">
@@ -3650,7 +4614,10 @@ const handleToggleCompleted = async (resource: any) => {
                 v-model:value="formData.basePath"
                 :placeholder="`请选择${categoryName}路径`"
               />
-              <n-button @click="handleSelectBasePath">选择{{categorySettings.resourcePathType === 'file' ? '文件' : '目录'}}</n-button>
+              <div class="path-field__actions">
+                <n-button v-if="isSoftwareCategory" @click="handleOpenSoftwareScriptModal">脚本</n-button>
+                <n-button @click="handleSelectBasePath">选择{{categorySettings.resourcePathType === 'file' ? '文件' : '目录'}}</n-button>
+              </div>
             </div>
           </n-form-item>
           <component
@@ -3659,6 +4626,7 @@ const handleToggleCompleted = async (resource: any) => {
             :key="modelComponentKey"
             v-model:metaData="formData.meta"
             :base-path="formData.basePath"
+            :fetch-info-loading="fetchResourceInfoLoading"
             @check-engine="handleCheckGameEngine"
             @fetch-game-info="handleFetchGameInfo"
           />
@@ -4688,6 +5656,12 @@ const handleToggleCompleted = async (resource: any) => {
   gap: 12px;
 }
 
+.path-field__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .multi-value-field {
   width: 100%;
   display: flex;
@@ -4796,6 +5770,12 @@ const handleToggleCompleted = async (resource: any) => {
   word-break: break-all;
   flex: 1;
   min-width: 0;
+}
+
+.detail-drawer__value--multiline {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
 }
 
 .detail-drawer__value--description {
@@ -4923,6 +5903,7 @@ const handleToggleCompleted = async (resource: any) => {
   padding-top: 8px;
 }
 
+
 .detail-drawer__tag-list :deep(.n-tag) {
   border-radius: 0;
 }
@@ -4958,6 +5939,55 @@ const handleToggleCompleted = async (resource: any) => {
 
 .detail-drawer__logs-scroll {
   max-height: 420px;
+}
+
+.detail-drawer__gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 12px;
+}
+
+.detail-drawer__gallery-item {
+  position: relative;
+  padding: 0;
+  border: none;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(127, 127, 127, 0.08);
+  cursor: pointer;
+  aspect-ratio: 3 / 4;
+}
+
+.detail-drawer__gallery-image,
+.detail-drawer__gallery-placeholder {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.detail-drawer__gallery-image {
+  object-fit: cover;
+}
+
+.detail-drawer__gallery-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.detail-drawer__gallery-index {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  min-width: 24px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.68);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .detail-drawer__screenshot {

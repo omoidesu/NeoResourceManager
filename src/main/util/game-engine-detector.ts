@@ -35,6 +35,7 @@ export type GameEngineProfile = {
 const execFileAsync = promisify(execFile)
 const SHALLOW_SCAN_DEPTH = 2
 const SHALLOW_SCAN_LIMIT = 4000
+const TEXT_SCAN_CHUNK_SIZE = 4 * 1024 * 1024
 const PE_MACHINE_OFFSET = 0x3c
 const IMAGE_FILE_MACHINE_AMD64 = 0x8664
 
@@ -139,20 +140,30 @@ const hasRootFileWithExtension = (context: DetectionContext, extension: string) 
   return false
 }
 
-const getAsciiView = (buffer: Buffer) => buffer.toString('latin1').toLowerCase()
-const getUtf16View = (buffer: Buffer) => buffer.toString('utf16le').toLowerCase()
-
 const bufferIncludesText = (buffer: Buffer | null, ...needles: string[]) => {
   if (!buffer || !needles.length) {
     return false
   }
 
-  const asciiView = getAsciiView(buffer)
-  const utf16View = getUtf16View(buffer)
-  return needles.some((needle) => {
-    const normalizedNeedle = normalizeName(needle)
-    return normalizedNeedle && (asciiView.includes(normalizedNeedle) || utf16View.includes(normalizedNeedle))
-  })
+  const normalizedNeedles = needles.map((needle) => normalizeName(needle)).filter(Boolean)
+  if (!normalizedNeedles.length) {
+    return false
+  }
+
+  const overlapBytes = Math.max(...normalizedNeedles.map((needle) => needle.length * 2 + 2))
+  const step = Math.max(TEXT_SCAN_CHUNK_SIZE - overlapBytes, 1)
+
+  for (let offset = 0; offset < buffer.length; offset += step) {
+    const chunk = buffer.subarray(offset, Math.min(offset + TEXT_SCAN_CHUNK_SIZE, buffer.length))
+    const asciiView = chunk.toString('latin1').toLowerCase()
+    const utf16View = chunk.toString('utf16le').toLowerCase()
+
+    if (normalizedNeedles.some((needle) => asciiView.includes(needle) || utf16View.includes(needle))) {
+      return true
+    }
+  }
+
+  return false
 }
 
 const parseVersionNumber = (value: string | null | undefined) => {
@@ -487,7 +498,7 @@ const detectMkxp: EngineDetector = async (context) => {
   return isExecutable64Bit(buffer) ? 'RPG Maker MKXP (Z) 64Bit' : 'RPG Maker MKXP (Z)'
 }
 
-const detectRPGMakerNodeWeb: EngineDetector = (context) => {
+const detectRPGMakerNodeWeb: EngineDetector = async (context) => {
   if (hasRootFileWithExtension(context, '.rmmzproject')) {
     return 'RPG Maker MZ'
   }
@@ -526,6 +537,15 @@ const detectRPGMakerNodeWeb: EngineDetector = (context) => {
     if (hasAnyPath(context, ['js/plugins.js', 'js/main.js', 'js/rmmz_core.js'])) {
       return 'RPG Maker MZ'
     }
+  }
+
+  const executableBuffer = await readExecutableBuffer(context.gamePath, context.gameDir)
+  if (bufferIncludesText(executableBuffer, 'nw.js', 'rpg_core.js', 'system.json', 'package.json')) {
+    return 'RPG Maker MV'
+  }
+
+  if (bufferIncludesText(executableBuffer, 'nw.js', 'rmmz_core.js', 'system.json', 'package.json')) {
+    return 'RPG Maker MZ'
   }
 
   return null

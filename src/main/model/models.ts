@@ -12,6 +12,7 @@ export class ResourceForm {
 
 export class ResourceMeta {
   additionalStores!: ResourceStoreItem[]
+  commandLineArgs!: string
   engine!: string
   gameId!: string
   language!: string
@@ -19,9 +20,14 @@ export class ResourceMeta {
   nameJp!: string
   nameZh!: string
   nickname!: string
+  pixivId!: string
+  resolution!: string
+  format!: string
+  translator!: string
   version!: string
   website!: string
   websiteType!: string
+  lastReadPage: number = 0
 }
 
 export class ResourceStoreItem {
@@ -33,7 +39,9 @@ export class ResourceStoreItem {
 export class FetchResourceInfoResult {
   name!: string
   author!: string
+  translator: string = ''
   cover: string = ''
+  website: string = ''
   tag: string[] = []
   type: string[] = []
 }

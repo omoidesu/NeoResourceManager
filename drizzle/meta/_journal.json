@@ -8,6 +8,34 @@
       "when": 1774776704765,
       "tag": "0000_worthless_luminals",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1775400000000,
+      "tag": "0001_add_resource_log_launch_mode",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1775401000000,
+      "tag": "0002_add_software_meta_command_line_args",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1775418000000,
+      "tag": "0003_add_multi_image_meta_last_read_page",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1775421000000,
+      "tag": "0004_add_multi_image_meta_translator",
+      "breakpoints": true
     }
   ]
 }

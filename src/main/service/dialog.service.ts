@@ -1,13 +1,74 @@
 import { app, clipboard, dialog, nativeImage, shell } from 'electron'
-import {readFile} from 'fs/promises'
+import { readFile } from 'fs/promises'
 import path from 'path'
 import fs from 'fs'
 import { spawn } from 'child_process'
+import { createHash } from 'crypto'
+import { pathToFileURL } from 'url'
+import sharp from 'sharp'
 import { DatabaseService } from './database.service'
 import { Settings } from '../../common/constants'
 
 export class DialogService {
   private static readonly IMAGE_FILE_MACHINE_AMD64 = 0x8664
+
+  static async getAvailableScriptRuntimes() {
+    const runtimeMap = new Map<string, {
+      label: string
+      value: string
+      shellType: 'powershell' | 'cmd'
+    }>()
+
+    const addRuntime = (runtimePath: string, label: string, shellType: 'powershell' | 'cmd') => {
+      const normalizedPath = path.normalize(String(runtimePath ?? '').trim())
+      if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+        return
+      }
+
+      const dedupeKey = normalizedPath.toLowerCase()
+      if (runtimeMap.has(dedupeKey)) {
+        return
+      }
+
+      runtimeMap.set(dedupeKey, {
+        label,
+        value: normalizedPath,
+        shellType,
+      })
+    }
+
+    addRuntime('C:\\Windows\\System32\\cmd.exe', 'CMD', 'cmd')
+    addRuntime('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', 'Windows PowerShell 5.1', 'powershell')
+
+    try {
+      const whereResult = await new Promise<string[]>((resolve) => {
+        const child = spawn('where.exe', ['pwsh'], {
+          detached: false,
+          stdio: ['ignore', 'pipe', 'ignore'],
+          windowsHide: true,
+        })
+
+        const chunks: Buffer[] = []
+        child.stdout?.on('data', (chunk) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+        })
+
+        child.on('error', () => resolve([]))
+        child.on('close', () => {
+          const output = Buffer.concat(chunks).toString('utf8')
+          resolve(output.split(/\r?\n/).map((item) => item.trim()).filter(Boolean))
+        })
+      })
+
+      whereResult.forEach((runtimePath, index) => {
+        addRuntime(runtimePath, index === 0 ? 'PowerShell 7+' : `PowerShell 7+ (${path.basename(runtimePath)})`, 'powershell')
+      })
+    } catch {
+      // ignore runtime detection failures
+    }
+
+    return Array.from(runtimeMap.values())
+  }
 
   static async selectFolder() {
     const result = await dialog.showOpenDialog({
@@ -47,6 +108,20 @@ export class DialogService {
     return result.filePaths[0]
   }
 
+  static async selectFiles(extensions: string[] = []) {
+    const result = await dialog.showOpenDialog({
+      title: '请选择文件',
+      filters: extensions ? [{ name: '文件', extensions }] : [],
+      properties: ['openFile', 'multiSelections']
+    })
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return []
+    }
+
+    return result.filePaths
+  }
+
   static async selectGameLaunchFile(directoryPath: string) {
     const result = await dialog.showOpenDialog({
       title: '请选择启动文件',
@@ -83,6 +158,49 @@ export class DialogService {
 
     const buffer = await readFile(filePath)
     return `data:${mimeType};base64,${buffer.toString('base64')}`
+  }
+
+  static async getImageFileUrl(filePath: string) {
+    const normalizedPath = path.normalize(String(filePath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return null
+    }
+
+    return pathToFileURL(normalizedPath).href
+  }
+
+  static async getImagePreviewUrl(
+    filePath: string,
+    options?: {
+      maxWidth?: number
+      maxHeight?: number
+      fit?: 'inside' | 'cover'
+      quality?: number
+    }
+  ) {
+    const normalizedPath = path.normalize(String(filePath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return null
+    }
+
+    const maxWidth = Math.max(1, Number(options?.maxWidth ?? 0) || 320)
+    const maxHeight = Math.max(1, Number(options?.maxHeight ?? 0) || 320)
+    const fit = options?.fit === 'cover' ? 'cover' : 'inside'
+    const quality = Math.min(100, Math.max(40, Number(options?.quality ?? 82) || 82))
+
+    const cacheFilePath = await this.ensureImagePreviewCache(normalizedPath, {
+      maxWidth,
+      maxHeight,
+      fit,
+      quality,
+    })
+
+    if (!cacheFilePath) {
+      return null
+    }
+
+    const buffer = await readFile(cacheFilePath)
+    return `data:image/webp;base64,${buffer.toString('base64')}`
   }
 
   static async getFileIconAsDataUrl(filePath: string, fileName?: string) {
@@ -158,14 +276,21 @@ export class DialogService {
       return []
     }
 
-    const entries = fs.readdirSync(screenshotFolder, { withFileTypes: true })
-    const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'])
+    return this.listImageFiles(screenshotFolder)
+  }
 
-    return entries
-      .filter((entry) => entry.isFile())
-      .map((entry) => path.join(screenshotFolder, entry.name))
-      .filter((filePath) => imageExtensions.has(path.extname(filePath).toLowerCase()))
-      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
+  static async getDirectoryImages(directoryPath: string) {
+    const normalizedPath = path.normalize(String(directoryPath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return []
+    }
+
+    const stats = fs.statSync(normalizedPath)
+    if (!stats.isDirectory()) {
+      return []
+    }
+
+    return this.listImageFiles(normalizedPath)
   }
 
   static async selectScreenshotImage(resourceId: string) {
@@ -202,8 +327,79 @@ export class DialogService {
     return ''
   }
 
-  static async launchPath(filePath: string, fileName?: string) {
+  private static async ensureImagePreviewCache(
+    filePath: string,
+    options: {
+      maxWidth: number
+      maxHeight: number
+      fit: 'inside' | 'cover'
+      quality: number
+    }
+  ) {
+    const fileStat = await fs.promises.stat(filePath)
+    const cacheRoot = await this.getPreviewCacheRoot()
+    await fs.promises.mkdir(cacheRoot, { recursive: true })
+
+    const cacheKey = createHash('sha1')
+      .update(JSON.stringify({
+        filePath: path.normalize(filePath).toLowerCase(),
+        size: fileStat.size,
+        mtimeMs: Math.trunc(fileStat.mtimeMs),
+        ...options,
+      }))
+      .digest('hex')
+
+    const targetPath = path.join(cacheRoot, `${cacheKey}.webp`)
+    if (!fs.existsSync(targetPath)) {
+      const resizeOptions =
+        options.fit === 'cover'
+          ? {
+              width: options.maxWidth,
+              height: options.maxHeight,
+              fit: 'cover' as const,
+              position: 'centre' as const,
+            }
+          : {
+              width: options.maxWidth,
+              height: options.maxHeight,
+              fit: 'inside' as const,
+              withoutEnlargement: true,
+            }
+
+      await sharp(filePath)
+        .rotate()
+        .resize(resizeOptions)
+        .webp({ quality: options.quality })
+        .toFile(targetPath)
+    }
+
+    return targetPath
+  }
+
+  private static listImageFiles(directoryPath: string) {
+    const entries = fs.readdirSync(directoryPath, { withFileTypes: true })
+    const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'])
+
+    return entries
+      .filter((entry) => entry.isFile())
+      .map((entry) => path.join(directoryPath, entry.name))
+      .filter((filePath) => imageExtensions.has(path.extname(filePath).toLowerCase()))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
+  }
+
+  private static async getPreviewCacheRoot() {
+    const cacheSetting = await DatabaseService.getSetting(Settings.CACHE_PATH)
+    const configuredRoot = String(cacheSetting?.value ?? '').trim()
+    const baseRoot = configuredRoot
+      ? path.resolve(configuredRoot)
+      : path.resolve(app.getPath('userData'), 'cache')
+
+    return path.join(baseRoot, 'image-previews')
+  }
+
+  static async launchPath(filePath: string, fileName?: string, options?: { args?: string[] }) {
     const targetPath = fileName ? path.join(filePath, fileName) : filePath
+    const launchArgs = Array.isArray(options?.args) ? options.args : []
 
     if (!targetPath) {
       return {
@@ -230,9 +426,24 @@ export class DialogService {
 
     const extension = path.extname(targetPath).toLowerCase()
 
+    if ((this.isCommandShellExecutable(targetPath) || this.isPowerShellExecutable(targetPath)) && launchArgs.length) {
+      const child = spawn('cmd.exe', ['/c', 'start', '""', targetPath, ...launchArgs], {
+        cwd: path.dirname(targetPath),
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false,
+      })
+      child.unref()
+
+      return {
+        message: '',
+        pid: child.pid ?? null,
+      }
+    }
+
     // 可直接拉起独立进程的类型优先用 spawn，便于记录 pid。
     if (['.exe', '.com'].includes(extension)) {
-      const child = spawn(targetPath, [], {
+      const child = spawn(targetPath, launchArgs, {
         detached: true,
         stdio: 'ignore',
         windowsHide: false,
@@ -246,7 +457,8 @@ export class DialogService {
     }
 
     if (['.bat', '.cmd'].includes(extension)) {
-      const child = spawn('cmd.exe', ['/c', 'start', '""', targetPath], {
+      const child = spawn('cmd.exe', ['/c', 'start', '""', targetPath, ...launchArgs], {
+        cwd: path.dirname(targetPath),
         detached: true,
         stdio: 'ignore',
         windowsHide: false,
@@ -264,6 +476,77 @@ export class DialogService {
       message,
       pid: null,
     }
+  }
+
+  static async launchPathAsAdmin(filePath: string, fileName?: string, options?: { args?: string[] }) {
+    const targetPath = fileName ? path.join(filePath, fileName) : filePath
+    const launchArgs = Array.isArray(options?.args) ? options.args : []
+
+    if (!targetPath) {
+      return {
+        message: '路径不能为空',
+        pid: null,
+      }
+    }
+
+    if (!fs.existsSync(targetPath)) {
+      return {
+        message: `路径不存在: ${targetPath}`,
+        pid: null,
+      }
+    }
+
+    if (process.platform !== 'win32') {
+      return {
+        message: '仅支持在 Windows 下以管理员身份运行',
+        pid: null,
+      }
+    }
+
+    const stat = fs.statSync(targetPath)
+    if (stat.isDirectory()) {
+      return {
+        message: '目录不支持以管理员身份运行',
+        pid: null,
+      }
+    }
+
+    const escapedTargetPath = targetPath.replace(/'/g, "''")
+    const extension = path.extname(targetPath).toLowerCase()
+    const escapedWorkingDirectory = path.dirname(targetPath).replace(/'/g, "''")
+    const psArgumentList = this.toPowerShellArgumentList(launchArgs)
+    let command = ''
+
+    if (['.bat', '.cmd'].includes(extension)) {
+      const batArgs = [`""${escapedTargetPath}""`, ...launchArgs]
+      command = `Start-Process -FilePath 'cmd.exe' -WorkingDirectory '${escapedWorkingDirectory}' -ArgumentList ${this.toPowerShellArgumentList(['/c', ...batArgs])} -Verb RunAs`
+    } else {
+      command = launchArgs.length
+        ? `Start-Process -FilePath '${escapedTargetPath}' -ArgumentList ${psArgumentList} -Verb RunAs`
+        : `Start-Process -FilePath '${escapedTargetPath}' -Verb RunAs`
+    }
+
+    return new Promise<{ message: string; pid: number | null }>((resolve) => {
+      const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+        detached: false,
+        stdio: 'ignore',
+        windowsHide: false,
+      })
+
+      child.on('error', (error) => {
+        resolve({
+          message: error instanceof Error ? error.message : '以管理员身份运行失败',
+          pid: null,
+        })
+      })
+
+      child.on('spawn', () => {
+        resolve({
+          message: '',
+          pid: null,
+        })
+      })
+    })
   }
 
   static async launchPathWithMtool(gameExePath: string, mtoolPath: string, hookFiles: string[]) {
@@ -536,6 +819,26 @@ export class DialogService {
     })
 
     return executablePath ?? null
+  }
+
+  private static toPowerShellArgumentList(args: string[]) {
+    if (!args.length) {
+      return '@()'
+    }
+
+    return `@(${args.map((item) => `'${String(item ?? '').replace(/'/g, "''")}'`).join(', ')})`
+  }
+
+  private static isCommandShellExecutable(targetPath: string) {
+    const normalizedPath = path.normalize(String(targetPath ?? '').trim()).toLowerCase()
+    const fileName = path.basename(normalizedPath)
+    return fileName === 'cmd.exe' || fileName === 'cmd'
+  }
+
+  private static isPowerShellExecutable(targetPath: string) {
+    const normalizedPath = path.normalize(String(targetPath ?? '').trim()).toLowerCase()
+    const fileName = path.basename(normalizedPath)
+    return fileName === 'powershell.exe' || fileName === 'powershell' || fileName === 'pwsh.exe' || fileName === 'pwsh'
   }
 
   private static resolveMtoolHookPath(loadersDir: string, hookFiles: string[], gameExePath: string) {

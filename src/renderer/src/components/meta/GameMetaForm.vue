@@ -412,7 +412,7 @@ const handleOpenAdditionalWebsite = async (website: string) => {
 onMounted(async () => {
   langOptions.value = await window.api.db.getSelectDictData(DictType.LANGUAGE_TYPE)
   engineOptions.value = await window.api.db.getSelectDictData(DictType.GAME_ENGINE_TYPE)
-  websiteTypeOptions.value = await window.api.db.getSelectDictData(DictType.STORE_WEBSITE_TYPE)
+  websiteTypeOptions.value = await window.api.db.getSelectDictData(DictType.GAME_SITE_TYPE)
 
   handleGameIdChange(props.metaData?.gameId ?? '')
 })

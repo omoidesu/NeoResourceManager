@@ -38,14 +38,22 @@ const api = {
     selectFolder: () => ipcRenderer.invoke('dialog:select-folder'),
     selectFolders: () => ipcRenderer.invoke('dialog:select-folders'),
     selectFile: (extensions: string[]) => ipcRenderer.invoke('dialog:select-file', extensions),
+    selectFiles: (extensions: string[]) => ipcRenderer.invoke('dialog:select-files', extensions),
     selectGameLaunchFile: (directoryPath: string) => ipcRenderer.invoke('dialog:select-game-launch-file', directoryPath),
     readImageAsDataUrl: (filePath: string) => ipcRenderer.invoke('dialog:read-image-as-data-url', filePath),
+    getImagePreviewUrl: (
+      filePath: string,
+      options?: { maxWidth?: number; maxHeight?: number; fit?: 'inside' | 'cover'; quality?: number }
+    ) => ipcRenderer.invoke('dialog:get-image-preview-url', filePath, options),
+    getImageFileUrl: (filePath: string) => ipcRenderer.invoke('dialog:get-image-file-url', filePath),
     getFileIconAsDataUrl: (filePath: string, fileName?: string) => ipcRenderer.invoke('dialog:get-file-icon-as-data-url', filePath, fileName),
+    getAvailableScriptRuntimes: () => ipcRenderer.invoke('dialog:get-available-script-runtimes'),
     openPath: (filePath: string, fileName?: string) => ipcRenderer.invoke('dialog:open-path', filePath, fileName),
     openExternalUrl: (url: string) => ipcRenderer.invoke('dialog:open-external-url', url),
     copyImageToClipboard: (filePath: string) => ipcRenderer.invoke('dialog:copy-image-to-clipboard', filePath),
     openScreenshotFolder: (resourceId: string) => ipcRenderer.invoke('dialog:open-screenshot-folder', resourceId),
     getScreenshotImages: (resourceId: string) => ipcRenderer.invoke('dialog:get-screenshot-images', resourceId),
+    getDirectoryImages: (directoryPath: string) => ipcRenderer.invoke('dialog:get-directory-images', directoryPath),
     selectScreenshotImage: (resourceId: string) => ipcRenderer.invoke('dialog:select-screenshot-image', resourceId),
     deleteImage: (filePath: string) => ipcRenderer.invoke('dialog:delete-image', filePath),
   },
@@ -61,20 +69,33 @@ const api = {
     detectGameLaunchFile: (basePath: string) => ipcRenderer.invoke('service:detect-game-launch-file', basePath),
     analyzeGameDirectory: (directoryPath: string, launchFilePath?: string | null) =>
       ipcRenderer.invoke('service:analyze-game-directory', directoryPath, launchFilePath),
+    analyzeMultiImageDirectory: (directoryPath: string) =>
+      ipcRenderer.invoke('service:analyze-multi-image-directory', directoryPath),
     importBatchGameDirectories: (categoryId: string, items: any[]) =>
       ipcRenderer.invoke('service:import-batch-game-directories', categoryId, items),
+    importBatchMultiImageDirectories: (categoryId: string, items: any[]) =>
+      ipcRenderer.invoke('service:import-batch-multi-image-directories', categoryId, items),
     fetchResourceInfo: (websiteId: string, resourceId: string) =>
       ipcRenderer.invoke('service:fetch-resource-info', websiteId, resourceId),
     captureCoverScreenshot: (basePath: string) =>
       ipcRenderer.invoke('service:capture-cover-screenshot', basePath),
     launchResource: (resourceId: string, basePath: string, fileName?: string | null) =>
       ipcRenderer.invoke('service:launch-resource', resourceId, basePath, fileName),
+    startReadingResource: (resourceId: string) =>
+      ipcRenderer.invoke('service:start-reading-resource', resourceId),
+    getMultiImageReadingProgress: (resourceId: string) =>
+      ipcRenderer.invoke('service:get-multi-image-reading-progress', resourceId),
+    updateMultiImageReadingProgress: (resourceId: string, lastReadPage: number) =>
+      ipcRenderer.invoke('service:update-multi-image-reading-progress', resourceId, lastReadPage),
+    launchResourceAsAdmin: (resourceId: string, basePath: string, fileName?: string | null) =>
+      ipcRenderer.invoke('service:launch-resource-as-admin', resourceId, basePath, fileName),
     launchResourceWithMtool: (resourceId: string, basePath: string, fileName?: string | null) =>
       ipcRenderer.invoke('service:launch-resource-with-mtool', resourceId, basePath, fileName),
     launchResourceWithLocaleEmulator: (resourceId: string, basePath: string, fileName?: string | null) =>
       ipcRenderer.invoke('service:launch-resource-with-locale-emulator', resourceId, basePath, fileName),
     stopResource: (resourceId: string) => ipcRenderer.invoke('service:stop-resource', resourceId),
     deleteResource: (resourceId: string) => ipcRenderer.invoke('service:delete-resource', resourceId),
+    deleteResourceWithFiles: (resourceId: string) => ipcRenderer.invoke('service:delete-resource-with-files', resourceId),
     deleteResources: (resourceIds: string[]) => ipcRenderer.invoke('service:delete-resources', resourceIds),
     batchUpdateResourceLabels: (resourceIds: string[], field: 'tags' | 'types', mode: 'add' | 'remove', values: string[]) =>
       ipcRenderer.invoke('service:batch-update-resource-labels', resourceIds, field, mode, values),

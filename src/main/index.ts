@@ -1,4 +1,5 @@
-import { app, shell, BrowserWindow, ipcMain, screen } from 'electron'
+import { app, shell, BrowserWindow, dialog, ipcMain, screen } from 'electron'
+import type { MessageBoxOptions } from 'electron'
 import { join } from 'path'
 import fs from 'fs'
 import { execFile } from 'child_process'
@@ -13,8 +14,11 @@ import { createLogger } from './util/logger';
 import { ResourceRuntimeMonitorService } from './service/resource-runtime-monitor.service';
 import { FetchPluginService } from './service/fetch-plugin.service';
 import { WindowScreenshotService } from './service/window-screenshot.service';
+import { DatabaseService } from './service/database.service';
 
 let isShuttingDown = false
+let isQuitApproved = false
+let isQuitCheckInProgress = false
 const logger = createLogger('main')
 
 function prepareChromiumStoragePaths() {
@@ -103,6 +107,55 @@ async function shutdownApp(reason: string) {
   logActiveRuntimeState(`after cleanup (${reason})`)
 }
 
+async function requestAppQuit(reason: string, window?: BrowserWindow | null) {
+  if (isQuitApproved || isShuttingDown || isQuitCheckInProgress) {
+    return
+  }
+
+  isQuitCheckInProgress = true
+
+  try {
+    const runningSummary = await DatabaseService.getRunningResourceSummary()
+    if (runningSummary.count > 0) {
+      const titlesPreview = runningSummary.titles.slice(0, 5)
+      const extraCount = Math.max(0, runningSummary.count - titlesPreview.length)
+      const detailLines = titlesPreview.length
+        ? [
+            '仍在运行的资源：',
+            ...titlesPreview.map((title) => `- ${title}`),
+            ...(extraCount > 0 ? [`- 以及另外 ${extraCount} 个资源`] : [])
+          ]
+        : [`当前仍有 ${runningSummary.count} 个资源正在运行。`]
+
+      const messageBoxOptions: MessageBoxOptions = {
+        type: 'warning',
+        title: '无法退出',
+        message: '当前有正在运行的游戏或软件，请先关闭后再退出程序。',
+        detail: detailLines.join('\n'),
+        buttons: ['知道了'],
+        defaultId: 0,
+        noLink: true,
+      }
+      const targetWindow = window ?? BrowserWindow.getFocusedWindow() ?? null
+
+      if (targetWindow) {
+        await dialog.showMessageBox(targetWindow, messageBoxOptions)
+      } else {
+        await dialog.showMessageBox(messageBoxOptions)
+      }
+      return
+    }
+
+    isQuitApproved = true
+    await shutdownApp(reason)
+    app.quit()
+  } catch (error) {
+    logger.error('failed to check running resources before quit', error)
+  } finally {
+    isQuitCheckInProgress = false
+  }
+}
+
 function destroyAllWindows() {
   const windows = BrowserWindow.getAllWindows()
   logger.info('destroying windows', { count: windows.length })
@@ -119,6 +172,10 @@ function destroyAllWindows() {
 }
 
 function ensureMainWindowVisible(window: BrowserWindow) {
+  if (window.isDestroyed() || window.isFullScreen() || window.isMaximized()) {
+    return
+  }
+
   const targetWidth = 1280
   const targetHeight = 768
   const bounds = window.getBounds()
@@ -162,7 +219,13 @@ function forceNativeWindowShow(window: BrowserWindow, reason: string) {
     return
   }
 
+  if (window.isFullScreen()) {
+    logger.info('skip native window show while fullscreen', { reason })
+    return
+  }
+
   const handleValue = getWindowHandleValue(window)
+  const showCommand = window.isMaximized() ? 3 : 5
   const command = [
     'Add-Type @\'',
     'using System;',
@@ -173,7 +236,7 @@ function forceNativeWindowShow(window: BrowserWindow, reason: string) {
     '}',
     '\'@;',
     `$hWnd = [IntPtr]::new(${handleValue});`,
-    '[WindowShowApi]::ShowWindow($hWnd, 5) | Out-Null;',
+    `[WindowShowApi]::ShowWindow($hWnd, ${showCommand}) | Out-Null;`,
     '[WindowShowApi]::SetForegroundWindow($hWnd) | Out-Null;'
   ].join('\n')
 
@@ -186,7 +249,7 @@ function forceNativeWindowShow(window: BrowserWindow, reason: string) {
         return
       }
 
-      logger.info('forced native window show', { reason, handleValue })
+      logger.info('forced native window show', { reason, handleValue, showCommand })
     }
   )
 }
@@ -266,6 +329,15 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
+  mainWindow.on('close', (event) => {
+    if (isShuttingDown || isQuitApproved) {
+      return
+    }
+
+    event.preventDefault()
+    void requestAppQuit('window-close', mainWindow)
+  })
+
   // HMR for renderer base on electron-vite cli.
   // Load the remote URL for development or the local html file for production.
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
@@ -315,6 +387,10 @@ app.whenReady().then(async () => {
 
   await migrateDb()
   await seedDatabase()
+  const recoveredLogCount = await DatabaseService.markActiveResourceLogsAsUnknownEnded()
+  if (recoveredLogCount > 0) {
+    logger.warn('recovered dangling active resource logs on startup', { count: recoveredLogCount })
+  }
   createWindow()
 
   void (async () => {
@@ -336,7 +412,13 @@ app.whenReady().then(async () => {
   })
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (!isQuitApproved && !isShuttingDown) {
+    event.preventDefault()
+    void requestAppQuit('before-quit')
+    return
+  }
+
   void shutdownApp('before-quit')
 })
 

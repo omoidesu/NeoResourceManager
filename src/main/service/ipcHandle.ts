@@ -107,6 +107,10 @@ function registerDialog() {
     return DialogService.selectFile(extensions);
   })
 
+  ipcMain.handle('dialog:select-files', async (_event, extensions: string[]) => {
+    return DialogService.selectFiles(extensions);
+  })
+
   ipcMain.handle('dialog:select-game-launch-file', async (_event, directoryPath: string) => {
     return DialogService.selectGameLaunchFile(directoryPath);
   })
@@ -115,8 +119,27 @@ function registerDialog() {
     return DialogService.readImageAsDataUrl(filePath);
   })
 
+  ipcMain.handle(
+    'dialog:get-image-preview-url',
+    async (
+      _event,
+      filePath: string,
+      options?: { maxWidth?: number; maxHeight?: number; fit?: 'inside' | 'cover'; quality?: number }
+    ) => {
+      return DialogService.getImagePreviewUrl(filePath, options);
+    }
+  )
+
+  ipcMain.handle('dialog:get-image-file-url', async (_event, filePath: string) => {
+    return DialogService.getImageFileUrl(filePath);
+  })
+
   ipcMain.handle('dialog:get-file-icon-as-data-url', async (_event, filePath: string, fileName?: string) => {
     return DialogService.getFileIconAsDataUrl(filePath, fileName);
+  })
+
+  ipcMain.handle('dialog:get-available-script-runtimes', async () => {
+    return DialogService.getAvailableScriptRuntimes();
   })
 
   ipcMain.handle('dialog:open-path', async (_event, filePath: string, fileName?: string) => {
@@ -137,6 +160,10 @@ function registerDialog() {
 
   ipcMain.handle('dialog:get-screenshot-images', async (_event, resourceId: string) => {
     return DialogService.getScreenshotImages(resourceId);
+  })
+
+  ipcMain.handle('dialog:get-directory-images', async (_event, directoryPath: string) => {
+    return DialogService.getDirectoryImages(directoryPath);
   })
 
   ipcMain.handle('dialog:select-screenshot-image', async (_event, resourceId: string) => {
@@ -181,8 +208,16 @@ function registerService() {
     return ResourceService.analyzeGameDirectory(directoryPath, launchFilePath ?? undefined)
   })
 
+  ipcMain.handle('service:analyze-multi-image-directory', async (_event, directoryPath: string) => {
+    return ResourceService.analyzeMultiImageDirectory(directoryPath)
+  })
+
   ipcMain.handle('service:import-batch-game-directories', async (_event, categoryId: string, items: any[]) => {
     return ResourceService.importBatchGameDirectories(categoryId, items)
+  })
+
+  ipcMain.handle('service:import-batch-multi-image-directories', async (_event, categoryId: string, items: any[]) => {
+    return ResourceService.importBatchMultiImageDirectories(categoryId, items)
   })
 
   ipcMain.handle('service:fetch-resource-info', async (_event, websiteId: string, resourceId: string) => {
@@ -195,6 +230,22 @@ function registerService() {
 
   ipcMain.handle('service:launch-resource', async (_event, resourceId: string, basePath: string, fileName?: string | null) => {
     return ResourceService.launchResource(resourceId, basePath, fileName)
+  })
+
+  ipcMain.handle('service:start-reading-resource', async (_event, resourceId: string) => {
+    return ResourceService.startReadingResource(resourceId)
+  })
+
+  ipcMain.handle('service:get-multi-image-reading-progress', async (_event, resourceId: string) => {
+    return ResourceService.getMultiImageReadingProgress(resourceId)
+  })
+
+  ipcMain.handle('service:update-multi-image-reading-progress', async (_event, resourceId: string, lastReadPage: number) => {
+    return ResourceService.updateMultiImageReadingProgress(resourceId, lastReadPage)
+  })
+
+  ipcMain.handle('service:launch-resource-as-admin', async (_event, resourceId: string, basePath: string, fileName?: string | null) => {
+    return ResourceService.launchResourceAsAdmin(resourceId, basePath, fileName)
   })
 
   ipcMain.handle('service:launch-resource-with-mtool', async (_event, resourceId: string, basePath: string, fileName?: string | null) => {
@@ -211,6 +262,10 @@ function registerService() {
 
   ipcMain.handle('service:delete-resource', async (_event, resourceId: string) => {
     return ResourceService.deleteResource(resourceId)
+  })
+
+  ipcMain.handle('service:delete-resource-with-files', async (_event, resourceId: string) => {
+    return ResourceService.deleteResourceWithFiles(resourceId)
   })
 
   ipcMain.handle('service:delete-resources', async (_event, resourceIds: string[]) => {

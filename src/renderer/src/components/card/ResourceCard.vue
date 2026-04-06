@@ -24,15 +24,19 @@ const props = defineProps<{
   startText?: string
   showZoneLaunch?: boolean
   canZoneLaunch?: boolean
+  showAdminLaunch?: boolean
   showMtoolLaunch?: boolean
   canMtoolLaunch?: boolean
+  showCover?: boolean
   showScreenshotFolder?: boolean
   showCompletedToggle?: boolean
+  showDeleteFiles?: boolean
   selected?: boolean
   selectionMode?: boolean
 }>()
 const emit = defineEmits<{
   (event: 'launch', resource: any): void
+  (event: 'admin-launch', resource: any): void
   (event: 'stop', resource: any): void
   (event: 'zone-launch', resource: any): void
   (event: 'mtool-launch', resource: any): void
@@ -44,6 +48,7 @@ const emit = defineEmits<{
   (event: 'toggle-completed', resource: any): void
   (event: 'toggle-select', resource: any): void
   (event: 'delete', resource: any): void
+  (event: 'delete-files', resource: any): void
 }>()
 
 const resourceTags = computed(() => props.resource?.tags ?? [])
@@ -70,6 +75,12 @@ const normalizeCoverPreviewSource = (coverPath: string) => {
 }
 
 const renderMenuIcon = (icon: any) => () => h(NIcon, null, { default: () => h(icon) })
+const renderDangerLabel = (label: string) => () => h('span', {
+  style: {
+    color: '#ff7875',
+    fontWeight: 700
+  }
+}, label)
 
 const contextMenuOptions = computed(() => ([
   {
@@ -89,6 +100,12 @@ const contextMenuOptions = computed(() => ([
     key: 'zone-launch',
     disabled: !props.canZoneLaunch || !canLaunch.value,
     icon: renderMenuIcon(Play)
+  }] : []),
+  ...(props.showAdminLaunch ? [{
+    label: '以管理员身份运行',
+    key: 'admin-launch',
+    disabled: !canLaunch.value,
+    icon: renderMenuIcon(AlertCircleOutline)
   }] : []),
   {
     label: '详细信息',
@@ -128,8 +145,18 @@ const contextMenuOptions = computed(() => ([
     icon: renderMenuIcon(ImageOutline)
   }] : []),
   {
-    label: `删除${props.categoryName || '资源'}`,
+    type: 'divider',
+    key: 'danger-divider'
+  },
+  {
+    label: renderDangerLabel(`删除${props.categoryName || '资源'}`),
     key: 'delete',
+    icon: renderMenuIcon(TrashOutline)
+  },
+  {
+    label: renderDangerLabel('删除本地文件'),
+    key: 'delete-files',
+    disabled: Boolean(props.resource?.missingStatus) || !Boolean(props.resource?.basePath),
     icon: renderMenuIcon(TrashOutline)
   }
 ]))
@@ -277,6 +304,11 @@ const handleSelectMenu = (key: string) => {
     return
   }
 
+  if (key === 'admin-launch') {
+    emit('admin-launch', props.resource)
+    return
+  }
+
   if (key === 'mtool-launch') {
     emit('mtool-launch', props.resource)
     return
@@ -319,6 +351,11 @@ const handleSelectMenu = (key: string) => {
 
   if (key === 'delete') {
     emit('delete', props.resource)
+    return
+  }
+
+  if (key === 'delete-files') {
+    emit('delete-files', props.resource)
   }
 }
 
@@ -337,7 +374,12 @@ watch(
     }
 
     try {
-      coverPreviewSrc.value = (await window.api.dialog.readImageAsDataUrl(coverPath)) ?? ''
+      coverPreviewSrc.value = (await window.api.dialog.getImagePreviewUrl(coverPath, {
+        maxWidth: 520,
+        maxHeight: 340,
+        fit: 'cover',
+        quality: 78
+      })) ?? ''
     } catch {
       coverPreviewSrc.value = ''
     }
@@ -392,10 +434,18 @@ onBeforeUnmount(() => {
       <div class="resource-card-dropdown-anchor" />
     </n-dropdown>
 
-    <div class="resource-card-trigger" @contextmenu="handleContextMenu" @click="handleShowDetail">
-      <n-card size="small" class="resource-card" :class="{ 'resource-card--selected': selected }" embedded>
-        <div class="resource-card__content">
-          <div class="resource-card__cover">
+      <div class="resource-card-trigger" @contextmenu="handleContextMenu" @click="handleShowDetail">
+      <n-card
+        size="small"
+        class="resource-card"
+        :class="{
+          'resource-card--selected': selected,
+          'resource-card--compact': showCover === false
+        }"
+        embedded
+      >
+        <div class="resource-card__content" :class="{ 'resource-card__content--no-cover': showCover === false }">
+          <div v-if="showCover !== false" class="resource-card__cover">
             <img
               v-if="coverPreviewSrc"
               :src="coverPreviewSrc"
@@ -600,10 +650,15 @@ onBeforeUnmount(() => {
 
 .resource-card {
   width: 100%;
-  height: 430px;
+  height: 450px;
   cursor: pointer;
   position: relative;
   border-radius: 15px;
+  overflow: hidden;
+}
+
+.resource-card--compact {
+  height: 250px;
 }
 
 .resource-card--selected {
@@ -616,6 +671,14 @@ onBeforeUnmount(() => {
   grid-template-rows: auto auto minmax(0, 1fr);
   row-gap: 12px;
   min-height: 0;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.resource-card__content--no-cover {
+  grid-template-rows: auto minmax(0, 1fr);
+  row-gap: 14px;
+  padding-top: 6px;
 }
 
 .resource-card__cover {
@@ -649,6 +712,7 @@ onBeforeUnmount(() => {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  min-width: 0;
 }
 
 .resource-card__heading {
@@ -729,14 +793,20 @@ onBeforeUnmount(() => {
   grid-template-columns: 56px minmax(0, 1fr);
   align-items: flex-start;
   gap: 10px;
+  min-width: 0;
 }
 
 .resource-card__meta {
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.resource-card__meta-line > * {
+  min-width: 0;
 }
 
 .resource-card__meta-label {
@@ -748,6 +818,7 @@ onBeforeUnmount(() => {
 
 .resource-card__meta-line :deep(.n-space) {
   flex-wrap: wrap;
+  min-width: 0;
   max-height: 54px;
   overflow: hidden;
 }

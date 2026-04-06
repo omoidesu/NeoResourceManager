@@ -110,13 +110,20 @@ export const Settings = {
     description: '主题颜色',
     default: ''
   },
+  VERSION: {
+    name: 'version',
+    description: '版本号',
+    default: '__VERSION__'
+  }
 } as const;
 
 export const DictType = {
     RESOURCE_TYPE: 'resourceType',
     LANGUAGE_TYPE: 'languageType',
     GAME_ENGINE_TYPE: 'gameEngineType',
-    STORE_WEBSITE_TYPE: 'storeWebsiteType'
+    GAME_SITE_TYPE: 'gameSiteType',
+    IMAGE_SITE_TYPE: 'imageSiteType',
+    MANGA_SITE_TYPE: 'mangaSiteType',
 } as const;
 export const PanicMode = {
   OPEN_URL: 'openUrl',
@@ -128,5 +135,17 @@ export const PictureReadScrollMode = {
   SCROLL: 'scroll'
 } as const;
 
+export const ResourceLaunchMode = {
+  NORMAL: 'normal',
+  ADMIN: 'admin',
+  MTOOL: 'mtool',
+  LOCALE_EMULATOR: 'localeEmulator'
+} as const;
+
+export const ResourceLogSpecialTime = {
+  UNKNOWN_END_TIME: '1970-01-01T00:00:00.000Z'
+} as const;
+
 export type SettingKey = typeof Settings[keyof typeof Settings]['name']
 export type DictTypeKey = typeof DictType[keyof typeof DictType]
+export type ResourceLaunchModeKey = typeof ResourceLaunchMode[keyof typeof ResourceLaunchMode]

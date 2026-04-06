@@ -14,7 +14,7 @@ import {
 } from '../db/schema'
 import {and, asc, count, desc, eq, inArray, sql} from 'drizzle-orm'
 import {generateId} from '../util/id-generator'
-import {SettingDetail} from "../../common/constants";
+import { ResourceLogSpecialTime, SettingDetail } from "../../common/constants";
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0]
 type DbExecutor = typeof db | DbTransaction
@@ -271,6 +271,7 @@ export class DatabaseService {
         stats: true,
         logs: true,
         gameMeta: true,
+        singleImageMeta: true,
         tags: {
           with: {
             tag: true
@@ -601,6 +602,7 @@ export class DatabaseService {
         target: softwareMeta.resourceId,
         set: {
           version: metaData.version ?? null,
+          commandLineArgs: metaData.commandLineArgs ?? null,
         }
       })
       .run()
@@ -641,6 +643,34 @@ export class DatabaseService {
         target: multiImageMeta.resourceId,
         set: {
           pageCount: metaData.pageCount ?? null,
+          translator: metaData.translator ?? null,
+          lastReadPage: metaData.lastReadPage ?? undefined,
+        }
+      })
+      .run()
+  }
+
+  static async getMultiImageReadingProgress(resourceId: string, tx?: DbExecutor) {
+    const executor = tx ?? db
+    const item = await executor.query.multiImageMeta.findFirst({
+      where: eq(multiImageMeta.resourceId, resourceId)
+    })
+
+    return Number(item?.lastReadPage ?? 0)
+  }
+
+  static upsertMultiImageReadingProgress(resourceId: string, lastReadPage: number, tx?: DbExecutor) {
+    const executor = tx ?? db
+    executor
+      .insert(multiImageMeta)
+      .values({
+        resourceId,
+        lastReadPage
+      })
+      .onConflictDoUpdate({
+        target: multiImageMeta.resourceId,
+        set: {
+          lastReadPage
         }
       })
       .run()
@@ -765,6 +795,48 @@ export class DatabaseService {
         sql`${resourceLog.pid} is not null`
       ),
     })
+  }
+
+  static async getRunningResourceSummary(tx?: DbExecutor) {
+    const executor = tx ?? db
+    const activeItems = await executor
+      .select({
+        resourceId: resource.id,
+        title: resource.title,
+      })
+      .from(resourceLog)
+      .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+      .where(and(
+        eq(resourceLog.isDeleted, false),
+        eq(resource.isDeleted, false),
+        sql`${resourceLog.endTime} is null`
+      ))
+      .groupBy(resource.id, resource.title)
+      .orderBy(asc(resource.title))
+
+    return {
+      count: activeItems.length,
+      titles: activeItems.map((item) => String(item.title ?? '').trim()).filter(Boolean)
+    }
+  }
+
+  static async markActiveResourceLogsAsUnknownEnded(tx?: DbExecutor) {
+    const executor = tx ?? db
+    const unknownEndTime = new Date(ResourceLogSpecialTime.UNKNOWN_END_TIME)
+
+    const result = await executor
+      .update(resourceLog)
+      .set({
+        endTime: unknownEndTime,
+        duration: 0,
+        pid: null,
+      })
+      .where(and(
+        eq(resourceLog.isDeleted, false),
+        sql`${resourceLog.endTime} is null`
+      ))
+
+    return Number(result?.changes ?? 0)
   }
 
   static async closeActiveResourceLog(
@@ -929,6 +1001,8 @@ export class DatabaseService {
           logs: true,
           gameMeta: true,
           softwareMeta: true,
+          singleImageMeta: true,
+          multiImageMeta: true,
           videoMeta: true,
           asmrMeta: true,
           stores: {
@@ -984,6 +1058,21 @@ export class DatabaseService {
       .set({ isDeleted: true })
       .where(eq(resource.id, resourceId))
       .run()
+  }
+
+  static async logicalDeleteResources(resourceIds: string[], tx?: DbExecutor) {
+    const normalizedIds = Array.from(new Set((resourceIds ?? []).map((item) => String(item ?? '').trim()).filter(Boolean)))
+    if (!normalizedIds.length) {
+      return 0
+    }
+
+    const executor = tx ?? db
+    const result = await executor
+      .update(resource)
+      .set({ isDeleted: true })
+      .where(inArray(resource.id, normalizedIds))
+
+    return Number(result?.changes ?? normalizedIds.length)
   }
 
   static async getWatcherResources() {
