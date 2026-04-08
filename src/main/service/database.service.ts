@@ -10,7 +10,7 @@ import {
   tagResource,
   typeResource,
   resourceType, dictType, author, authorWork, storeWork,
-  gameMeta, softwareMeta, singleImageMeta, multiImageMeta, videoMeta, asmrMeta, novelMeta, websiteMeta,
+  actor, gameMeta, softwareMeta, singleImageMeta, multiImageMeta, videoMeta, asmrMeta, novelMeta, websiteMeta,
 } from '../db/schema'
 import {and, asc, count, desc, eq, inArray, sql} from 'drizzle-orm'
 import {generateId} from '../util/id-generator'
@@ -272,6 +272,8 @@ export class DatabaseService {
         logs: true,
         gameMeta: true,
         singleImageMeta: true,
+        asmrMeta: true,
+        actors: true,
         tags: {
           with: {
             tag: true
@@ -297,6 +299,7 @@ export class DatabaseService {
         isRunning: Array.isArray(item.logs)
           ? item.logs.some((logItem) => !logItem.isDeleted && !logItem.endTime)
           : false,
+        actors: item.actors,
         tags: item.tags.map(tagItem => tagItem.tag),
         types: item.types.map(typeItem => typeItem.type),
         authors: item.authors.map(authorItem => authorItem.author)
@@ -519,6 +522,17 @@ export class DatabaseService {
     executor.delete(authorWork).where(eq(authorWork.resourceId, resourceId)).run()
   }
 
+  static insertActors(actorList: (typeof actor.$inferInsert)[], tx?: DbExecutor) {
+    if (!actorList.length) return
+    const executor = tx ?? db
+    executor.insert(actor).values(actorList).run()
+  }
+
+  static deleteActorsByResourceId(resourceId: string, tx?: DbExecutor) {
+    const executor = tx ?? db
+    executor.delete(actor).where(eq(actor.resourceId, resourceId)).run()
+  }
+
   static insertTags(tagList: (typeof tag.$inferInsert)[], tx?: DbExecutor) {
     if (!tagList.length) return
     const executor = tx ?? db
@@ -709,7 +723,48 @@ export class DatabaseService {
         target: asmrMeta.resourceId,
         set: {
           cv: metaData.cv ?? null,
+          duration: metaData.duration ?? null,
+          illust: metaData.illust ?? null,
+          lastPlayFile: metaData.lastPlayFile ?? null,
+          lastPlayTime: metaData.lastPlayTime ?? null,
           language: metaData.language ?? null,
+          scenario: metaData.scenario ?? null,
+        }
+      })
+      .run()
+  }
+
+  static updateAsmrDuration(resourceId: string, duration: number, tx?: DbExecutor) {
+    const executor = tx ?? db
+    executor
+      .insert(asmrMeta)
+      .values({
+        resourceId,
+        duration,
+      })
+      .onConflictDoUpdate({
+        target: asmrMeta.resourceId,
+        set: {
+          duration,
+        }
+      })
+      .run()
+  }
+
+  static updateAsmrPlaybackProgress(resourceId: string, lastPlayFile: string, lastPlayTime: number, tx?: DbExecutor) {
+    const executor = tx ?? db
+    executor
+      .insert(asmrMeta)
+      .values({
+        resourceId,
+        lastPlayFile,
+        lastPlayTime,
+      })
+      .onConflictDoUpdate({
+        target: asmrMeta.resourceId,
+        set: {
+          lastPlayFile,
+          lastPlayTime,
         }
       })
       .run()
@@ -1005,6 +1060,7 @@ export class DatabaseService {
           multiImageMeta: true,
           videoMeta: true,
           asmrMeta: true,
+          actors: true,
           stores: {
             with: {
               store: true
@@ -1037,6 +1093,7 @@ export class DatabaseService {
       isRunning: Array.isArray(item.logs)
         ? item.logs.some((logItem) => !logItem.isDeleted && !logItem.endTime)
         : false,
+      actors: item.actors,
       tags: item.tags.map((tagItem) => tagItem.tag),
       types: item.types.map((typeItem) => typeItem.type),
       authors: item.authors.map((authorItem) => authorItem.author)

@@ -15,6 +15,8 @@ export type OngoingCenterItem = {
   title: string
   content: string
   progress?: number
+  kind?: 'default' | 'audio-player'
+  meta?: Record<string, any>
   createdAt: number
   onClick?: () => void
 }

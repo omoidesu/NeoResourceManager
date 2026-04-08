@@ -19,6 +19,16 @@ export const createEmptyMetaByType = (extendTable: string) => {
         version: '1.0.0',
         commandLineArgs: ''
       }
+    case 'asmr_meta':
+      return {
+        additionalStores: [] as Array<{ websiteType: string; workId: string; website: string }>,
+        gameId: '',
+        illust: '',
+        language: '',
+        scenario: '',
+        website: '',
+        websiteType: ''
+      }
     case 'single_image_meta':
       return {
         pixivId: '',

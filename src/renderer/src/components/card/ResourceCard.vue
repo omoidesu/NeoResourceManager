@@ -20,6 +20,7 @@ import {
 const props = defineProps<{
   resource: any
   categoryName?: string
+  hideTypeLine?: boolean
   authorLabel?: string
   startText?: string
   showZoneLaunch?: boolean
@@ -31,6 +32,7 @@ const props = defineProps<{
   showScreenshotFolder?: boolean
   showCompletedToggle?: boolean
   showDeleteFiles?: boolean
+  stopNeedsConfirm?: boolean
   selected?: boolean
   selectionMode?: boolean
 }>()
@@ -54,6 +56,7 @@ const emit = defineEmits<{
 const resourceTags = computed(() => props.resource?.tags ?? [])
 const resourceTypes = computed(() => props.resource?.types ?? [])
 const resourceAuthors = computed(() => props.resource?.authors ?? [])
+const resourceActors = computed(() => props.resource?.actors ?? [])
 const coverPreviewSrc = ref('')
 const fileIconSrc = ref('')
 const showContextMenu = ref(false)
@@ -176,6 +179,11 @@ const displayBaseName = computed(() => {
   return normalizedPath.split('/').pop() ?? normalizedPath
 })
 
+const showFileTypeIcon = computed(() => {
+  const normalizedCategoryName = String(props.categoryName ?? '').trim()
+  return normalizedCategoryName === '游戏' || normalizedCategoryName === '软件'
+})
+
 const fallbackExecutableIcon = computed(() => {
   const fileName = displayBaseName.value.toLowerCase()
 
@@ -221,6 +229,7 @@ const canLaunch = computed(() => {
 const canStop = computed(() => {
   return Boolean(props.resource?.isRunning)
 })
+const stopNeedsConfirm = computed(() => Boolean(props.stopNeedsConfirm))
 
 const handleLaunch = () => {
   if (!canLaunch.value) {
@@ -247,6 +256,11 @@ const clearStopClickTimer = () => {
 
 const handleStopButtonClick = () => {
   if (!canStop.value) {
+    return
+  }
+
+  if (!stopNeedsConfirm.value) {
+    handleStop()
     return
   }
 
@@ -390,7 +404,7 @@ watch(
 watch(
   () => [props.resource?.basePath, props.resource?.fileName ?? props.resource?.filename ?? ''],
   async ([basePath, fileName]) => {
-    if (!basePath) {
+    if (!showFileTypeIcon.value || !basePath) {
       fileIconSrc.value = ''
       return
     }
@@ -460,7 +474,7 @@ onBeforeUnmount(() => {
           <div class="resource-card__header">
             <div class="resource-card__heading">
               <div class="resource-card__title-row">
-                <span class="resource-card__title-icon">
+                <span v-if="showFileTypeIcon" class="resource-card__title-icon">
                   <img
                     v-if="fileIconSrc"
                     :src="fileIconSrc"
@@ -534,7 +548,23 @@ onBeforeUnmount(() => {
               </n-space>
             </div>
 
-            <div v-if="resourceTypes.length" class="resource-card__meta-line">
+            <div v-if="hideTypeLine && resourceActors.length" class="resource-card__meta-line">
+              <span class="resource-card__meta-label">声优</span>
+              <n-space size="small">
+                <n-tag
+                  v-for="actor in resourceActors"
+                  :key="`${resource.id}-${actor.id ?? actor.name}`"
+                  size="small"
+                  :bordered="false"
+                  round
+                  type="success"
+                >
+                  {{ actor.name }}
+                </n-tag>
+              </n-space>
+            </div>
+
+            <div v-if="!hideTypeLine && resourceTypes.length" class="resource-card__meta-line">
               <span class="resource-card__meta-label">分类</span>
               <n-space size="small">
                 <n-tag
@@ -584,7 +614,7 @@ onBeforeUnmount(() => {
         </div>
 
         <n-popconfirm
-          v-if="isRunning"
+          v-if="isRunning && stopNeedsConfirm"
           trigger="manual"
           :show="showStopConfirm"
           positive-text="直接关闭"
@@ -610,6 +640,20 @@ onBeforeUnmount(() => {
           </template>
           游戏是否已经保存？
         </n-popconfirm>
+
+        <n-float-button
+          v-else-if="isRunning"
+          type="error"
+          class="resource-card__launch"
+          description="停止"
+          :disabled="!canStop"
+          :style="launchButtonStyle"
+          @click.stop="handleStop"
+        >
+          <n-icon>
+            <Stop />
+          </n-icon>
+        </n-float-button>
 
         <n-float-button
           v-else

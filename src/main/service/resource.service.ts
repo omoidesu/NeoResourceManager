@@ -15,6 +15,7 @@ import axios from 'axios'
 import { WindowScreenshotService } from './window-screenshot.service'
 import { detectGameEngineProfile } from '../util/game-engine-detector'
 import { detectGameLaunchFile } from '../util/game-launch-file-detector'
+import { parseFile } from 'music-metadata'
 
 const fs = require('fs-extra')
 const hidefile = require('hidefile')
@@ -319,6 +320,7 @@ export class ResourceService {
 
       const saveResult = await ResourceService.saveResource({
         author: String(fetchedData?.author ?? '').trim(),
+        actors: [],
         basePath: launchFilePath,
         categoryId,
         coverPath: String(fetchedData?.cover ?? '').trim(),
@@ -331,6 +333,7 @@ export class ResourceService {
           commandLineArgs: '',
           engine: String(analysis.engineId ?? ''),
           gameId,
+          illust: '',
           language: '',
           lastReadPage: 0,
           nameEn: '',
@@ -340,6 +343,7 @@ export class ResourceService {
           pixivId: '',
           resolution: '',
           format: '',
+          scenario: '',
           translator: String(fetchedData?.translator ?? ''),
           version: '1.0.0',
           website: '',
@@ -450,6 +454,7 @@ export class ResourceService {
 
       const saveResult = await ResourceService.saveResource({
         author: String(fetchedData?.author ?? '').trim(),
+        actors: [],
         basePath: directoryPath,
         categoryId,
         coverPath: String(analysis?.coverPath ?? ''),
@@ -462,6 +467,7 @@ export class ResourceService {
           commandLineArgs: '',
           engine: '',
           gameId,
+          illust: '',
           language: '',
           lastReadPage: 0,
           nameEn: '',
@@ -471,6 +477,7 @@ export class ResourceService {
           pixivId: '',
           resolution: '',
           format: '',
+          scenario: '',
           translator: String(fetchedData?.translator ?? ''),
           version: '1.0.0',
           website: String(fetchedData?.website ?? ''),
@@ -679,6 +686,105 @@ export class ResourceService {
     return {
       type: 'success',
       message: '阅读进度已保存',
+    }
+  }
+
+  static async updateAsmrPlaybackProgress(resourceId: string, lastPlayFile: string, lastPlayTime: number) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    const normalizedLastPlayFile = String(lastPlayFile ?? '').trim()
+    const normalizedLastPlayTime = Math.max(0, Math.floor(Number(lastPlayTime ?? 0)))
+
+    if (!normalizedResourceId || !normalizedLastPlayFile) {
+      return {
+        type: 'warning',
+        message: '播放进度参数无效'
+      }
+    }
+
+    DatabaseService.updateAsmrPlaybackProgress(
+      normalizedResourceId,
+      normalizedLastPlayFile,
+      normalizedLastPlayTime
+    )
+
+    return {
+      type: 'success',
+      message: '播放进度已保存'
+    }
+  }
+
+  static async startAsmrPlayback(resourceId: string) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    if (!normalizedResourceId) {
+      return {
+        type: 'warning',
+        message: '资源ID无效',
+      }
+    }
+
+    const resource = await DatabaseService.getResourceById(normalizedResourceId)
+    if (!resource) {
+      return {
+        type: 'warning',
+        message: '资源不存在或已被删除',
+      }
+    }
+
+    const activeLog = await DatabaseService.getLatestActiveResourceLogByResourceId(normalizedResourceId)
+    if (activeLog && !activeLog.endTime) {
+      return {
+        type: 'success',
+        message: '已进入播放状态',
+      }
+    }
+
+    const accessTime = new Date()
+
+    await DatabaseService.bumpResourceStatOnLaunch(normalizedResourceId, accessTime)
+    await DatabaseService.insertResourceLog({
+      resourceId: normalizedResourceId,
+      startTime: accessTime,
+      endTime: null,
+      duration: 0,
+      pid: null,
+      launchMode: ResourceLaunchMode.NORMAL,
+      isDeleted: false,
+    })
+
+    NotificationQueueService.getInstance().pushResourceStateChanged({
+      resourceId: normalizedResourceId,
+      categoryId: resource.categoryId,
+      running: true,
+      missingStatus: Boolean(resource.missingStatus),
+      changedAt: Date.now(),
+    })
+
+    return {
+      type: 'success',
+      message: '已开始播放',
+    }
+  }
+
+  static async stopAsmrPlayback(resourceId: string) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    if (!normalizedResourceId) {
+      return {
+        type: 'warning',
+        message: '资源ID无效',
+      }
+    }
+
+    const finalized = await this.finalizeStoppedResource(normalizedResourceId)
+    if (!finalized) {
+      return {
+        type: 'warning',
+        message: '当前没有活动中的播放记录',
+      }
+    }
+
+    return {
+      type: 'success',
+      message: '已结束播放',
     }
   }
 
@@ -1147,6 +1253,7 @@ export class ResourceService {
         }
       })
 
+      const actorPayload = buildActorPayload(resourceId, resourceForm)
       const storeWorks = buildStoreWorkPayloads(resourceId, resourceForm, categoryInfo)
 
       let returnMsg = {
@@ -1161,6 +1268,7 @@ export class ResourceService {
           if (!dbAuthor) DatabaseService.insertAuthor(author, tx)
           DatabaseService.insertAuthorRef(authorRef, tx)
         }
+        DatabaseService.insertActors(actorPayload, tx)
         DatabaseService.insertTags(newTags, tx)
         DatabaseService.insertTypes(newTypes, tx)
         DatabaseService.insertTagRefs(tagRefs, tx)
@@ -1194,6 +1302,8 @@ export class ResourceService {
         fileName: resource.fileName ?? null,
         missingStatus: false,
       })
+
+      this.scheduleAsmrDurationRefresh(categoryInfo, resourceId, resource.basePath)
 
       return returnMsg
     } catch (e) {
@@ -1707,6 +1817,7 @@ export class ResourceService {
       }
 
       const authorPayload = await buildAuthorPayload(normalizedResourceId, resourceForm)
+      const actorPayload = buildActorPayload(normalizedResourceId, resourceForm)
       const tagPayload = await buildTagPayload(normalizedResourceId, resourceForm)
       const typePayload = await buildTypePayload(normalizedResourceId, resourceForm)
       const storeWorks = buildStoreWorkPayloads(normalizedResourceId, resourceForm, categoryInfo)
@@ -1714,6 +1825,7 @@ export class ResourceService {
       db.transaction((tx) => {
         DatabaseService.updateResource(resourceData, tx)
         DatabaseService.deleteAuthorRefsByResourceId(normalizedResourceId, tx)
+        DatabaseService.deleteActorsByResourceId(normalizedResourceId, tx)
         DatabaseService.deleteTagRefsByResourceId(normalizedResourceId, tx)
         DatabaseService.deleteTypeRefsByResourceId(normalizedResourceId, tx)
         DatabaseService.deleteStoreWorkByResourceId(normalizedResourceId, tx)
@@ -1725,6 +1837,7 @@ export class ResourceService {
           DatabaseService.insertAuthorRef(authorPayload.authorRef, tx)
         }
 
+        DatabaseService.insertActors(actorPayload, tx)
         DatabaseService.insertTags(tagPayload.newTags, tx)
         DatabaseService.insertTypes(typePayload.newTypes, tx)
         DatabaseService.insertTagRefs(tagPayload.tagRefs, tx)
@@ -1754,6 +1867,8 @@ export class ResourceService {
         fileName: resourceData.fileName ?? null,
         missingStatus: false,
       })
+
+      this.scheduleAsmrDurationRefresh(categoryInfo, normalizedResourceId, resourceData.basePath)
 
       return {
         type: 'success',
@@ -1799,6 +1914,32 @@ export class ResourceService {
         exists: false,
       }
     }
+  }
+
+  private static scheduleAsmrDurationRefresh(categoryInfo: any, resourceId: string, basePath: string) {
+    if (getExtendTableName(categoryInfo) !== 'asmr_meta') {
+      return
+    }
+
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    const normalizedBasePath = String(basePath ?? '').trim()
+    if (!normalizedResourceId || !normalizedBasePath) {
+      return
+    }
+
+    setImmediate(async () => {
+      try {
+        const duration = await getAudioDirectoryDuration(normalizedBasePath)
+        DatabaseService.updateAsmrDuration(normalizedResourceId, duration)
+      } catch (error) {
+        ResourceService.logger.error('scheduleAsmrDurationRefresh', {
+          resourceId: normalizedResourceId,
+          basePath: normalizedBasePath,
+          error: error instanceof Error ? error.message : String(error)
+        })
+        DatabaseService.updateAsmrDuration(normalizedResourceId, 0)
+      }
+    })
   }
 }
 
@@ -1909,6 +2050,17 @@ async function buildTagPayload(resourceId: string, resourceForm: ResourceForm) {
     newTags,
     tagRefs,
   }
+}
+
+function buildActorPayload(resourceId: string, resourceForm: ResourceForm) {
+  const actorNames = Array.from(
+    new Set((resourceForm.actors ?? []).map((item) => String(item ?? '').trim()).filter(Boolean))
+  )
+
+  return actorNames.map((name) => ({
+    resourceId,
+    name
+  }))
 }
 
 async function buildTypePayload(resourceId: string, resourceForm: ResourceForm) {
@@ -2359,10 +2511,108 @@ async function normalizeResourceMeta(
     }
   }
 
+  if (resourceSize == null) {
+    resourceSize = await resolveResourceStorageSize(categoryInfo, pathInfo, normalizedMeta)
+  }
+
+  if (getExtendTableName(categoryInfo) === 'asmr_meta') {
+    normalizedMeta.duration = -1
+  }
+
   return {
     meta: normalizedMeta,
     resourceSize,
   }
+}
+
+async function resolveResourceStorageSize(
+  categoryInfo: any,
+  pathInfo: ResourcePathInfo,
+  meta: ResourceMeta
+) {
+  const extendTable = getExtendTableName(categoryInfo)
+
+  if (['multi_image_meta', 'asmr_meta'].includes(extendTable)) {
+    return getDirectorySize(pathInfo.basePath)
+  }
+
+  if (extendTable === 'game_meta') {
+    const targetPath = getResolvedFilePath(pathInfo)
+    return targetPath ? getFileSize(targetPath) : null
+  }
+
+  if (extendTable === 'software_meta') {
+    const commandLineArgs = String(meta?.commandLineArgs ?? '').trim()
+    if (commandLineArgs) {
+      return null
+    }
+
+    const targetPath = getResolvedFilePath(pathInfo)
+    return targetPath ? getFileSize(targetPath) : null
+  }
+
+  return null
+}
+
+async function getFileSize(targetPath: string) {
+  try {
+    const fileStat = await fs.stat(targetPath)
+    return Number.isFinite(Number(fileStat.size)) ? Number(fileStat.size) : null
+  } catch {
+    return null
+  }
+}
+
+async function getDirectorySize(directoryPath: string) {
+  try {
+    const entries = await fs.readdir(directoryPath, { withFileTypes: true })
+    let totalSize = 0
+
+    for (const entry of entries) {
+      const entryPath = path.join(directoryPath, entry.name)
+      if (entry.isDirectory()) {
+        totalSize += Number(await getDirectorySize(entryPath) ?? 0)
+        continue
+      }
+
+      if (entry.isFile()) {
+        totalSize += Number(await getFileSize(entryPath) ?? 0)
+      }
+    }
+
+    return totalSize
+  } catch {
+    return null
+  }
+}
+
+async function getAudioDirectoryDuration(directoryPath: string) {
+  const audioFiles = await getDirectoryAudioFiles(directoryPath)
+  if (!audioFiles.length) {
+    return 0
+  }
+
+  let totalDurationSeconds = 0
+
+  for (const filePath of audioFiles) {
+    try {
+      const metadata = await parseFile(filePath, {
+        duration: true,
+        skipPostHeaders: true
+      })
+      const durationSeconds = Number(metadata.format.duration ?? 0)
+      if (Number.isFinite(durationSeconds) && durationSeconds > 0) {
+        totalDurationSeconds += durationSeconds
+      }
+    } catch (error) {
+      ResourceService.logger.warn('getAudioDirectoryDuration parseFile failed', {
+        filePath,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
+  return Math.max(0, Math.round(totalDurationSeconds))
 }
 
 async function readSingleImageFileInfo(imagePath: string) {
@@ -2431,6 +2681,48 @@ async function getDirectoryImageFiles(directoryPath: string) {
     .map((entry: any) => path.join(directoryPath, entry.name))
     .filter((filePath: string) => imageExtensions.has(path.extname(filePath).toLowerCase()))
     .sort((left: string, right: string) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }))
+}
+
+async function getDirectoryAudioFiles(directoryPath: string) {
+  const audioExtensions = new Set([
+    '.mp3',
+    '.wav',
+    '.flac',
+    '.m4a',
+    '.aac',
+    '.ogg',
+    '.opus',
+    '.wma',
+    '.mp4',
+    '.m4b',
+    '.ape',
+    '.wv'
+  ])
+
+  const collected: string[] = []
+
+  async function walk(currentPath: string) {
+    const entries = await fs.readdir(currentPath, { withFileTypes: true })
+    for (const entry of entries) {
+      const entryPath = path.join(currentPath, entry.name)
+      if (entry.isDirectory()) {
+        await walk(entryPath)
+        continue
+      }
+
+      if (entry.isFile() && audioExtensions.has(path.extname(entry.name).toLowerCase())) {
+        collected.push(entryPath)
+      }
+    }
+  }
+
+  try {
+    await walk(directoryPath)
+  } catch {
+    return []
+  }
+
+  return collected.sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }))
 }
 
 function pickMultiImageCoverPath(directoryPath: string, imagePaths: string[]) {
@@ -2556,8 +2848,11 @@ function syncMeta(tx: any, categoryInfo: any, resourceId: string, meta: Resource
       return
     case 'asmr_meta':
       DatabaseService.upsertAsmrMeta({
+        duration: Number.isFinite(Number(meta.duration)) ? Math.round(Number(meta.duration)) : null,
+        illust: meta.illust || null,
         resourceId,
         language: meta.language || null,
+        scenario: meta.scenario || null,
       }, tx)
       return
     case 'novel_meta':

@@ -46,6 +46,9 @@ const api = {
       options?: { maxWidth?: number; maxHeight?: number; fit?: 'inside' | 'cover'; quality?: number }
     ) => ipcRenderer.invoke('dialog:get-image-preview-url', filePath, options),
     getImageFileUrl: (filePath: string) => ipcRenderer.invoke('dialog:get-image-file-url', filePath),
+    getFileUrl: (filePath: string) => ipcRenderer.invoke('dialog:get-file-url', filePath),
+    readTextFile: (filePath: string) => ipcRenderer.invoke('dialog:read-text-file', filePath),
+    readBinaryFile: (filePath: string) => ipcRenderer.invoke('dialog:read-binary-file', filePath),
     getFileIconAsDataUrl: (filePath: string, fileName?: string) => ipcRenderer.invoke('dialog:get-file-icon-as-data-url', filePath, fileName),
     getAvailableScriptRuntimes: () => ipcRenderer.invoke('dialog:get-available-script-runtimes'),
     openPath: (filePath: string, fileName?: string) => ipcRenderer.invoke('dialog:open-path', filePath, fileName),
@@ -54,6 +57,7 @@ const api = {
     openScreenshotFolder: (resourceId: string) => ipcRenderer.invoke('dialog:open-screenshot-folder', resourceId),
     getScreenshotImages: (resourceId: string) => ipcRenderer.invoke('dialog:get-screenshot-images', resourceId),
     getDirectoryImages: (directoryPath: string) => ipcRenderer.invoke('dialog:get-directory-images', directoryPath),
+    getDirectoryAudioTree: (directoryPath: string) => ipcRenderer.invoke('dialog:get-directory-audio-tree', directoryPath),
     selectScreenshotImage: (resourceId: string) => ipcRenderer.invoke('dialog:select-screenshot-image', resourceId),
     deleteImage: (filePath: string) => ipcRenderer.invoke('dialog:delete-image', filePath),
   },
@@ -87,8 +91,14 @@ const api = {
       ipcRenderer.invoke('service:get-multi-image-reading-progress', resourceId),
     updateMultiImageReadingProgress: (resourceId: string, lastReadPage: number) =>
       ipcRenderer.invoke('service:update-multi-image-reading-progress', resourceId, lastReadPage),
-    launchResourceAsAdmin: (resourceId: string, basePath: string, fileName?: string | null) =>
-      ipcRenderer.invoke('service:launch-resource-as-admin', resourceId, basePath, fileName),
+      updateAsmrPlaybackProgress: (resourceId: string, lastPlayFile: string, lastPlayTime: number) =>
+        ipcRenderer.invoke('service:update-asmr-playback-progress', resourceId, lastPlayFile, lastPlayTime),
+      startAsmrPlayback: (resourceId: string) =>
+        ipcRenderer.invoke('service:start-asmr-playback', resourceId),
+      stopAsmrPlayback: (resourceId: string) =>
+        ipcRenderer.invoke('service:stop-asmr-playback', resourceId),
+      launchResourceAsAdmin: (resourceId: string, basePath: string, fileName?: string | null) =>
+        ipcRenderer.invoke('service:launch-resource-as-admin', resourceId, basePath, fileName),
     launchResourceWithMtool: (resourceId: string, basePath: string, fileName?: string | null) =>
       ipcRenderer.invoke('service:launch-resource-with-mtool', resourceId, basePath, fileName),
     launchResourceWithLocaleEmulator: (resourceId: string, basePath: string, fileName?: string | null) =>

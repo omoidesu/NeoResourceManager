@@ -43,6 +43,79 @@ function unwrapProductPayload(data) {
   return data ?? null
 }
 
+function normalizePeople(values) {
+  const extractFromItem = (item) => {
+    if (!item) {
+      return []
+    }
+
+    if (Array.isArray(item)) {
+      return item.flatMap((child) => extractFromItem(child))
+    }
+
+    if (typeof item === 'string') {
+      return item.split(/[\/,、]/)
+    }
+
+    if (typeof item === 'object') {
+      return [
+        item.name,
+        item.value,
+        item.label,
+        item.artist_name,
+        item.maker_name
+      ]
+    }
+
+    return []
+  }
+
+  const list = Array.isArray(values) ? values : [values]
+  return Array.from(new Set(
+    list
+      .flatMap((item) => extractFromItem(item))
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+  ))
+}
+
+function resolveCv(data) {
+  const creatorSources = [
+    data?.creaters?.voice_by,
+    data?.creaters?.voice_actor,
+    data?.creaters?.cv,
+    data?.creaters?.cast,
+    data?.creaters?.va,
+    data?.voice_by,
+    data?.voice_actor,
+    data?.cv,
+    data?.cast
+  ]
+
+  const names = normalizePeople(creatorSources)
+  return names.join(' / ')
+}
+
+function resolveScenario(data) {
+  const names = normalizePeople([
+    data?.creaters?.scenario_by,
+    data?.scenario_by
+  ])
+
+  return names.join(' / ')
+}
+
+function resolveIllust(data) {
+  const names = normalizePeople([
+    data?.creaters?.illust_by,
+    data?.creaters?.illustration_by,
+    data?.illust_by,
+    data?.illustration_by
+  ])
+
+  return names.join(' / ')
+}
+
 module.exports = {
   websiteName: 'DLsite',
 
@@ -84,7 +157,11 @@ module.exports = {
     const result = {
       name: data?.work_name ?? '',
       author: data?.maker_name ?? '',
+      cv: resolveCv(data),
+      illust: resolveIllust(data),
+      scenario: resolveScenario(data),
       cover: data?.image_main?.url ? `https:${data.image_main.url}` : '',
+      website: `https://www.dlsite.com/${rule}/work/=/product_id/${String(resourceId || '').trim().toUpperCase()}.html`,
       tag: genres,
       type: data?.work_type ? [data.work_type] : []
     }

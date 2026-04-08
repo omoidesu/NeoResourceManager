@@ -134,6 +134,18 @@ function registerDialog() {
     return DialogService.getImageFileUrl(filePath);
   })
 
+  ipcMain.handle('dialog:get-file-url', async (_event, filePath: string) => {
+    return DialogService.getFileUrl(filePath);
+  })
+
+  ipcMain.handle('dialog:read-text-file', async (_event, filePath: string) => {
+    return DialogService.readTextFile(filePath);
+  })
+
+  ipcMain.handle('dialog:read-binary-file', async (_event, filePath: string) => {
+    return DialogService.readBinaryFile(filePath);
+  })
+
   ipcMain.handle('dialog:get-file-icon-as-data-url', async (_event, filePath: string, fileName?: string) => {
     return DialogService.getFileIconAsDataUrl(filePath, fileName);
   })
@@ -164,6 +176,10 @@ function registerDialog() {
 
   ipcMain.handle('dialog:get-directory-images', async (_event, directoryPath: string) => {
     return DialogService.getDirectoryImages(directoryPath);
+  })
+
+  ipcMain.handle('dialog:get-directory-audio-tree', async (_event, directoryPath: string) => {
+    return DialogService.getDirectoryAudioTree(directoryPath);
   })
 
   ipcMain.handle('dialog:select-screenshot-image', async (_event, resourceId: string) => {
@@ -242,6 +258,18 @@ function registerService() {
 
   ipcMain.handle('service:update-multi-image-reading-progress', async (_event, resourceId: string, lastReadPage: number) => {
     return ResourceService.updateMultiImageReadingProgress(resourceId, lastReadPage)
+  })
+
+  ipcMain.handle('service:update-asmr-playback-progress', async (_event, resourceId: string, lastPlayFile: string, lastPlayTime: number) => {
+    return ResourceService.updateAsmrPlaybackProgress(resourceId, lastPlayFile, lastPlayTime)
+  })
+
+  ipcMain.handle('service:start-asmr-playback', async (_event, resourceId: string) => {
+    return ResourceService.startAsmrPlayback(resourceId)
+  })
+
+  ipcMain.handle('service:stop-asmr-playback', async (_event, resourceId: string) => {
+    return ResourceService.stopAsmrPlayback(resourceId)
   })
 
   ipcMain.handle('service:launch-resource-as-admin', async (_event, resourceId: string, basePath: string, fileName?: string | null) => {

@@ -83,7 +83,7 @@ export const Settings = {
   SHORTCUT_PRINT_SCREEN: {
     name: 'shortcutPrintScreen',
     description: '屏幕截图',
-    default: 'f12'
+    default: 'f11'
   },
   SHORTCUT_PANIC_KEY: {
     name: 'shortcutPanicKey',
@@ -122,6 +122,7 @@ export const DictType = {
     LANGUAGE_TYPE: 'languageType',
     GAME_ENGINE_TYPE: 'gameEngineType',
     GAME_SITE_TYPE: 'gameSiteType',
+    ASMR_SITE_TYPE: 'asmrSiteType',
     IMAGE_SITE_TYPE: 'imageSiteType',
     MANGA_SITE_TYPE: 'mangaSiteType',
 } as const;

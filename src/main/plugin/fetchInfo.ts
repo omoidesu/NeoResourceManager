@@ -5,7 +5,7 @@ import {createLogger} from "../util/logger"
 import {generateId} from "../util/id-generator";
 
 export abstract class FetchInfo {
-  private websiteId!: string
+  private websiteIds: string[] = []
   // 对应dict_data表中name字段
   protected abstract readonly websiteName: string
   protected readonly websiteTypeName?: string
@@ -23,17 +23,17 @@ export abstract class FetchInfo {
       throw new Error(`${this.constructor.name}: websiteName field cannot be empty`);
     }
 
-    const dictData = await this.resolveWebsiteDictData()
+    const dictDataList = await this.resolveWebsiteDictDataList()
 
-    if (!dictData) {
+    if (!dictDataList.length) {
       throw new Error(`${this.websiteName} is not registered in the database`);
     }
 
-    this.websiteId = dictData.id;
+    this.websiteIds = dictDataList.map((item) => item.id)
   }
 
   public match(websiteId: string) {
-    return websiteId === this.websiteId
+    return this.websiteIds.includes(websiteId)
   }
 
   public async fetch(resourceId: string) {
@@ -44,7 +44,7 @@ export abstract class FetchInfo {
     let result = true;
     try {
       await this.beforeEnable()
-      await this.updateWebsiteEnableStatus(this.websiteId, true)
+      await Promise.all(this.websiteIds.map((websiteId) => this.updateWebsiteEnableStatus(websiteId, true)))
       await this.afterEnable()
     } catch (e) {
       this.logger.error(e)
@@ -58,7 +58,7 @@ export abstract class FetchInfo {
     let result = true;
     try {
       await this.beforeDisable()
-      await this.updateWebsiteEnableStatus(this.websiteId, false)
+      await Promise.all(this.websiteIds.map((websiteId) => this.updateWebsiteEnableStatus(websiteId, false)))
       await this.afterDisable()
     } catch (e) {
       this.logger.error(e)
@@ -76,9 +76,10 @@ export abstract class FetchInfo {
     await DatabaseService.updateDictData(dictData)
   }
 
-  private async resolveWebsiteDictData() {
+  private async resolveWebsiteDictDataList() {
     const typeDefinitions = [
       { name: DictType.GAME_SITE_TYPE, description: '贩售网站' },
+      { name: DictType.ASMR_SITE_TYPE, description: '音声网站' },
       { name: DictType.IMAGE_SITE_TYPE, description: '图片网站' },
       { name: DictType.MANGA_SITE_TYPE, description: '漫画网站' }
     ]
@@ -90,19 +91,25 @@ export abstract class FetchInfo {
         ]
       : typeDefinitions
 
+    const result: any[] = []
+
     for (const definition of prioritizedTypeDefinitions) {
       const typeId = await this.ensureDictType(definition.name, definition.description)
       const dictData = await DatabaseService.getDictDataByTypeAndDataName(typeId, this.websiteName)
       if (dictData) {
-        return dictData
+        result.push(dictData)
+        continue
       }
 
       if (definition.name === this.websiteTypeName) {
-        return await this.registerWebsiteDictData(typeId)
+        const registeredData = await this.registerWebsiteDictData(typeId)
+        if (registeredData) {
+          result.push(registeredData)
+        }
       }
     }
 
-    return null
+    return result
   }
 
   private async ensureDictType(typeName: string, description: string) {

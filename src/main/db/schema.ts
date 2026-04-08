@@ -94,6 +94,11 @@ export const videoMeta = sqliteTable('video_meta', {
 export const asmrMeta = sqliteTable('asmr_meta', {
   resourceId: text('resource_id').primaryKey().references(() => resource.id),
   cv: text('cv'),
+  scenario: text('scenario'),
+  illust: text('illust'),
+  duration: integer('duration'),
+  lastPlayFile: text('last_play_file'),
+  lastPlayTime: integer('last_play_time'),
   language: text('language'),
 });
 

@@ -8,14 +8,17 @@ import { removeOngoingCenterItem, upsertOngoingCenterItem } from '../utils/notif
 import ResourceCard from '../components/card/ResourceCard.vue'
 import PictureViewer from '../components/PictureViewer.vue'
 import ComicReader from '../components/ComicReader.vue'
+import AudioPlayer from '../components/AudioPlayer.vue'
 import RichTextEditor from '../components/RichTextEditor.vue'
 import { createEmptyMetaByType } from '../components/meta/meta-factory'
 import { resolveMetaFormComponent } from '../components/meta/registry'
+import { useAudioPlayerStore } from '../utils/audio-player-store'
 import { DictType, ResourceLaunchMode, ResourceLogSpecialTime, Settings } from '../../../common/constants'
 import type { ResourceForm, ResourceMeta } from '../../../main/model/models'
 
 const route = useRoute()
 const injectedIsDark = inject<ComputedRef<boolean>>('appIsDark', computed(() => true))
+const audioPlayerStore = useAudioPlayerStore()
 const categoryId = computed(() => route.params.id as string)
 const resourceList = ref<any[]>([]) // 资源列表数据
 const resourceListRenderVersion = ref(0)
@@ -58,6 +61,7 @@ const detailDescriptionContentRef = ref<HTMLElement | null>(null)
 const detailDescriptionHeight = ref(400)
 const showPictureViewer = ref(false)
 const showComicReader = ref(false)
+const showAudioPlayer = ref(false)
 const pictureViewerScrollMode = ref(String(Settings.PICTURE_READ_SCROLL_MODE.default ?? 'zoom'))
 const pictureViewerImagePaths = ref<string[]>([])
 const pictureViewerInitialIndex = ref(0)
@@ -65,12 +69,23 @@ const pictureViewerAllowDelete = ref(true)
 const comicReaderImagePaths = ref<string[]>([])
 const comicReaderInitialIndex = ref(0)
 const currentComicReaderResourceId = ref('')
+const audioPlayerInitialPath = ref('')
+const audioPlayerInitialTime = ref(0)
+const audioPlayerPlaylist = ref<Array<{ path: string; label: string; duration?: number | null; hasSubtitle?: boolean }>>([])
+const audioPlayerResourceId = ref('')
+const audioPlayerTitle = ref('')
+const audioPlayerCoverSrc = ref('')
+const detailAudioContextMenuVisible = ref(false)
+const detailAudioContextMenuX = ref(0)
+const detailAudioContextMenuY = ref(0)
+const detailAudioContextMenuTarget = ref<any | null>(null)
 const tagInputValue = ref('')
 const typeInputValue = ref('')
 const batchLabelInputValue = ref('')
 const showDetailDrawer = ref(false)
 const selectedDetailResource = ref<any>(null)
 const detailScreenshotPaths = ref<string[]>([])
+const detailAudioTree = ref<any[]>([])
 const detailGalleryImageUrls = ref<Record<string, string>>({})
 const currentScreenshotIndex = ref(0)
 const showDeleteScreenshotConfirm = ref(false)
@@ -218,6 +233,7 @@ const createEmptyFormData = () => ({
   description: '',
   coverPath: '',
   basePath: '',
+  actors: [] as string[],
   tags: [] as string[],
   types: [] as string[],
   meta: createEmptyMetaByType(String(categorySettings.value.extendTable ?? ''))
@@ -255,6 +271,7 @@ const mapResourceDetailToFormData = (resource: any) => {
     coverPath: resource?.coverPath ?? '',
     basePath: buildDisplayBasePath(resource),
     author: Array.isArray(resource?.authors) ? String(resource.authors[0]?.name ?? '') : '',
+    actors: Array.isArray(resource?.actors) ? resource.actors.map((item: any) => String(item?.name ?? '')).filter(Boolean) : [],
     tags: Array.isArray(resource?.tags) ? resource.tags.map((item: any) => String(item?.name ?? '')).filter(Boolean) : [],
     types: Array.isArray(resource?.types) ? resource.types.map((item: any) => String(item?.name ?? '')).filter(Boolean) : [],
     meta: {
@@ -342,14 +359,6 @@ const selectedResourceCount = computed(() => selectedResourceIds.value.length)
 const resourceSelectionMode = computed(() => selectedResourceCount.value > 0 || selectionModeManuallyEnabled.value)
 const currentCategoryBatchInBackground = computed(() =>
   batchProgressRunning.value && batchAnalyzeInBackground.value
-)
-
-const descriptionLabel = computed(() =>
-  categorySettings.value.extendTable === 'game_meta' ? '游戏简介' : `${categoryName.value}描述`
-)
-
-const descriptionPlaceholder = computed(() =>
-  categorySettings.value.extendTable === 'game_meta' ? '请输入游戏简介' : `请输入${categoryName.value}描述`
 )
 
 const pageSizeOptions = [
@@ -453,6 +462,14 @@ const categoryName = computed(() => {
   return categoryInfo.value?.name || '资源'
 })
 
+const descriptionLabel = computed(() =>
+  categorySettings.value.extendTable === 'game_meta' ? '游戏简介' : `${categoryName.value}描述`
+)
+
+const descriptionPlaceholder = computed(() =>
+  categorySettings.value.extendTable === 'game_meta' ? '请输入游戏简介' : `请输入${categoryName.value}描述`
+)
+
 const isSingleImageCategory = computed(() => categorySettings.value.extendTable === 'single_image_meta')
 const startText = computed(() => {
   if (isSingleImageCategory.value) {
@@ -484,8 +501,13 @@ const softwareScriptPlaceholder = computed(() =>
     ? '例如：\nSet-Location d:/myDir\n. .\\venv\\Scripts\\Activate.ps1\npy -3.10 run.py'
     : '例如：\ncd /d d:/myDir\ncall .\\venv\\Scripts\\activate\npy -3.10 run.py'
 )
+const filterSectionCount = computed(() => {
+  const baseCount = detailIsAsmr.value ? 2 : 3
+  return showEngineFilter.value ? baseCount + 1 : baseCount
+})
+
 const filterSectionsStyle = computed(() => ({
-  gridTemplateRows: `repeat(${showEngineFilter.value ? 4 : 3}, minmax(0, 1fr))`
+  gridTemplateRows: `repeat(${filterSectionCount.value}, minmax(0, 1fr))`
 }))
 const detailLogs = computed(() =>
   [...(selectedDetailResource.value?.logs ?? [])]
@@ -501,14 +523,15 @@ const hasMoreDetailLogs = computed(() => visibleLogCount.value < detailLogs.valu
 const noMore = computed(() => detailLogs.value.length > 5 && !hasMoreDetailLogs.value)
 const detailStats = computed(() => selectedDetailResource.value?.stats ?? null)
 const detailUsesBrowseTerms = computed(() => isSingleImageCategory.value || detailIsManga.value)
+const detailUsesPlayTerms = computed(() => detailIsAsmr.value)
 const detailStatsText = computed(() => ({
-  firstAccess: detailUsesBrowseTerms.value ? '第一次浏览' : '第一次启动',
-  lastAccess: detailUsesBrowseTerms.value ? '最后一次浏览' : '最后一次启动',
-  accessCount: detailUsesBrowseTerms.value ? '浏览次数' : '启动次数',
-  totalRuntime: detailUsesBrowseTerms.value ? '浏览总时长' : '运行总时长',
+  firstAccess: detailUsesBrowseTerms.value ? '第一次浏览' : (detailUsesPlayTerms.value ? '第一次播放' : '第一次启动'),
+  lastAccess: detailUsesBrowseTerms.value ? '最后一次浏览' : (detailUsesPlayTerms.value ? '最后一次播放' : '最后一次启动'),
+  accessCount: detailUsesBrowseTerms.value ? '浏览次数' : (detailUsesPlayTerms.value ? '播放次数' : '启动次数'),
+  totalRuntime: detailUsesBrowseTerms.value ? '浏览总时长' : (detailUsesPlayTerms.value ? '播放总时长' : '运行总时长'),
 }))
 const detailPreviewSectionTitle = computed(() => detailIsManga.value ? '' : '游戏截图')
-const detailGallerySectionTitle = computed(() => detailIsManga.value ? '图片预览' : '启动日志')
+const detailGallerySectionTitle = computed(() => detailIsManga.value ? '图片预览' : (detailIsAsmr.value ? '音声目录' : '启动日志'))
 const detailReadingProgressText = computed(() => {
   if (!detailIsManga.value) {
     return ''
@@ -523,6 +546,22 @@ const detailReadingProgressText = computed(() => {
 
   return `${Math.min(lastReadPage + 1, totalPages)} / ${totalPages}`
 })
+const detailPlaybackProgressText = computed(() => {
+  if (!detailIsAsmr.value) {
+    return ''
+  }
+
+  const lastPlayFile = String(selectedDetailResource.value?.asmrMeta?.lastPlayFile ?? '').trim()
+  if (!lastPlayFile) {
+    return '暂无'
+  }
+
+  const normalizedPath = lastPlayFile.replace(/\\/g, '/')
+  const fileName = normalizedPath.split('/').pop() || normalizedPath
+  const lastPlayTime = Math.max(0, Number(selectedDetailResource.value?.asmrMeta?.lastPlayTime ?? 0))
+
+  return `${fileName} ${formatDuration(lastPlayTime)}`
+})
 const detailGalleryItems = computed(() =>
   detailScreenshotPaths.value.map((filePath, index) => ({
     filePath,
@@ -530,6 +569,413 @@ const detailGalleryItems = computed(() =>
     url: detailGalleryImageUrls.value[filePath] ?? ''
   }))
 )
+
+const collectAudioTreeImagePaths = (nodes: any[]): string[] => {
+  const imagePaths: string[] = []
+
+  const visit = (items: any[]) => {
+    for (const item of items) {
+      if (!item) {
+        continue
+      }
+
+      if (item.kind === 'image' && item.path) {
+        imagePaths.push(String(item.path))
+      }
+
+      if (Array.isArray(item.children) && item.children.length) {
+        visit(item.children)
+      }
+    }
+  }
+
+  visit(nodes)
+  return imagePaths
+}
+
+const detailAudioImagePaths = computed(() => collectAudioTreeImagePaths(detailAudioTree.value))
+const collectAudioTreeTracks = (nodes: any[]): Array<{ path: string; label: string; duration?: number | null; hasSubtitle?: boolean }> => {
+  const tracks: Array<{ path: string; label: string; duration?: number | null; hasSubtitle?: boolean }> = []
+
+  const visit = (items: any[]) => {
+    for (const item of items) {
+      if (!item) {
+        continue
+      }
+
+      if (item.kind === 'audio' && item.path) {
+        tracks.push({
+          path: String(item.path),
+          label: String(item.label ?? ''),
+          duration: Number.isFinite(Number(item.duration)) ? Number(item.duration) : null,
+          hasSubtitle: Boolean(item.hasSubtitle)
+        })
+      }
+
+      if (Array.isArray(item.children) && item.children.length) {
+        visit(item.children)
+      }
+    }
+  }
+
+  visit(nodes)
+  return tracks
+}
+
+const detailAudioPlaylist = computed(() => collectAudioTreeTracks(detailAudioTree.value))
+
+const normalizeAudioPath = (filePath: string | null | undefined) => String(filePath ?? '').replace(/\\/g, '/').trim().toLowerCase()
+const getAudioDirectoryPath = (filePath: string | null | undefined) => String(filePath ?? '').replace(/\\/g, '/').trim().split('/').slice(0, -1).join('/')
+
+const getAudioPlayerCoverPreview = async (resource: any) => {
+  const resourceId = String(resource?.id ?? '')
+  if (resourceId && resourceId === String(selectedDetailResource.value?.id ?? '')) {
+    return detailCoverPreviewSrc.value
+  }
+
+  const coverPath = normalizeCoverPreviewSource(String(resource?.coverPath ?? ''))
+  if (!coverPath) {
+    return ''
+  }
+
+  if (/^https?:\/\//i.test(coverPath) || /^data:/i.test(coverPath)) {
+    return coverPath
+  }
+
+  try {
+    return (await window.api.dialog.getImagePreviewUrl(String(resource?.coverPath ?? ''), {
+      maxWidth: 960,
+      maxHeight: 720,
+      fit: 'inside',
+      quality: 84
+    })) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+const applyAudioPlayerSession = async (resource: any, playlist: Array<{ path: string; label: string; duration?: number | null; hasSubtitle?: boolean }>, initialPath: string, initialTime = 0) => {
+  audioPlayerResourceId.value = String(resource?.id ?? '')
+  audioPlayerPlaylist.value = [...playlist]
+  audioPlayerInitialPath.value = initialPath
+  audioPlayerInitialTime.value = Math.max(0, Number(initialTime ?? 0))
+  audioPlayerTitle.value = String(resource?.title ?? categoryName.value ?? '音频播放器')
+  audioPlayerCoverSrc.value = await getAudioPlayerCoverPreview(resource)
+  showAudioPlayer.value = true
+}
+
+const resolveResourceAudioTree = async (resource: any) => {
+  const resourceId = String(resource?.id ?? '')
+  const selectedId = String(selectedDetailResource.value?.id ?? '')
+  if (resourceId && resourceId === selectedId && detailAudioTree.value.length) {
+    return detailAudioTree.value
+  }
+
+  return await window.api.dialog.getDirectoryAudioTree(String(resource?.basePath ?? ''))
+}
+
+const openAsmrPlaybackFromLaunch = async (resource: any) => {
+  try {
+    const audioTree = await resolveResourceAudioTree(resource)
+    const allTracks = collectAudioTreeTracks(audioTree)
+    if (!allTracks.length) {
+      showNotifyByType('warning', '播放音频', '当前没有可播放的音频文件')
+      return
+    }
+
+    const lastPlayFile = String(resource?.asmrMeta?.lastPlayFile ?? '').trim()
+    const lastPlayTime = Math.max(0, Number(resource?.asmrMeta?.lastPlayTime ?? 0))
+    const normalizedLastPlayFile = normalizeAudioPath(lastPlayFile)
+    const resumeTrack = normalizedLastPlayFile
+      ? allTracks.find((track) => normalizeAudioPath(track.path) === normalizedLastPlayFile)
+      : null
+
+    if (!resumeTrack) {
+      await applyAudioPlayerSession(resource, allTracks, String(allTracks[0]?.path ?? ''), 0)
+      return
+    }
+
+    const resumeDirectory = getAudioDirectoryPath(resumeTrack.path)
+    const directoryTracks = allTracks.filter((track) => getAudioDirectoryPath(track.path) === resumeDirectory)
+    const playlist = directoryTracks.length ? directoryTracks : allTracks
+    await applyAudioPlayerSession(resource, playlist, resumeTrack.path, lastPlayTime)
+  } catch {
+    showNotifyByType('error', '播放音频', '读取音声目录失败')
+  }
+}
+
+const formatAudioBitrate = (bitrate: number | null | undefined) => {
+  const normalized = Number(bitrate ?? 0)
+  if (!Number.isFinite(normalized) || normalized <= 0) {
+    return '未知'
+  }
+
+  return `${Math.round(normalized / 1000)} kbps`
+}
+
+const formatAudioSampleRate = (sampleRate: number | null | undefined) => {
+  const normalized = Number(sampleRate ?? 0)
+  if (!Number.isFinite(normalized) || normalized <= 0) {
+    return '未知'
+  }
+
+  return `${normalized} Hz`
+}
+
+const formatFrameRate = (frameRate: number | null | undefined) => {
+  const normalized = Number(frameRate ?? 0)
+  if (!Number.isFinite(normalized) || normalized <= 0) {
+    return '未知'
+  }
+
+  return `${normalized.toFixed(normalized >= 10 ? 0 : 2)} fps`
+}
+
+const formatImageResolution = (width: number | null | undefined, height: number | null | undefined) => {
+  const normalizedWidth = Number(width ?? 0)
+  const normalizedHeight = Number(height ?? 0)
+  if (!Number.isFinite(normalizedWidth) || normalizedWidth <= 0 || !Number.isFinite(normalizedHeight) || normalizedHeight <= 0) {
+    return '未知'
+  }
+
+  return `${normalizedWidth} × ${normalizedHeight}`
+}
+
+const closeDetailAudioContextMenu = () => {
+  detailAudioContextMenuVisible.value = false
+  detailAudioContextMenuTarget.value = null
+}
+
+const handleOpenAudioTreeContextMenu = (event: MouseEvent, option: any) => {
+  if (!option || option?.isDirectory) {
+    return
+  }
+
+  event.preventDefault()
+  event.stopPropagation()
+  detailAudioContextMenuTarget.value = option
+  detailAudioContextMenuX.value = event.clientX
+  detailAudioContextMenuY.value = event.clientY
+  detailAudioContextMenuVisible.value = true
+}
+
+const detailAudioContextMenuOptions = computed(() => {
+  const option = detailAudioContextMenuTarget.value
+  if (!option || option?.isDirectory) {
+    return []
+  }
+
+  if (option?.kind === 'image') {
+    return [
+      { label: '查看', key: 'view' },
+      { label: `分辨率: ${formatImageResolution(option?.width, option?.height)}`, key: 'resolution', disabled: true }
+    ]
+  }
+
+  if (option?.kind === 'video') {
+    return [
+      { label: '播放', key: 'play' },
+      { label: `时长: ${formatAsmrDuration(option?.duration)}`, key: 'duration', disabled: true },
+      { label: `分辨率: ${formatImageResolution(option?.width, option?.height)}`, key: 'resolution', disabled: true },
+      { label: `比特率: ${formatAudioBitrate(option?.bitrate)}`, key: 'bitrate', disabled: true },
+      { label: `帧速率: ${formatFrameRate(option?.frameRate)}`, key: 'frameRate', disabled: true },
+      { label: `音频比特率: ${formatAudioBitrate(option?.audioBitrate)}`, key: 'audioBitrate', disabled: true },
+      { label: `音频采样率: ${formatAudioSampleRate(option?.audioSampleRate)}`, key: 'audioSampleRate', disabled: true }
+    ]
+  }
+
+  return [
+    { label: '播放', key: 'play' },
+    { label: `时长: ${formatAsmrDuration(option?.duration)}`, key: 'duration', disabled: true },
+    { label: `比特率: ${formatAudioBitrate(option?.bitrate)}`, key: 'bitrate', disabled: true },
+    { label: `采样率: ${formatAudioSampleRate(option?.sampleRate)}`, key: 'sampleRate', disabled: true }
+  ]
+})
+
+const detailAudioContextMenuPosition = computed(() => {
+  const menuWidth = 220
+  const optionCount = detailAudioContextMenuOptions.value.length
+  const menuHeight = Math.max(56, optionCount * 34 + 16)
+  const viewportWidth = typeof window === 'undefined' ? 0 : window.innerWidth
+  const viewportHeight = typeof window === 'undefined' ? 0 : window.innerHeight
+  const padding = 12
+
+  const safeX = viewportWidth > 0
+    ? Math.max(padding, Math.min(detailAudioContextMenuX.value, viewportWidth - menuWidth - padding))
+    : detailAudioContextMenuX.value
+  const safeY = viewportHeight > 0
+    ? Math.max(padding, Math.min(detailAudioContextMenuY.value, viewportHeight - menuHeight - padding))
+    : detailAudioContextMenuY.value
+
+  return {
+    x: safeX,
+    y: safeY
+  }
+})
+
+const handleOpenAudioTreeImage = async (imagePath: string) => {
+  const normalizedPath = String(imagePath ?? '').trim()
+  if (!normalizedPath) {
+    return
+  }
+
+  const imagePaths = detailAudioImagePaths.value
+  const initialIndex = imagePaths.findIndex((filePath) => filePath === normalizedPath)
+  if (initialIndex < 0) {
+    return
+  }
+
+  pictureViewerImagePaths.value = [...imagePaths]
+  pictureViewerInitialIndex.value = initialIndex
+  pictureViewerAllowDelete.value = false
+  await loadPictureViewerScrollMode()
+  showPictureViewer.value = true
+}
+
+const openAudioPlayer = async (targetPath: string) => {
+  const normalizedPath = String(targetPath ?? '').trim()
+  if (!normalizedPath) {
+    return
+  }
+
+  const allTracks = detailAudioPlaylist.value
+  if (!allTracks.length) {
+    showNotifyByType('warning', '播放音频', '当前没有可播放的音频文件')
+    return
+  }
+
+  const targetDirectory = getAudioDirectoryPath(normalizedPath)
+  const directoryTracks = allTracks.filter((track) => getAudioDirectoryPath(track.path) === targetDirectory)
+  const playlist = directoryTracks.length ? directoryTracks : allTracks
+
+  await applyAudioPlayerSession(selectedDetailResource.value, playlist, normalizedPath, 0)
+}
+
+const handleAudioTreeActionPlaceholder = (option: any) => {
+  if (!option?.path) {
+    return
+  }
+
+  if (option?.kind === 'video') {
+    showNotifyByType('info', '播放视频', '视频播放功能暂未实现')
+    return
+  }
+
+  void openAudioPlayer(String(option.path))
+}
+
+const handleSelectDetailAudioContextMenu = (key: string) => {
+  const option = detailAudioContextMenuTarget.value
+  closeDetailAudioContextMenu()
+
+  if (!option || option?.isDirectory) {
+    return
+  }
+
+  if (key === 'view' && option?.kind === 'image') {
+    void handleOpenAudioTreeImage(String(option?.path ?? ''))
+    return
+  }
+
+  if (key === 'play' && (option?.kind === 'audio' || option?.kind === 'video')) {
+    handleAudioTreeActionPlaceholder(option)
+  }
+}
+
+const renderAudioTreeFileLabel = (option: any, icon: string, label: string) => h('div', {
+  class: 'detail-audio-tree__file',
+  onContextmenu: (event: MouseEvent) => handleOpenAudioTreeContextMenu(event, option)
+}, [
+  h('div', {
+    class: 'detail-audio-tree__file-title'
+  }, [
+      h('span', null, `${icon} ${label}`),
+      option?.hasSubtitle
+        ? h('span', {
+        class: 'detail-audio-tree__subtitle-badge',
+        style: {
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flex: '0 0 auto',
+          padding: '0 6px',
+          borderRadius: '999px',
+          background: 'rgba(99, 226, 183, 0.16)',
+          color: 'rgb(125, 232, 196)',
+          fontSize: '11px',
+          lineHeight: '18px',
+          whiteSpace: 'nowrap'
+        }
+      }, '字幕')
+        : null
+    ])
+  ])
+
+const renderAudioTreeLabel = ({ option }: { option: any }) => {
+  if (option?.isDirectory) {
+    return h('span', { class: 'detail-audio-tree__label' }, `📁 ${option.label}`)
+  }
+
+  if (option?.kind === 'image') {
+    return renderAudioTreeFileLabel(option, '🖼', String(option?.label ?? ''))
+  }
+
+  if (option?.kind === 'video') {
+    return renderAudioTreeFileLabel(option, '🎬', String(option?.label ?? ''))
+  }
+
+  return renderAudioTreeFileLabel(option, '🎵', String(option?.label ?? ''))
+}
+
+const renderAudioTreeSuffix = ({ option }: { option: any }) => {
+  if (option?.isDirectory) {
+    return null
+  }
+
+  if (option?.kind === 'image') {
+    return h('span', {
+      class: 'detail-audio-tree__action-button detail-audio-tree__action-button--play',
+      role: 'button',
+      tabindex: 0,
+      'aria-label': '查看图片',
+      onClick: (event: MouseEvent) => {
+        event.stopPropagation()
+        void handleOpenAudioTreeImage(String(option?.path ?? ''))
+      },
+      onContextmenu: (event: MouseEvent) => handleOpenAudioTreeContextMenu(event, option),
+      onKeydown: (event: KeyboardEvent) => {
+        if (event.key !== 'Enter' && event.key !== ' ') {
+          return
+        }
+
+        event.preventDefault()
+        event.stopPropagation()
+        void handleOpenAudioTreeImage(String(option?.path ?? ''))
+      }
+    }, '▶')
+  }
+
+  return h('span', {
+    class: 'detail-audio-tree__action-button detail-audio-tree__action-button--play',
+    role: 'button',
+    tabindex: 0,
+    'aria-label': '播放音频',
+    onClick: (event: MouseEvent) => {
+      event.stopPropagation()
+      handleAudioTreeActionPlaceholder(option)
+    },
+    onContextmenu: (event: MouseEvent) => handleOpenAudioTreeContextMenu(event, option),
+    onKeydown: (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' && event.key !== ' ') {
+        return
+      }
+
+      event.preventDefault()
+      event.stopPropagation()
+      handleAudioTreeActionPlaceholder(option)
+    }
+  }, '▶')
+}
 const detailDescriptionBoxStyle = computed(() => ({
   height: `${detailDescriptionHeight.value}px`
 }))
@@ -543,6 +989,7 @@ const detailCanStop = computed(() => {
 })
 const detailIsSoftware = computed(() => categorySettings.value.extendTable === 'software_meta')
 const detailIsManga = computed(() => categorySettings.value.extendTable === 'multi_image_meta')
+const detailIsAsmr = computed(() => categorySettings.value.extendTable === 'asmr_meta')
 const detailOpenFolderText = computed(() => `打开${categoryName.value || '资源'}文件夹`)
 const detailMetaItems = computed(() => {
   const resource = selectedDetailResource.value
@@ -583,7 +1030,14 @@ const detailMetaItems = computed(() => {
   } else if (extendTable === 'video_meta') {
     pushItem(items, '年份', resource.videoMeta?.year)
   } else if (extendTable === 'asmr_meta') {
-    pushItem(items, 'CV', resource.asmrMeta?.cv)
+    pushItem(items, '脚本', resource.asmrMeta?.scenario)
+    pushItem(
+      items,
+      '声优',
+      Array.isArray(resource.actors) ? resource.actors.map((item: any) => String(item?.name ?? '')).filter(Boolean).join(' / ') : ''
+    )
+    pushItem(items, '画师', resource.asmrMeta?.illust)
+    pushItem(items, '总时长', formatAsmrDuration(resource.asmrMeta?.duration))
     pushItem(items, '语言', resource.asmrMeta?.language)
   }
 
@@ -774,6 +1228,15 @@ const formatDuration = (seconds: number | null | undefined) => {
   }
 
   return `${remainSeconds}秒`
+}
+
+const formatAsmrDuration = (seconds: number | null | undefined) => {
+  const normalizedSeconds = Number(seconds ?? 0)
+  if (normalizedSeconds === -1) {
+    return '计算中'
+  }
+
+  return formatDuration(normalizedSeconds)
 }
 
 const formatLogEndTime = (value: string | number | Date | null | undefined) => {
@@ -1144,7 +1607,7 @@ const handleConfirmSoftwareScript = async () => {
 }
 
 const applyGamePathAnalysis = async (basePath: string) => {
-  if (categorySettings.value.extendTable !== 'game_meta') {
+  if (!['game_meta', 'asmr_meta'].includes(String(categorySettings.value.extendTable ?? '').trim())) {
     return
   }
 
@@ -1164,7 +1627,11 @@ const applyGamePathAnalysis = async (basePath: string) => {
       formData.value.meta.gameId = analysis.gameId
     }
 
-    if (analysis.websiteType) {
+    if (detailIsAsmr.value && analysis.gameId) {
+      formData.value.meta.websiteType = String(
+        websiteTypeOptions.value.find((item: any) => String(item?.label ?? '').trim().toLowerCase() === 'dlsite')?.value ?? ''
+      )
+    } else if (analysis.websiteType) {
       formData.value.meta.websiteType = analysis.websiteType
     }
   } catch (error) {
@@ -1252,7 +1719,11 @@ const fetchData = async () => {
     // 1. 获取分类元数据
     categoryInfo.value = await window.api.db.getCategoryById(categoryId.value)
     websiteTypeOptions.value = await window.api.db.getSelectDictData(
-      detailIsManga.value ? DictType.MANGA_SITE_TYPE : DictType.GAME_SITE_TYPE
+      detailIsManga.value
+        ? DictType.MANGA_SITE_TYPE
+        : detailIsAsmr.value
+          ? DictType.ASMR_SITE_TYPE
+          : DictType.GAME_SITE_TYPE
     )
     const localeEmulatorSetting = await window.api.db.getSetting(Settings.LOCALE_EMULATOR_PATH)
     localeEmulatorPath.value = String(localeEmulatorSetting?.value ?? '')
@@ -1359,6 +1830,8 @@ let stopResourceStateListener: null | (() => void) = null
 let stopBatchImportProgressListener: null | (() => void) = null
 
 onMounted(() => {
+  window.addEventListener('click', closeDetailAudioContextMenu)
+  window.addEventListener('resize', closeDetailAudioContextMenu)
   stopResourceStateListener = window.api.service.onResourceStateChanged((message) => {
     if (message.categoryId !== categoryId.value) {
       return
@@ -1420,6 +1893,8 @@ const updateDetailDescriptionHeight = async () => {
 }
 
 onBeforeUnmount(() => {
+  window.removeEventListener('click', closeDetailAudioContextMenu)
+  window.removeEventListener('resize', closeDetailAudioContextMenu)
   if (showComicReader.value) {
     void stopComicReadingSession()
   }
@@ -1925,6 +2400,7 @@ const handleBatchImportImages = async () => {
         coverPath: String(fetchedPixivData?.cover ?? '').trim() || normalizedPath,
         basePath: normalizedPath,
         author: String(fetchedPixivData?.author ?? '').trim(),
+        actors: [],
         tags: Array.isArray(fetchedPixivData?.tag) ? fetchedPixivData.tag : [],
         types: Array.isArray(fetchedPixivData?.type) ? fetchedPixivData.type : [],
         categoryId: categoryInfo.value.id,
@@ -2606,6 +3082,21 @@ const handleFetchGameInfo = async () => {
       formData.value.author = data.author
     }
 
+    if (extendTable === 'asmr_meta' && data.cv) {
+      formData.value.actors = normalizeSelectedValues([
+        ...(formData.value.actors ?? []),
+        ...String(data.cv).split(/[\/,、，]/)
+      ])
+    }
+
+    if (extendTable === 'asmr_meta' && data.scenario) {
+      formData.value.meta.scenario = String(data.scenario)
+    }
+
+    if (extendTable === 'asmr_meta' && data.illust) {
+      formData.value.meta.illust = String(data.illust)
+    }
+
     if (extendTable === 'multi_image_meta' && data.translator) {
       formData.value.meta.translator = data.translator
     }
@@ -2678,6 +3169,11 @@ const handleLaunchResource = async (resource: any) => {
     return
   }
 
+  if (detailIsAsmr.value) {
+    await openAsmrPlaybackFromLaunch(resource)
+    return
+  }
+
   try {
     const result = await window.api.service.launchResource(
       String(resource?.id ?? ''),
@@ -2739,6 +3235,19 @@ const handlePreviewSingleImageResource = async (resource: any) => {
 
 const handleStopResource = async (resource: any) => {
   try {
+    if (String(categorySettings.value.extendTable ?? '').trim() === 'asmr_meta') {
+      const stopControl = audioPlayerStore.controls.value.stop
+      if (stopControl) {
+        await Promise.resolve(stopControl())
+      } else {
+        await window.api.service.stopAsmrPlayback(String(resource?.id ?? ''))
+      }
+      showAudioPlayer.value = false
+      showNotifyByType('success', '停止资源', `已停止${resource?.title ?? categoryName.value}`)
+      await fetchData()
+      return
+    }
+
     const result = await window.api.service.stopResource(String(resource?.id ?? ''))
     const resultType = result?.type ?? 'info'
     const resultMessage = result?.message ?? `已停止${resource?.title ?? categoryName.value}`
@@ -2818,12 +3327,15 @@ const handleShowResourceDetail = (resource: any) => {
       selectedDetailResource.value = resource
     }
     showDetailDrawer.value = true
+    closeDetailAudioContextMenu()
     showPictureViewer.value = false
     showComicReader.value = false
+    showAudioPlayer.value = false
     visibleLogCount.value = 5
     currentScreenshotIndex.value = 0
 
     await refreshDetailScreenshots(0)
+    await refreshDetailAudioTree()
   })()
 }
 
@@ -3477,6 +3989,19 @@ const refreshDetailScreenshots = async (
   )
 }
 
+const refreshDetailAudioTree = async (targetResource: any = selectedDetailResource.value) => {
+  if (!detailIsAsmr.value) {
+    detailAudioTree.value = []
+    return
+  }
+
+  try {
+    detailAudioTree.value = await window.api.dialog.getDirectoryAudioTree(String(targetResource?.basePath ?? ''))
+  } catch {
+    detailAudioTree.value = []
+  }
+}
+
 const deleteScreenshotFile = async (filePath: string, nextIndex: number = currentScreenshotIndex.value) => {
   const message = await window.api.dialog.deleteImage(filePath)
   if (message) {
@@ -3596,7 +4121,7 @@ const handleToggleCompleted = async (resource: any) => {
                 </n-flex>
               </n-checkbox-group>
             </div>
-            <div class="filter-section">
+            <div v-if="!detailIsAsmr" class="filter-section">
               <n-divider title-placement="left" style="margin-bottom: 5px;">分类筛选</n-divider>
               <n-input v-model:value="typeSearch" placeholder="请输入分类名称" class="type-search" clearable/>
               <n-checkbox-group v-model:value="selectedTypeList" class="filter-group">
@@ -3724,6 +4249,7 @@ const handleToggleCompleted = async (resource: any) => {
                 :key="`${resource.id}-${resource.coverPath ?? ''}-${resourceListRenderVersion}`"
                 :resource="resource"
                 :category-name="categoryName"
+                :hide-type-line="detailIsAsmr"
                 :author-label="categorySettings.authorText || '作者'"
                 :start-text="startText"
                 :show-mtool-launch="showMtoolLaunch"
@@ -3735,6 +4261,7 @@ const handleToggleCompleted = async (resource: any) => {
                 :show-screenshot-folder="showScreenshotFolder"
                 :show-completed-toggle="showCompletedToggle"
                 :show-delete-files="showDeleteFiles"
+                :stop-needs-confirm="categorySettings.extendTable === 'game_meta'"
                 :selected="selectedResourceIds.includes(String(resource?.id ?? ''))"
                 :selection-mode="resourceSelectionMode"
                 @launch="handleLaunchResource"
@@ -3862,7 +4389,7 @@ const handleToggleCompleted = async (resource: any) => {
                     </span>
                   </div>
                 </div>
-                <div class="detail-drawer__item">
+                <div v-if="!detailIsAsmr" class="detail-drawer__item">
                   <span class="detail-drawer__label">分类</span>
                   <div v-if="(selectedDetailResource.types ?? []).length" class="detail-drawer__tag-list">
                     <n-tag
@@ -3878,7 +4405,7 @@ const handleToggleCompleted = async (resource: any) => {
                   </div>
                   <span v-else class="detail-drawer__value">暂无</span>
                 </div>
-                  <div class="detail-drawer__item">
+                  <div class="detail-drawer__item" :class="{ 'detail-drawer__item--full': detailIsAsmr }">
                     <span class="detail-drawer__label">标签</span>
                     <div v-if="(selectedDetailResource.tags ?? []).length" class="detail-drawer__tag-list">
                       <n-tag
@@ -3991,12 +4518,16 @@ const handleToggleCompleted = async (resource: any) => {
                   <span class="detail-drawer__label">添加日期</span>
                   <span class="detail-drawer__value">{{ formatDateTime(selectedDetailResource.createTime) }}</span>
                 </div>
-                <div v-if="detailIsManga" class="detail-drawer__item">
-                  <span class="detail-drawer__label">阅读进度</span>
-                  <span class="detail-drawer__value">{{ detailReadingProgressText }}</span>
+                  <div v-if="detailIsManga" class="detail-drawer__item">
+                    <span class="detail-drawer__label">阅读进度</span>
+                    <span class="detail-drawer__value">{{ detailReadingProgressText }}</span>
+                  </div>
+                  <div v-if="detailIsAsmr" class="detail-drawer__item">
+                    <span class="detail-drawer__label">播放进度</span>
+                    <span class="detail-drawer__value">{{ detailPlaybackProgressText }}</span>
+                  </div>
                 </div>
               </div>
-            </div>
 
             <div v-if="!detailIsSoftware && !detailIsManga && detailScreenshotPaths.length" class="detail-drawer__section">
               <div class="detail-drawer__section-title">{{ detailPreviewSectionTitle }}</div>
@@ -4073,6 +4604,31 @@ const handleToggleCompleted = async (resource: any) => {
                     <div class="detail-drawer__gallery-index">{{ galleryItem.index + 1 }}</div>
                   </button>
                 </div>
+              </div>
+
+              <div v-else-if="detailIsAsmr" class="detail-drawer__section">
+                <div class="detail-drawer__section-title">{{ detailGallerySectionTitle }}</div>
+                <n-empty v-if="!detailAudioTree.length" description="暂无音频文件" />
+                <template v-else>
+                  <n-tree
+                    block-line
+                    expand-on-click
+                    :data="detailAudioTree"
+                    :render-label="renderAudioTreeLabel"
+                    :render-suffix="renderAudioTreeSuffix"
+                    class="detail-audio-tree"
+                  />
+                  <n-dropdown
+                    trigger="manual"
+                    :show="detailAudioContextMenuVisible"
+                    :x="detailAudioContextMenuPosition.x"
+                    :y="detailAudioContextMenuPosition.y"
+                    placement="bottom-start"
+                    :options="detailAudioContextMenuOptions"
+                    :on-clickoutside="closeDetailAudioContextMenu"
+                    @select="handleSelectDetailAudioContextMenu"
+                  />
+                </template>
               </div>
 
               <div v-else-if="!isSingleImageCategory && !detailIsManga" class="detail-drawer__section">
@@ -4443,8 +4999,10 @@ const handleToggleCompleted = async (resource: any) => {
                 v-if="modelComponent"
                 :key="`${modelComponentKey}-edit`"
                 v-model:metaData="formData.meta"
+                :actors="formData.actors"
                 :base-path="formData.basePath"
                 :fetch-info-loading="fetchResourceInfoLoading"
+                @update:actors="(value: string[]) => { formData.actors = value }"
                 @check-engine="handleCheckGameEngine"
                 @fetch-game-info="handleFetchGameInfo"
               />
@@ -4472,7 +5030,7 @@ const handleToggleCompleted = async (resource: any) => {
                   @update:value="handleTagsChange"
                 />
               </n-form-item>
-              <n-form-item :label="`${categoryName}分类`" path="types">
+              <n-form-item v-if="!detailIsAsmr" :label="`${categoryName}分类`" path="types">
                 <n-select
                   :value="formData.types"
                   multiple
@@ -4502,7 +5060,14 @@ const handleToggleCompleted = async (resource: any) => {
                   </div>
                   <n-space size="small" wrap>
                     <n-button size="small" @click="handleChooseCustomCover">选择自定义封面</n-button>
-                    <n-button size="small" :disabled="!hasBasePath" @click="handleUseScreenshotCover">使用截图作为封面</n-button>
+                    <n-button
+                      v-if="categorySettings.extendTable !== 'multi_image_meta'"
+                      size="small"
+                      :disabled="!hasBasePath"
+                      @click="handleUseScreenshotCover"
+                    >
+                      使用截图作为封面
+                    </n-button>
                     <n-button size="small" :disabled="!editingResourceId" @click="handleChooseCoverFromScreenshotFolder">从截图文件夹选择</n-button>
                     <n-button
                       v-if="categorySettings.extendTable === 'multi_image_meta'"
@@ -4580,6 +5145,15 @@ const handleToggleCompleted = async (resource: any) => {
       :initial-index="comicReaderInitialIndex"
       @page-change="handleComicReaderPageChange"
     />
+    <AudioPlayer
+      v-model:show="showAudioPlayer"
+      :resource-id="audioPlayerResourceId"
+      :playlist="audioPlayerPlaylist"
+      :initial-path="audioPlayerInitialPath"
+      :initial-time="audioPlayerInitialTime"
+      :cover-src="audioPlayerCoverSrc"
+      :title="audioPlayerTitle || categoryName"
+    />
 
     <div v-if="isDragOver && categorySettings.resourcePathType === 'file'" class="drag-overlay">
       <div class="drag-overlay__panel">
@@ -4625,8 +5199,10 @@ const handleToggleCompleted = async (resource: any) => {
             v-if="modelComponent"
             :key="modelComponentKey"
             v-model:metaData="formData.meta"
+            :actors="formData.actors"
             :base-path="formData.basePath"
             :fetch-info-loading="fetchResourceInfoLoading"
+            @update:actors="(value: string[]) => { formData.actors = value }"
             @check-engine="handleCheckGameEngine"
             @fetch-game-info="handleFetchGameInfo"
           />
@@ -4654,7 +5230,7 @@ const handleToggleCompleted = async (resource: any) => {
               @update:value="handleTagsChange"
             />
           </n-form-item>
-          <n-form-item :label="`${categoryName}分类`" path="types">
+          <n-form-item v-if="!detailIsAsmr" :label="`${categoryName}分类`" path="types">
             <n-select
               :value="formData.types"
               multiple
@@ -4684,7 +5260,14 @@ const handleToggleCompleted = async (resource: any) => {
               </div>
               <n-space size="small" wrap>
                 <n-button size="small" @click="handleChooseCustomCover">选择自定义封面</n-button>
-                <n-button size="small" :disabled="!hasBasePath" @click="handleUseScreenshotCover">使用截图作为封面</n-button>
+                <n-button
+                  v-if="categorySettings.extendTable !== 'multi_image_meta'"
+                  size="small"
+                  :disabled="!hasBasePath"
+                  @click="handleUseScreenshotCover"
+                >
+                  使用截图作为封面
+                </n-button>
                 <n-button
                   v-if="categorySettings.extendTable === 'multi_image_meta'"
                   size="small"
@@ -5945,6 +6528,126 @@ const handleToggleCompleted = async (resource: any) => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
   gap: 12px;
+}
+
+.detail-audio-tree {
+  border-radius: 12px;
+  background: rgba(127, 127, 127, 0.06);
+  padding: 10px 12px;
+}
+
+.detail-audio-tree__label {
+  display: block;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+  white-space: normal;
+}
+
+.detail-audio-tree__file {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.detail-audio-tree__file-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+  white-space: normal;
+}
+
+.detail-audio-tree__subtitle-badge {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(99, 226, 183, 0.16);
+  color: rgb(125, 232, 196);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.detail-audio-tree__file-subtitle {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.46);
+}
+
+.detail-audio-tree__action-button {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 0;
+  line-height: 1;
+  opacity: 1;
+  user-select: none;
+  border: none;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease, opacity 0.2s ease;
+}
+
+.detail-audio-tree__action-button--play {
+  background: rgb(99, 226, 183);
+  color: #ffffff;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(99, 226, 183, 0.24);
+}
+
+.detail-audio-tree__action-button:hover {
+  background: rgb(125, 232, 196);
+  transform: translateY(-1px) scale(1.06);
+  box-shadow: 0 6px 14px rgba(99, 226, 183, 0.34);
+}
+
+.detail-audio-tree__action-button:active {
+  transform: scale(0.95);
+  box-shadow: 0 2px 8px rgba(99, 226, 183, 0.24);
+}
+
+.detail-audio-tree__action-icon {
+  width: 11px;
+  height: 11px;
+}
+
+.detail-audio-tree :deep(.n-tree-node-content) {
+  width: 100%;
+}
+
+.detail-audio-tree :deep(.n-tree-node-content__text) {
+  min-width: 0;
+  flex: 1 1 auto;
+  white-space: normal;
+}
+
+.detail-audio-tree :deep(.n-tree-node-wrapper) {
+  width: 100%;
+}
+
+.detail-audio-tree :deep(.n-tree-node-switcher--hide) {
+  width: 0 !important;
+  min-width: 0 !important;
+  margin-right: 0 !important;
+  padding: 0 !important;
+  overflow: hidden;
+}
+
+.detail-audio-tree :deep(.n-tree-node-content__suffix) {
+  flex: 0 0 auto;
+  margin-left: 12px;
+  display: inline-flex;
+  align-items: flex-start;
 }
 
 .detail-drawer__gallery-item {

@@ -6,11 +6,43 @@ import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { pathToFileURL } from 'url'
 import sharp from 'sharp'
+import { parseFile } from 'music-metadata'
 import { DatabaseService } from './database.service'
 import { Settings } from '../../common/constants'
 
 export class DialogService {
   private static readonly IMAGE_FILE_MACHINE_AMD64 = 0x8664
+  private static readonly IMAGE_EXTENSIONS = new Set([
+    '.png',
+    '.jpg',
+    '.jpeg',
+    '.webp',
+    '.gif',
+    '.bmp'
+  ])
+  private static readonly AUDIO_EXTENSIONS = new Set([
+    '.mp3',
+    '.wav',
+    '.flac',
+    '.m4a',
+    '.aac',
+    '.ogg',
+    '.opus',
+    '.wma',
+    '.m4b',
+    '.ape',
+    '.wv'
+  ])
+  private static readonly VIDEO_EXTENSIONS = new Set([
+    '.mp4',
+    '.m4v',
+    '.mkv',
+    '.webm',
+    '.avi',
+    '.mov',
+    '.wmv',
+    '.ts'
+  ])
 
   static async getAvailableScriptRuntimes() {
     const runtimeMap = new Map<string, {
@@ -169,6 +201,44 @@ export class DialogService {
     return pathToFileURL(normalizedPath).href
   }
 
+  static async getFileUrl(filePath: string) {
+    const normalizedPath = path.normalize(String(filePath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return null
+    }
+
+    return pathToFileURL(normalizedPath).href
+  }
+
+  static async readTextFile(filePath: string) {
+    const normalizedPath = path.normalize(String(filePath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return null
+    }
+
+    try {
+      const buffer = await readFile(normalizedPath)
+      const content = buffer.toString('utf8')
+      return content.replace(/^\uFEFF/, '')
+    } catch {
+      return null
+    }
+  }
+
+  static async readBinaryFile(filePath: string) {
+    const normalizedPath = path.normalize(String(filePath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return null
+    }
+
+    try {
+      const buffer = await readFile(normalizedPath)
+      return Uint8Array.from(buffer)
+    } catch {
+      return null
+    }
+  }
+
   static async getImagePreviewUrl(
     filePath: string,
     options?: {
@@ -293,6 +363,20 @@ export class DialogService {
     return this.listImageFiles(normalizedPath)
   }
 
+  static async getDirectoryAudioTree(directoryPath: string) {
+    const normalizedPath = path.normalize(String(directoryPath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return []
+    }
+
+    const stats = fs.statSync(normalizedPath)
+    if (!stats.isDirectory()) {
+      return []
+    }
+
+    return this.listAudioTree(normalizedPath)
+  }
+
   static async selectScreenshotImage(resourceId: string) {
     const screenshotFolder = await this.ensureScreenshotFolder(resourceId)
     if (!screenshotFolder) {
@@ -385,6 +469,152 @@ export class DialogService {
       .map((entry) => path.join(directoryPath, entry.name))
       .filter((filePath) => imageExtensions.has(path.extname(filePath).toLowerCase()))
       .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
+  }
+
+  private static async listAudioTree(directoryPath: string) {
+    const entries = fs.readdirSync(directoryPath, { withFileTypes: true })
+      .sort((left, right) => {
+        if (left.isDirectory() !== right.isDirectory()) {
+          return left.isDirectory() ? -1 : 1
+        }
+
+        return left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: 'base' })
+      })
+
+    const nodes: Array<{
+      key: string
+      label: string
+      path: string
+      isDirectory: boolean
+      kind?: 'image' | 'audio' | 'video'
+      hasSubtitle?: boolean
+      duration?: number | null
+      bitrate?: number | null
+      sampleRate?: number | null
+      frameRate?: number | null
+      audioBitrate?: number | null
+      audioSampleRate?: number | null
+      width?: number | null
+      height?: number | null
+      children?: any[]
+    }> = []
+    for (const entry of entries) {
+      const entryPath = path.join(directoryPath, entry.name)
+
+      if (entry.isDirectory()) {
+        const children = await this.listAudioTree(entryPath)
+        if (!children.length) {
+          continue
+        }
+
+        nodes.push({
+          key: entryPath,
+          label: entry.name,
+          path: entryPath,
+          isDirectory: true,
+          children
+        })
+        continue
+      }
+
+      if (!entry.isFile()) {
+        continue
+      }
+
+      const extension = path.extname(entry.name).toLowerCase()
+      const isAudio = this.AUDIO_EXTENSIONS.has(extension)
+      const isImage = this.IMAGE_EXTENSIONS.has(extension)
+      const isVideo = this.VIDEO_EXTENSIONS.has(extension)
+
+      if (!isAudio && !isImage && !isVideo) {
+        continue
+      }
+
+      nodes.push({
+        key: entryPath,
+        label: entry.name,
+        path: entryPath,
+        isDirectory: false,
+        kind: isImage ? 'image' : (isVideo ? 'video' : 'audio'),
+        hasSubtitle: isAudio ? this.hasSiblingSubtitleFile(entryPath) : false,
+        ...((isAudio || isVideo)
+          ? await this.readMediaMetadata(entryPath, isVideo)
+          : await this.readImageMetadata(entryPath))
+      })
+    }
+
+    return nodes
+  }
+
+  private static async readMediaMetadata(filePath: string, isVideo: boolean) {
+    try {
+      const metadata = await parseFile(filePath, { duration: true })
+      const duration = Number(metadata.format.duration ?? 0)
+      const bitrate = Number(metadata.format.bitrate ?? 0)
+      const sampleRate = Number(metadata.format.sampleRate ?? 0)
+      const trackInfo = Array.isArray(metadata.format.trackInfo) ? metadata.format.trackInfo : []
+      const videoTrack = trackInfo.find((track) => track?.video)
+      const audioTrack = trackInfo.find((track) => track?.audio)
+
+      const width = Number(videoTrack?.video?.pixelWidth ?? 0)
+      const height = Number(videoTrack?.video?.pixelHeight ?? 0)
+      const audioSampleRate = Number(audioTrack?.audio?.samplingFrequency ?? sampleRate ?? 0)
+
+      return {
+        duration: Number.isFinite(duration) && duration > 0 ? Math.round(duration) : null,
+        bitrate: Number.isFinite(bitrate) && bitrate > 0 ? Math.round(bitrate) : null,
+        sampleRate: !isVideo && Number.isFinite(sampleRate) && sampleRate > 0 ? Math.round(sampleRate) : null,
+        frameRate: null,
+        audioBitrate: isVideo && Number.isFinite(bitrate) && bitrate > 0 ? Math.round(bitrate) : null,
+        audioSampleRate: isVideo && Number.isFinite(audioSampleRate) && audioSampleRate > 0 ? Math.round(audioSampleRate) : null,
+        width: isVideo && Number.isFinite(width) && width > 0 ? Math.round(width) : null,
+        height: isVideo && Number.isFinite(height) && height > 0 ? Math.round(height) : null
+      }
+    } catch {
+      return {
+        duration: null,
+        bitrate: null,
+        sampleRate: null,
+        frameRate: null,
+        audioBitrate: null,
+        audioSampleRate: null,
+        width: null,
+        height: null
+      }
+    }
+  }
+
+  private static hasSiblingSubtitleFile(filePath: string) {
+    const normalizedPath = path.normalize(String(filePath ?? '').trim())
+    if (!normalizedPath) {
+      return false
+    }
+
+    const subtitleExtensions = ['.lrc', '.srt', '.vtt']
+    const extension = path.extname(normalizedPath)
+    const fileBasePath = extension ? normalizedPath.slice(0, -extension.length) : normalizedPath
+
+    return subtitleExtensions.some((subtitleExtension) =>
+      fs.existsSync(`${fileBasePath}${subtitleExtension}`) || fs.existsSync(`${normalizedPath}${subtitleExtension}`)
+    )
+  }
+
+  private static async readImageMetadata(filePath: string) {
+    try {
+      const metadata = await sharp(filePath).metadata()
+      const width = Number(metadata.width ?? 0)
+      const height = Number(metadata.height ?? 0)
+
+      return {
+        width: Number.isFinite(width) && width > 0 ? Math.round(width) : null,
+        height: Number.isFinite(height) && height > 0 ? Math.round(height) : null
+      }
+    } catch {
+      return {
+        width: null,
+        height: null
+      }
+    }
   }
 
   private static async getPreviewCacheRoot() {

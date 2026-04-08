@@ -72,6 +72,7 @@ function upsertSetting(
       .set({
         description: item.description,
         value: nextValue,
+        locked: item.name === Settings.VERSION.name,
         isDeleted: false
       })
       .where(eq(settings.id, existing.id))
@@ -85,7 +86,8 @@ function upsertSetting(
     id,
     name: item.name,
     description: item.description,
-    value
+    value,
+    locked: item.name === Settings.VERSION.name
   }).run()
 
   return id
@@ -262,6 +264,10 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
       description: '图片网站'
     }, {
       id: generateId(),
+      name: DictType.ASMR_SITE_TYPE,
+      description: '音声网站'
+    }, {
+      id: generateId(),
       name: DictType.MANGA_SITE_TYPE,
       description: '漫画网站'
     }
@@ -273,7 +279,8 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
     engine: dictTypes[2].id,
     gameSite: dictTypes[3].id,
     imageSite: dictTypes[4].id,
-    mangaSite: dictTypes[5].id,
+    asmrSite: dictTypes[5].id,
+    mangaSite: dictTypes[6].id,
   }
 
   const categoryList = [
@@ -342,7 +349,7 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
       description: '音声',
       value: 'asmr',
       typeId: dictTypeIds.resource,
-      extra: createCategoryExtra('asmr_meta', 'file', '个', [
+      extra: createCategoryExtra('asmr_meta', 'folder', '个', [
         'mp3',
         'wav',
         'flac',
@@ -359,6 +366,13 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
       value: 'novel',
       typeId: dictTypeIds.resource,
       extra: createCategoryExtra('novel_meta', 'file', '本', ['txt', 'epub', 'mobi', 'pdf'], '作者', '阅读')
+    }, {
+      id: generateId(),
+      name: '音频',
+      description: '音频',
+      value: 'audio',
+      typeId: dictTypeIds.resource,
+      extra: createCategoryExtra('audio_meta', 'file', '个', ['mp3', 'wav', 'aac', 'ogg', 'flac', 'ape', 'ogg'], '艺术家', '播放')
     }, {
       id: generateId(),
       name: '网站',
@@ -814,6 +828,30 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
     }
   ]
 
+  const asmrSiteList = [
+    {
+      id: generateId(),
+      name: 'DLsite',
+      description: '',
+      value: 'dlsite',
+      typeId: dictTypeIds.asmrSite,
+      extra: {
+        enableFetchInfo: true,
+        rule: {
+          startsWith: {
+            maniax: 'RJ',
+            boots: 'BJ',
+            pro: 'VJ'
+          }
+        },
+        icon: 'dlsite.ico',
+        url: {
+          games: 'https://www.dlsite.com/{rule}/work/=/product_id/{}.html'
+        }
+      }
+    }
+  ]
+
   const mangaSiteList = [
     {
       id: generateId(),
@@ -857,6 +895,7 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
     ...gameEngineList,
     ...gameSiteList,
     ...imageSiteList,
+    ...asmrSiteList,
     ...mangaSiteList,
   ]
 
@@ -868,8 +907,9 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
     { name: '电影', emoji: '🎬', value: 'video', sort: 5 },
     { name: '番剧', emoji: '📺', value: 'mulit_video', sort: 6 },
     { name: '音声', emoji: '🎧', value: 'asmr', sort: 7 },
-    { name: '小说', emoji: '📖', value: 'novel', sort: 8 },
-    { name: '网站', emoji: '🌐', value: 'website', sort: 9 }
+    { name: '音乐', emoji: '🎶', value: 'music', sort: 8 },
+    { name: '小说', emoji: '📖', value: 'novel', sort: 9 },
+    { name: '网站', emoji: '🌐', value: 'website', sort: 10 }
   ]
 
   const categories = categoryDefinitions.map((item) => ({
@@ -897,9 +937,11 @@ function syncSeedData(tx: SeedTransaction, definitions: SeedDefinitions, options
   definitions.dictTypes.forEach((item) => {
     const id = upsertDictType(tx, item)
     dictTypeIdMap.set(String(item.name), id)
+    dictTypeIdMap.set(String(item.id), id)
   })
 
   const dictDataIdMap = new Map<string, string>()
+  const dictDataSourceIdMap = new Map<string, string>()
   definitions.dictDataList.forEach((item) => {
     const resolvedTypeId = dictTypeIdMap.get(String(item.typeId)) ?? String(item.typeId)
     const id = upsertDictData(tx, {
@@ -907,6 +949,7 @@ function syncSeedData(tx: SeedTransaction, definitions: SeedDefinitions, options
       typeId: resolvedTypeId
     })
     dictDataIdMap.set(`${resolvedTypeId}:${item.value}`, id)
+    dictDataSourceIdMap.set(String(item.id), id)
   })
 
   if (!options.includeCategories) {
@@ -915,7 +958,7 @@ function syncSeedData(tx: SeedTransaction, definitions: SeedDefinitions, options
 
   definitions.categories.forEach((item) => {
     const referenceId = item.referenceId
-      ? dictDataIdMap.get(`${definitions.dictTypes[0].id}:${definitions.dictDataList.find((dictItem) => dictItem.id === item.referenceId)?.value}`)
+      ? dictDataSourceIdMap.get(String(item.referenceId))
       : undefined
 
     insertCategoryIfMissing(tx, {

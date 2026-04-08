@@ -1,6 +1,6 @@
 {
   "name": "neoresourcemanager",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "An Electron application with Vue and TypeScript",
   "main": "./out/main/index.js",
   "author": "example.com",
@@ -11,6 +11,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "scan:game-engines": "node scripts/detect-game-engines.cjs",
     "start": "electron-vite preview",
     "dev": "electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
@@ -32,6 +33,7 @@
     "drizzle-orm": "^0.45.1",
     "electron-updater": "^6.3.9",
     "hidefile": "^3.0.0",
+    "music-metadata": "^11.12.3",
     "naive-ui": "^2.44.1",
     "nodejs-snowflake": "^2.0.1",
     "sharp": "^0.34.5",

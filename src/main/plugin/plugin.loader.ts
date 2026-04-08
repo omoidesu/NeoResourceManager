@@ -166,6 +166,10 @@ export class PluginLoader {
 
         result.name = data.name ?? ''
         result.author = data.author ?? ''
+        result.cv = data.cv ?? ''
+        result.illust = data.illust ?? ''
+        result.scenario = data.scenario ?? ''
+        result.translator = data.translator ?? ''
         result.cover = data.cover ?? ''
         result.website = data.website ?? ''
         result.tag = Array.isArray(data.tag) ? Array.from(new Set(data.tag.filter(Boolean))) : []
