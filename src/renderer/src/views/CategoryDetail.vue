@@ -171,7 +171,7 @@ const renderWebsiteOptionLabel = (icon: string, rawLabel: string) =>
       }
     },
     [
-      /^([/.]|https?:|data:)/.test(icon)
+      /^(?:[/.]|https?:|data:|file:|[a-zA-Z]:[\\/])/.test(icon)
         ? h('span', {
             style: {
               width: '18px',
@@ -2857,7 +2857,7 @@ const resolveEngineIcon = (icon: string) => {
     return ''
   }
 
-  if (/^(?:https?:|data:|\/)/.test(icon)) {
+  if (/^(?:https?:|data:|file:|\/|[a-zA-Z]:[\\/])/.test(icon)) {
     return icon
   }
 
@@ -2869,7 +2869,7 @@ const resolveStoreIcon = (icon: string) => {
     return ''
   }
 
-  if (/^(?:https?:|data:|\/)/.test(icon)) {
+  if (/^(?:https?:|data:|file:|\/|[a-zA-Z]:[\\/])/.test(icon)) {
     return icon
   }
 

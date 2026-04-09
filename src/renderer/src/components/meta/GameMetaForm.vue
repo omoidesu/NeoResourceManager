@@ -44,7 +44,7 @@ const resolveAssetIcon = (icon: string, iconMap: Map<string, string>) => {
     return ''
   }
 
-  if (/^(?:https?:|data:|\/)/.test(icon)) {
+  if (/^(?:https?:|data:|file:|\/|[a-zA-Z]:[\\/])/.test(icon)) {
     return icon
   }
 
@@ -52,7 +52,7 @@ const resolveAssetIcon = (icon: string, iconMap: Map<string, string>) => {
 }
 
 const renderWebsiteLabelNode = (icon: string, rawLabel: string) => {
-  const iconNode = /^([/.]|https?:|data:)/.test(icon)
+  const iconNode = /^(?:[/.]|https?:|data:|file:|[a-zA-Z]:[\\/])/.test(icon)
     ? h('span', {
         class: 'website-option__icon-shell',
         style: {
