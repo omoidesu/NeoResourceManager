@@ -436,28 +436,47 @@ public static class Win32Capture {
 Add-Type -TypeDefinition $signature -ReferencedAssemblies 'System.Drawing','System.Runtime.InteropServices'
 [uint32]$targetPid = ${pid}
 $matchedWindow = [IntPtr]::Zero
-[Win32Capture]::EnumWindows({
-  param($hWnd, $lParam)
-  if (-not [Win32Capture]::IsWindowVisible($hWnd)) {
-    return $true
+function Find-VisibleWindowHandle {
+  param(
+    [uint32]$Pid
+  )
+
+  $script:matchedWindow = [IntPtr]::Zero
+  [Win32Capture]::EnumWindows({
+    param($hWnd, $lParam)
+    if (-not [Win32Capture]::IsWindowVisible($hWnd)) {
+      return $true
+    }
+    [uint32]$windowPid = 0
+    [Win32Capture]::GetWindowThreadProcessId($hWnd, [ref]$windowPid) | Out-Null
+    if ($windowPid -ne $Pid) {
+      return $true
+    }
+    $length = [Win32Capture]::GetWindowTextLength($hWnd)
+    if ($length -le 0) {
+      return $true
+    }
+    $builder = New-Object System.Text.StringBuilder ($length + 1)
+    [Win32Capture]::GetWindowText($hWnd, $builder, $builder.Capacity) | Out-Null
+    if ([string]::IsNullOrWhiteSpace($builder.ToString())) {
+      return $true
+    }
+    $script:matchedWindow = $hWnd
+    return $false
+  }, [IntPtr]::Zero) | Out-Null
+
+  return $script:matchedWindow
+}
+
+for ($attempt = 0; $attempt -lt 24; $attempt++) {
+  $matchedWindow = Find-VisibleWindowHandle -Pid $targetPid
+  if ($matchedWindow -ne [IntPtr]::Zero) {
+    break
   }
-  [uint32]$windowPid = 0
-  [Win32Capture]::GetWindowThreadProcessId($hWnd, [ref]$windowPid) | Out-Null
-  if ($windowPid -ne $targetPid) {
-    return $true
-  }
-  $length = [Win32Capture]::GetWindowTextLength($hWnd)
-  if ($length -le 0) {
-    return $true
-  }
-  $builder = New-Object System.Text.StringBuilder ($length + 1)
-  [Win32Capture]::GetWindowText($hWnd, $builder, $builder.Capacity) | Out-Null
-  if ([string]::IsNullOrWhiteSpace($builder.ToString())) {
-    return $true
-  }
-  $script:matchedWindow = $hWnd
-  return $false
-}, [IntPtr]::Zero) | Out-Null
+
+  Start-Sleep -Milliseconds 500
+}
+
 if ($matchedWindow -eq [IntPtr]::Zero) {
   throw '未找到对应的可见窗口'
 }
@@ -572,7 +591,14 @@ $bitmap.Dispose()
 
   private static runPowerShell(script: string) {
     return new Promise<string>((resolve, reject) => {
-      const encodedCommand = Buffer.from(script, 'utf16le').toString('base64')
+      const wrappedScript = `
+$ProgressPreference = 'SilentlyContinue'
+$InformationPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+${script}
+`
+      const encodedCommand = Buffer.from(wrappedScript, 'utf16le').toString('base64')
       const child = spawn('powershell.exe', [
         '-NoProfile',
         '-NonInteractive',
@@ -582,15 +608,15 @@ $bitmap.Dispose()
         windowsHide: true
       })
 
-      let stdout = ''
-      let stderr = ''
+      const stdoutChunks: Buffer[] = []
+      const stderrChunks: Buffer[] = []
 
       child.stdout.on('data', (chunk) => {
-        stdout += String(chunk)
+        stdoutChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
       })
 
       child.stderr.on('data', (chunk) => {
-        stderr += String(chunk)
+        stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
       })
 
       child.once('error', (error) => {
@@ -599,6 +625,8 @@ $bitmap.Dispose()
       })
 
       child.once('close', (code) => {
+        const stdout = Buffer.concat(stdoutChunks).toString('utf8').trim()
+        const stderr = this.normalizePowerShellMessage(Buffer.concat(stderrChunks).toString('utf8'))
         if (code === 0) {
           resolve(stdout.trim())
           return
@@ -608,5 +636,29 @@ $bitmap.Dispose()
         reject(new Error(message))
       })
     })
+  }
+
+  private static normalizePowerShellMessage(raw: string) {
+    const normalizedRaw = String(raw ?? '').trim()
+    if (!normalizedRaw) {
+      return ''
+    }
+
+    if (!normalizedRaw.startsWith('#< CLIXML')) {
+      return normalizedRaw
+    }
+
+    const textMatches = Array.from(normalizedRaw.matchAll(/<S S="Error">([\s\S]*?)<\/S>/g))
+      .map((match) => String(match[1] ?? '').trim())
+      .filter(Boolean)
+
+    if (!textMatches.length) {
+      return normalizedRaw
+    }
+
+    return textMatches
+      .map((item) => item.replace(/_x000D__x000A_/g, '\n').replace(/_x([0-9A-Fa-f]{4})_/g, (_all, hex) => String.fromCharCode(parseInt(hex, 16))))
+      .join('\n')
+      .trim()
   }
 }

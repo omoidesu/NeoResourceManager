@@ -53,6 +53,13 @@ const RECONCILE_MIGRATION_RULES: ReconcileMigrationRule[] = [
       { name: 'last_play_file', type: 'text' },
       { name: 'last_play_time', type: 'integer' }
     ]
+  },
+  {
+    tag: '0009_add_audio_meta_lyrics_path',
+    table: 'audio_meta',
+    columns: [
+      { name: 'lyrics_path', type: 'text' }
+    ]
   }
 ]
 
@@ -81,7 +88,7 @@ function markMigrationApplied(hash: string, createdAt: number) {
     .run(hash, createdAt)
 }
 
-function reconcileLegacyAsmrMigrations(migrationsPath: string) {
+function reconcileSchemaMigrations(migrationsPath: string) {
   ensureMigrationsTable()
 
   const journalPath = path.join(migrationsPath, 'meta', '_journal.json')
@@ -139,7 +146,7 @@ function reconcileLegacyAsmrMigrations(migrationsPath: string) {
     markMigrationApplied(hash, journalEntry.when)
     appliedCreatedAt.add(journalEntry.when)
 
-    logger.warn('marked legacy migration as applied after schema reconciliation', {
+    logger.warn('marked migration as applied after schema reconciliation', {
       migration: rule.tag,
       table: rule.table,
       columns: rule.columns.map((column) => column.name)
@@ -158,7 +165,7 @@ export const migrateDb = async () => {
   logger.info('migration path exists', { exists: fs.existsSync(migrationsPath) })
 
   try {
-    reconcileLegacyAsmrMigrations(migrationsPath)
+    reconcileSchemaMigrations(migrationsPath)
     migrate(db, {migrationsFolder: migrationsPath});
     logger.info('migrations completed successfully')
   } catch (err) {

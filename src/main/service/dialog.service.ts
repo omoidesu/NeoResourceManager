@@ -10,6 +10,67 @@ import { parseFile } from 'music-metadata'
 import { DatabaseService } from './database.service'
 import { Settings } from '../../common/constants'
 
+function scoreDecodedTextCandidate(input: string) {
+  const normalizedInput = String(input ?? '').replace(/^\uFEFF/, '').trim()
+  if (!normalizedInput) {
+    return -100
+  }
+
+  let score = 0
+
+  if (/[\u3400-\u9fff]/.test(normalizedInput)) {
+    score += 12
+  }
+
+  if (/[A-Za-z0-9]/.test(normalizedInput)) {
+    score += 2
+  }
+
+  if (/[\u3040-\u30ff]/.test(normalizedInput)) {
+    score += 3
+  }
+
+  if (/\uFFFD/.test(normalizedInput)) {
+    score -= 12
+  }
+
+  if (/[À-ÿ]/.test(normalizedInput)) {
+    score -= 4
+  }
+
+  if (/[ÃÐÑØÖ×ÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ]/.test(normalizedInput)) {
+    score -= 6
+  }
+
+  if (/�|□|■|¤/.test(normalizedInput)) {
+    score -= 8
+  }
+
+  return score
+}
+
+function decodeTextBuffer(buffer: Buffer) {
+  const decoderCandidates = ['utf-8', 'gb18030', 'utf-16le'] as const
+  const decodedCandidates = decoderCandidates
+    .map((encoding) => {
+      try {
+        return new TextDecoder(encoding).decode(buffer).replace(/^\uFEFF/, '').trim()
+      } catch {
+        return ''
+      }
+    })
+    .filter(Boolean)
+
+  const bestCandidate = decodedCandidates
+    .map((candidate) => ({
+      value: candidate,
+      score: scoreDecodedTextCandidate(candidate)
+    }))
+    .sort((left, right) => right.score - left.score)[0]
+
+  return bestCandidate?.value ?? buffer.toString('utf8').replace(/^\uFEFF/, '')
+}
+
 export class DialogService {
   private static readonly IMAGE_FILE_MACHINE_AMD64 = 0x8664
   private static readonly IMAGE_EXTENSIONS = new Set([
@@ -218,8 +279,7 @@ export class DialogService {
 
     try {
       const buffer = await readFile(normalizedPath)
-      const content = buffer.toString('utf8')
-      return content.replace(/^\uFEFF/, '')
+      return decodeTextBuffer(buffer)
     } catch {
       return null
     }

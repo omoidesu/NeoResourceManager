@@ -5,6 +5,9 @@ import {SettingDetail} from "../../common/constants";
 import {ResourceForm} from "../model/models";
 import {ResourceService} from "./resource.service";
 import { NotificationQueueService } from './notification-queue.service'
+import { createLogger } from '../util/logger'
+
+const ipcLogger = createLogger('ipc-handle')
 
 export default function registerIpcHandlers() {
   // 直接操作数据库
@@ -53,6 +56,10 @@ function registerResource() {
 
   ipcMain.handle('db:get-author-by-category-id', async (_event, categoryId: string) => {
     return await DatabaseService.getAuthorByCategoryId(categoryId)
+  })
+
+  ipcMain.handle('db:get-album-by-category-id', async (_event, categoryId: string) => {
+    return await DatabaseService.getAlbumByCategoryId(categoryId)
   })
 
   ipcMain.handle('db:get-engine-by-category-id', async (_event, categoryId: string) => {
@@ -200,8 +207,8 @@ function registerService() {
     return ResourceService.getResourceDetail(resourceId)
   })
 
-  ipcMain.handle('service:update-resource', async (_event, resourceId: string, resourceForm: ResourceForm) => {
-    return ResourceService.updateResource(resourceId, resourceForm)
+  ipcMain.handle('service:update-resource', async (_event, resourceId: string, resourceForm: ResourceForm, options?: { silent?: boolean }) => {
+    return ResourceService.updateResource(resourceId, resourceForm, options)
   })
 
   ipcMain.handle('service:check-resource-exists-by-path', async (_event, basePath: string) => {
@@ -210,6 +217,30 @@ function registerService() {
 
   ipcMain.handle('service:analyze-game-path', async (_event, basePath: string) => {
     return ResourceService.analyzeGamePath(basePath)
+  })
+
+  ipcMain.handle('service:analyze-audio-file-path', async (_event, basePath: string) => {
+    return ResourceService.analyzeAudioFilePath(basePath)
+  })
+
+  ipcMain.handle('service:fetch-audio-album-cover', async (_event, payload: any) => {
+    ipcLogger.info('service:fetch-audio-album-cover', {
+      title: String(payload?.title ?? '').trim(),
+      album: String(payload?.album ?? '').trim(),
+      artist: String(payload?.artist ?? '').trim(),
+      hasBasePath: Boolean(String(payload?.basePath ?? '').trim())
+    })
+    return ResourceService.fetchAudioAlbumCover(payload)
+  })
+
+  ipcMain.handle('service:fetch-audio-lyrics', async (_event, payload: any) => {
+    ipcLogger.info('service:fetch-audio-lyrics', {
+      title: String(payload?.title ?? '').trim(),
+      album: String(payload?.album ?? '').trim(),
+      artist: String(payload?.artist ?? '').trim(),
+      hasBasePath: Boolean(String(payload?.basePath ?? '').trim())
+    })
+    return ResourceService.fetchAudioLyrics(payload)
   })
 
   ipcMain.handle('service:detect-game-engine', async (_event, basePath: string, resourceId?: string | null) => {
@@ -228,12 +259,20 @@ function registerService() {
     return ResourceService.analyzeMultiImageDirectory(directoryPath)
   })
 
+  ipcMain.handle('service:analyze-asmr-directory', async (_event, directoryPath: string) => {
+    return ResourceService.analyzeAsmrDirectory(directoryPath)
+  })
+
   ipcMain.handle('service:import-batch-game-directories', async (_event, categoryId: string, items: any[]) => {
     return ResourceService.importBatchGameDirectories(categoryId, items)
   })
 
   ipcMain.handle('service:import-batch-multi-image-directories', async (_event, categoryId: string, items: any[]) => {
     return ResourceService.importBatchMultiImageDirectories(categoryId, items)
+  })
+
+  ipcMain.handle('service:import-batch-asmr-directories', async (_event, categoryId: string, items: any[]) => {
+    return ResourceService.importBatchAsmrDirectories(categoryId, items)
   })
 
   ipcMain.handle('service:fetch-resource-info', async (_event, websiteId: string, resourceId: string) => {

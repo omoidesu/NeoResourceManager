@@ -246,6 +246,93 @@ export class ResourceService {
     }
   }
 
+  static async analyzeAsmrDirectory(directoryPath: string) {
+    const normalizedDirectoryPath = path.normalize(String(directoryPath ?? '').trim())
+    if (!normalizedDirectoryPath) {
+      return {
+        type: 'warning',
+        message: '目录不能为空',
+        data: {
+          directoryPath: '',
+          directoryName: '',
+          coverPath: '',
+          audioCount: 0,
+          gameId: '',
+          websiteType: ''
+        }
+      }
+    }
+
+    try {
+      const exists = await fs.pathExists(normalizedDirectoryPath)
+      if (!exists) {
+        return {
+          type: 'warning',
+          message: '目录不存在',
+          data: {
+            directoryPath: normalizedDirectoryPath,
+            directoryName: path.basename(normalizedDirectoryPath),
+            coverPath: '',
+            audioCount: 0,
+            gameId: '',
+            websiteType: ''
+          }
+        }
+      }
+
+      const directoryStat = await fs.stat(normalizedDirectoryPath)
+      if (!directoryStat.isDirectory()) {
+        return {
+          type: 'warning',
+          message: '当前路径不是目录',
+          data: {
+            directoryPath: normalizedDirectoryPath,
+            directoryName: path.basename(normalizedDirectoryPath),
+            coverPath: '',
+            audioCount: 0,
+            gameId: '',
+            websiteType: ''
+          }
+        }
+      }
+
+      const existingResource = await DatabaseService.getResourceByStoragePath(normalizedDirectoryPath, null)
+      const audioPaths = await getDirectoryAudioFiles(normalizedDirectoryPath)
+      const imagePaths = await getDirectoryImageFiles(normalizedDirectoryPath)
+      const coverPath = pickMultiImageCoverPath(normalizedDirectoryPath, imagePaths)
+      const matchedGameId = await findGameIdInDirectory(normalizedDirectoryPath, normalizedDirectoryPath)
+      const websiteType = await resolveWebsiteTypeByGameId(matchedGameId, DictType.ASMR_SITE_TYPE)
+
+      return {
+        type: 'success',
+        message: audioPaths.length ? '已分析音声目录' : '目录中未找到可用音频文件',
+        data: {
+          directoryPath: normalizedDirectoryPath,
+          directoryName: path.basename(normalizedDirectoryPath),
+          coverPath,
+          audioCount: audioPaths.length,
+          exists: Boolean(existingResource),
+          existingResourceTitle: String(existingResource?.title ?? ''),
+          gameId: matchedGameId,
+          websiteType
+        }
+      }
+    } catch (error) {
+      return {
+        type: 'error',
+        message: error instanceof Error ? error.message : '分析音声目录失败',
+        data: {
+          directoryPath: normalizedDirectoryPath,
+          directoryName: path.basename(normalizedDirectoryPath),
+          coverPath: '',
+          audioCount: 0,
+          gameId: '',
+          websiteType: ''
+        }
+      }
+    }
+  }
+
   static async importBatchGameDirectories(categoryId: string, items: Array<{
     directoryPath: string
     launchFilePath: string
@@ -506,6 +593,147 @@ export class ResourceService {
     }
   }
 
+  static async importBatchAsmrDirectories(categoryId: string, items: Array<{
+    directoryPath: string
+    websiteType?: string
+    gameId?: string
+    fetchInfoEnabled?: boolean
+  }>) {
+    const results: Array<{ directoryPath: string; type: string; message: string }> = []
+    const total = Array.isArray(items) ? items.length : 0
+    let completed = 0
+
+    const pushImportProgress = (directoryPath: string, done = false) => {
+      NotificationQueueService.getInstance().pushBatchImportProgress({
+        categoryId,
+        stage: 'import',
+        current: completed,
+        total,
+        message: directoryPath,
+        done
+      })
+    }
+
+    for (const item of items ?? []) {
+      const directoryPath = String(item?.directoryPath ?? '').trim()
+      if (!directoryPath) {
+        results.push({
+          directoryPath,
+          type: 'warning',
+          message: '未提供音声目录'
+        })
+        completed += 1
+        pushImportProgress(directoryPath)
+        continue
+      }
+
+      const analysisResult = await ResourceService.analyzeAsmrDirectory(directoryPath)
+      const analysis = analysisResult?.data ?? {}
+
+      if (analysis?.exists) {
+        results.push({
+          directoryPath,
+          type: 'info',
+          message: analysis.existingResourceTitle ? `已存在：${analysis.existingResourceTitle}` : '该资源已存在'
+        })
+        completed += 1
+        pushImportProgress(directoryPath)
+        continue
+      }
+
+      const audioCount = Math.max(0, Number(analysis?.audioCount ?? 0))
+      if (!audioCount) {
+        results.push({
+          directoryPath,
+          type: 'warning',
+          message: '目录中未找到可用音频文件'
+        })
+        completed += 1
+        pushImportProgress(directoryPath)
+        continue
+      }
+
+      const websiteType = String(item?.websiteType ?? analysis?.websiteType ?? '').trim()
+      const gameId = String(item?.gameId ?? analysis?.gameId ?? '').trim()
+      const fetchInfoEnabled = item?.fetchInfoEnabled !== false
+      let fetchedData: any = null
+
+      if (fetchInfoEnabled && websiteType && gameId) {
+        const fetchResult = await ResourceService.fetchResourceInfo(websiteType, gameId)
+        ResourceService.logger.info('importBatchAsmrDirectories fetchResourceInfo', {
+          directoryPath,
+          websiteType,
+          gameId,
+          type: fetchResult?.type ?? '',
+          message: fetchResult?.message ?? ''
+        })
+
+        if (fetchResult?.type === 'success' || fetchResult?.type === 'warning') {
+          fetchedData = fetchResult?.data ?? null
+        }
+      }
+
+      const actors = String(fetchedData?.cv ?? '')
+        .split(/[\/,、，]/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+
+      const saveResult = await ResourceService.saveResource({
+        author: String(fetchedData?.author ?? '').trim(),
+        actors: Array.from(new Set(actors)),
+        basePath: directoryPath,
+        categoryId,
+        coverPath: String(fetchedData?.cover ?? analysis?.coverPath ?? '').trim(),
+        description: '',
+        name: String(fetchedData?.name || analysis?.directoryName || path.basename(directoryPath)),
+        tags: Array.isArray(fetchedData?.tag) ? fetchedData.tag : [],
+        types: Array.isArray(fetchedData?.type) ? fetchedData.type : [],
+        meta: {
+          additionalStores: [],
+          commandLineArgs: '',
+          engine: '',
+          gameId,
+          illust: String(fetchedData?.illust ?? '').trim(),
+          language: '',
+          lastPlayFile: '',
+          lastPlayTime: 0,
+          lastReadPage: 0,
+          nameEn: '',
+          nameJp: String(fetchedData?.name ?? ''),
+          nameZh: '',
+          nickname: '',
+          pixivId: '',
+          resolution: '',
+          format: '',
+          scenario: String(fetchedData?.scenario ?? '').trim(),
+          translator: '',
+          version: '1.0.0',
+          website: String(fetchedData?.website ?? ''),
+          websiteType
+        } as ResourceMeta
+      } as ResourceForm)
+
+      results.push({
+        directoryPath,
+        type: String(saveResult?.type ?? 'info'),
+        message: String(saveResult?.message ?? '处理完成')
+      })
+      completed += 1
+      pushImportProgress(directoryPath)
+    }
+
+    const successCount = results.filter((item) => item.type === 'success').length
+    const skippedCount = results.filter((item) => item.type === 'info').length
+    const failedCount = results.filter((item) => item.type === 'error').length
+    pushImportProgress('', true)
+
+    return {
+      type: failedCount > 0 && successCount === 0 ? 'error' : 'success',
+      message: `批量导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}`,
+      data: results
+    }
+  }
+
   static async fetchResourceInfo(websiteId: string, resourceId: string) {
     const normalizedWebsiteId = String(websiteId ?? '').trim()
     const normalizedResourceId = String(resourceId ?? '').trim()
@@ -694,7 +922,32 @@ export class ResourceService {
     const normalizedLastPlayFile = String(lastPlayFile ?? '').trim()
     const normalizedLastPlayTime = Math.max(0, Math.floor(Number(lastPlayTime ?? 0)))
 
-    if (!normalizedResourceId || !normalizedLastPlayFile) {
+    if (!normalizedResourceId) {
+      return {
+        type: 'warning',
+        message: '播放进度参数无效'
+      }
+    }
+
+    const resource = await DatabaseService.getResourceById(normalizedResourceId)
+    const categoryInfo = resource
+      ? await DatabaseService.getCategoryById(String(resource.categoryId ?? '').trim())
+      : null
+    const extendTable = getExtendTableName(categoryInfo)
+
+    if (extendTable === 'audio_meta') {
+      DatabaseService.updateAudioPlaybackProgress(
+        normalizedResourceId,
+        normalizedLastPlayTime
+      )
+
+      return {
+        type: 'success',
+        message: '播放进度已保存'
+      }
+    }
+
+    if (!normalizedLastPlayFile) {
       return {
         type: 'warning',
         message: '播放进度参数无效'
@@ -1129,6 +1382,366 @@ export class ResourceService {
     }
   }
 
+  static async analyzeAudioFilePath(basePath: string) {
+    const normalizedPath = path.normalize(String(basePath ?? '').trim())
+    if (!normalizedPath) {
+      return null
+    }
+
+    try {
+      const pathInfo = await dealPath(normalizedPath)
+      const filePath = getResolvedFilePath(pathInfo)
+      if (!filePath) {
+        return null
+      }
+
+        const audioInfo = await readSingleAudioFileInfo(filePath)
+        return {
+          name: getFileNameWithoutExtension(filePath),
+          artist: audioInfo.artist,
+          artists: audioInfo.artists,
+          album: audioInfo.album,
+          lyricsPath: await findMatchedLyricsPath(filePath),
+          duration: audioInfo.duration,
+          bitrate: audioInfo.bitrate,
+          sampleRate: audioInfo.sampleRate,
+          embeddedCoverPath: audioInfo.embeddedCoverPath,
+        }
+    } catch {
+      return null
+    }
+  }
+
+  static async fetchAudioAlbumCover(input: {
+    title?: string
+    album?: string
+    artist?: string
+    artists?: string[]
+    basePath?: string
+  }) {
+    const album = String(input?.album ?? '').trim()
+    const title = String(input?.title ?? '').trim()
+    const artist = resolvePreferredArtistName(input?.artist, input?.artists)
+
+    ResourceService.logger.info('fetchAudioAlbumCover request', {
+      title,
+      album,
+      artist,
+      hasBasePath: Boolean(String(input?.basePath ?? '').trim())
+    })
+
+    if (!album && !title && !artist) {
+      ResourceService.logger.warn('fetchAudioAlbumCover skipped: missing search params')
+      return {
+        type: 'warning',
+        message: '请先填写音乐信息后再获取封面'
+      }
+    }
+
+    try {
+      const proxyConfig = await getAxiosProxyConfig()
+      const fetchCoverCandidate = async (
+        query: Record<string, string>,
+        label: string
+      ): Promise<{ label: string; coverPath: string; query: Record<string, string> } | null> => {
+        ResourceService.logger.info('fetchAudioAlbumCover requesting remote cover', {
+          title,
+          album,
+          artist,
+          label,
+          query
+        })
+
+        const response = await axios.get('https://api.lrc.cx/cover', {
+          maxRedirects: 0,
+          responseType: 'arraybuffer',
+          timeout: 20000,
+          validateStatus: (status) => status >= 200 && status < 400,
+          ...proxyConfig,
+          params: query
+        })
+
+        const contentType = String(response.headers['content-type'] ?? '').toLowerCase()
+        const redirectedUrl = String(response.headers.location ?? '').trim()
+
+        if (redirectedUrl) {
+          const redirectedResponse = await axios.get<ArrayBuffer>(normalizeRemoteCoverPath(redirectedUrl), {
+            responseType: 'arraybuffer',
+            timeout: 20000,
+            validateStatus: (status) => status >= 200 && status < 400,
+            ...proxyConfig
+          })
+
+          const redirectedContentType = String(redirectedResponse.headers['content-type'] ?? '').toLowerCase()
+          if (!redirectedContentType.startsWith('image/')) {
+            ResourceService.logger.warn('fetchAudioAlbumCover redirect target returned non-image response', {
+              title,
+              album,
+              artist,
+              label,
+              redirectedUrl,
+              redirectedContentType
+            })
+            return null
+          }
+
+          const redirectedSuffix = getImageExtensionByContentType(redirectedContentType)
+          const redirectedCachedFilePath = await writeFetchedAudioCoverToCache(Buffer.from(redirectedResponse.data), redirectedSuffix)
+
+          ResourceService.logger.info('fetchAudioAlbumCover success by redirect download', {
+            title,
+            album,
+            artist,
+            label,
+            redirectedUrl,
+            redirectedContentType,
+            redirectedCachedFilePath
+          })
+
+          return {
+            label,
+            coverPath: redirectedCachedFilePath,
+            query
+          }
+        }
+
+        if (!contentType.startsWith('image/')) {
+          ResourceService.logger.warn('fetchAudioAlbumCover returned non-image response', {
+            title,
+            album,
+            artist,
+            label,
+            contentType
+          })
+          return null
+        }
+
+        const suffix = getImageExtensionByContentType(contentType)
+        const cachedFilePath = await writeFetchedAudioCoverToCache(Buffer.from(response.data), suffix)
+
+        ResourceService.logger.info('fetchAudioAlbumCover success by file write', {
+          title,
+          album,
+          artist,
+          label,
+          contentType,
+          cachedFilePath
+        })
+
+        return {
+          label,
+          coverPath: cachedFilePath,
+          query
+        }
+      }
+
+      const rawQueryCandidates = [
+        {
+          label: '歌名 + 歌手',
+          query: {
+            ...(title ? { title } : {}),
+            ...(artist ? { artist } : {})
+          }
+        },
+        {
+          label: '歌名 + 专辑',
+          query: {
+            ...(title ? { title } : {}),
+            ...(album ? { album } : {})
+          }
+        },
+        {
+          label: '歌手 + 专辑',
+          query: {
+            ...(artist ? { artist } : {}),
+            ...(album ? { album } : {})
+          }
+        }
+      ].filter((item) => Object.keys(item.query).length >= 2)
+
+      const seenQueryKeys = new Set<string>()
+      const queryCandidates = rawQueryCandidates.filter((item) => {
+        const queryKey = JSON.stringify(Object.entries(item.query).sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey)))
+        if (seenQueryKeys.has(queryKey)) {
+          return false
+        }
+
+        seenQueryKeys.add(queryKey)
+        return true
+      })
+
+      const coverCandidates: Array<{ label: string; coverPath: string; query: Record<string, string> }> = []
+      const seenCoverPaths = new Set<string>()
+
+      for (const candidate of queryCandidates) {
+        try {
+          const result = await fetchCoverCandidate(candidate.query, candidate.label)
+          if (!result) {
+            continue
+          }
+
+          const normalizedCoverPath = String(result.coverPath ?? '').trim()
+          if (!normalizedCoverPath || seenCoverPaths.has(normalizedCoverPath)) {
+            continue
+          }
+
+          seenCoverPaths.add(normalizedCoverPath)
+          coverCandidates.push(result)
+        } catch (error) {
+          ResourceService.logger.warn('fetchAudioAlbumCover candidate failed', {
+            title,
+            album,
+            artist,
+            label: candidate.label,
+            query: candidate.query,
+            error: error instanceof Error ? error.message : String(error)
+          })
+        }
+      }
+
+      if (!coverCandidates.length) {
+        return {
+          type: 'warning',
+          message: '未找到可用的专辑封面'
+        }
+      }
+
+      return {
+        type: 'success',
+        message: `已找到 ${coverCandidates.length} 张专辑封面`,
+        data: {
+          coverPath: coverCandidates[0].coverPath,
+          coverCandidates
+        }
+      }
+    } catch (error) {
+      ResourceService.logger.error('fetchAudioAlbumCover failed', {
+        title,
+        album,
+        artist,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return {
+        type: 'error',
+        message: error instanceof Error ? error.message : '获取专辑封面失败'
+      }
+    }
+  }
+
+  static async fetchAudioLyrics(input: {
+    title?: string
+    album?: string
+    artist?: string
+    artists?: string[]
+    basePath?: string
+  }) {
+    const basePath = String(input?.basePath ?? '').trim()
+    const title = String(input?.title ?? '').trim()
+    const album = String(input?.album ?? '').trim()
+    const artist = resolvePreferredArtistName(input?.artist, input?.artists)
+
+    ResourceService.logger.info('fetchAudioLyrics request', {
+      basePath,
+      title,
+      album,
+      artist
+    })
+
+    if (!basePath) {
+      ResourceService.logger.warn('fetchAudioLyrics skipped: missing basePath')
+      return {
+        type: 'warning',
+        message: '请先选择音乐文件'
+      }
+    }
+
+    if (!title && !album && !artist) {
+      ResourceService.logger.warn('fetchAudioLyrics skipped: missing search params', {
+        basePath
+      })
+      return {
+        type: 'warning',
+        message: '请先填写音乐信息后再获取歌词'
+      }
+    }
+
+    try {
+      const pathInfo = await dealPath(basePath)
+      const audioFilePath = getResolvedFilePath(pathInfo)
+      if (!audioFilePath) {
+        return {
+          type: 'warning',
+          message: '当前音乐路径无效'
+        }
+      }
+
+      const searchParams = new URLSearchParams()
+      if (title) {
+        searchParams.set('title', title)
+      }
+      if (album) {
+        searchParams.set('album', album)
+      }
+      if (artist) {
+        searchParams.set('artist', artist)
+      }
+
+      const response = await axios.get<string>('https://api.lrc.cx/lyrics', {
+        responseType: 'text',
+        timeout: 20000,
+        ...(await getAxiosProxyConfig()),
+        params: Object.fromEntries(searchParams.entries())
+      })
+
+      const lyricsContent = String(response.data ?? '').trim()
+      if (!lyricsContent) {
+        ResourceService.logger.warn('fetchAudioLyrics returned empty content', {
+          basePath,
+          title,
+          album,
+          artist
+        })
+        return {
+          type: 'warning',
+          message: '未获取到歌词内容'
+        }
+      }
+
+      const lyricsPath = buildAudioLyricsFilePath(audioFilePath)
+      await fs.writeFile(lyricsPath, lyricsContent, 'utf8')
+
+      ResourceService.logger.info('fetchAudioLyrics success', {
+        basePath,
+        audioFilePath,
+        lyricsPath,
+        title,
+        album,
+        artist,
+        length: lyricsContent.length
+      })
+
+      return {
+        type: 'success',
+        message: '已获取歌词',
+        data: {
+          lyricsPath
+        }
+      }
+    } catch (error) {
+      ResourceService.logger.error('fetchAudioLyrics failed', {
+        basePath,
+        title,
+        album,
+        artist,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return {
+        type: 'error',
+        message: error instanceof Error ? error.message : '获取歌词失败'
+      }
+    }
+  }
+
   /**
    * 保存资源
    * - 将封面图转换为webp格式并保存在cache/thumbnails目录下
@@ -1138,6 +1751,17 @@ export class ResourceService {
    */
   static async saveResource(resourceForm: ResourceForm) {
     try {
+      ResourceService.logger.info('saveResource start', {
+        categoryId: resourceForm.categoryId,
+        name: String(resourceForm?.name ?? '').trim(),
+        basePath: String(resourceForm?.basePath ?? '').trim(),
+        coverPath: String(resourceForm?.coverPath ?? '').trim(),
+        author: String(resourceForm?.author ?? '').trim(),
+        authors: Array.isArray(resourceForm?.authors) ? resourceForm.authors : [],
+        tags: Array.isArray(resourceForm?.tags) ? resourceForm.tags : [],
+        types: Array.isArray(resourceForm?.types) ? resourceForm.types : [],
+        meta: resourceForm?.meta ?? {}
+      })
       const pathDealResult = await dealPath(resourceForm.basePath)
 
       // 获取分类信息
@@ -1160,31 +1784,7 @@ export class ResourceService {
         fileName: pathDealResult.fileName,
         size: normalizedMeta.resourceSize,
       }
-
-      // 作者与关联表 author authorRef
-      let author = {
-        id: generateId(),
-        name: resourceForm.author,
-      }
-      let authorRef: any = null
-      let dbAuthor: any = null
-      // 作者
-      if (resourceForm.author) {
-        dbAuthor = await DatabaseService.getAuthor(resourceForm.author)
-        if (dbAuthor) {
-          authorRef = {
-            authorId: dbAuthor.id,
-            resourceId: resourceId,
-            categoryId: resourceForm.categoryId
-          }
-        } else {
-          authorRef = {
-            authorId: author.id,
-            resourceId: resourceId,
-            categoryId: resourceForm.categoryId
-          }
-        }
-      }
+      const authorPayload = await buildAuthorPayload(resourceId, resourceForm)
 
       // 标签与关联表 newTags tagRefs
       const dbTagMap: Map<string, any> = new Map()
@@ -1256,17 +1856,30 @@ export class ResourceService {
       const actorPayload = buildActorPayload(resourceId, resourceForm)
       const storeWorks = buildStoreWorkPayloads(resourceId, resourceForm, categoryInfo)
 
-      let returnMsg = {
+      let returnMsg: {
+        type: 'success' | 'warning'
+        message: string
+        data: {
+          resourceId: string
+        }
+      } = {
         type: 'success',
         message: '保存成功',
+        data: {
+          resourceId
+        }
       }
 
       db.transaction((tx) => {
         // 插入数据库
         DatabaseService.insertResource(resource, tx)
-        if (authorRef) {
-          if (!dbAuthor) DatabaseService.insertAuthor(author, tx)
-          DatabaseService.insertAuthorRef(authorRef, tx)
+        if (authorPayload.authorRefs.length) {
+          authorPayload.newAuthors.forEach((author) => {
+            DatabaseService.insertAuthor(author, tx)
+          })
+          authorPayload.authorRefs.forEach((authorRef) => {
+            DatabaseService.insertAuthorRef(authorRef, tx)
+          })
         }
         DatabaseService.insertActors(actorPayload, tx)
         DatabaseService.insertTags(newTags, tx)
@@ -1278,7 +1891,7 @@ export class ResourceService {
             DatabaseService.insertStoreWork(storeWork, tx)
           })
         }
-        syncMeta(tx, categoryInfo, resourceId, normalizedMeta.meta)
+        syncMeta(tx, categoryInfo, resourceId, withAudioArtistMeta(categoryInfo, normalizedMeta.meta, authorPayload.displayName))
       })
 
       const markerCreated = await writeResourceMarker({
@@ -1290,7 +1903,10 @@ export class ResourceService {
       if (!markerCreated) {
         returnMsg = {
           type: 'warning',
-          message: '保存成功，但无法创建校验文件，部分功能将不可用'
+          message: '保存成功，但无法创建校验文件，部分功能将不可用',
+          data: {
+            resourceId
+          }
         }
       }
 
@@ -1305,9 +1921,25 @@ export class ResourceService {
 
       this.scheduleAsmrDurationRefresh(categoryInfo, resourceId, resource.basePath)
 
+      ResourceService.logger.info('saveResource success', {
+        resourceId,
+        categoryId: resourceForm.categoryId,
+        basePath: resource.basePath,
+        fileName: resource.fileName,
+        returnMsg
+      })
+
       return returnMsg
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
+      ResourceService.logger.error('saveResource failed', {
+        categoryId: resourceForm.categoryId,
+        name: String(resourceForm?.name ?? '').trim(),
+        basePath: String(resourceForm?.basePath ?? '').trim(),
+        coverPath: String(resourceForm?.coverPath ?? '').trim(),
+        error: message,
+        meta: resourceForm?.meta ?? {}
+      })
       return {
         type: 'error',
         message: message
@@ -1777,7 +2409,13 @@ export class ResourceService {
     }
   }
 
-  static async updateResource(resourceId: string, resourceForm: ResourceForm) {
+  static async updateResource(
+    resourceId: string,
+    resourceForm: ResourceForm,
+    options?: {
+      silent?: boolean
+    }
+  ) {
     const normalizedResourceId = String(resourceId ?? '').trim()
 
     if (!normalizedResourceId) {
@@ -1814,6 +2452,7 @@ export class ResourceService {
         basePath: pathDealResult.basePath,
         fileName: pathDealResult.fileName,
         size: normalizedMeta.resourceSize,
+        missingStatus: false,
       }
 
       const authorPayload = await buildAuthorPayload(normalizedResourceId, resourceForm)
@@ -1830,11 +2469,13 @@ export class ResourceService {
         DatabaseService.deleteTypeRefsByResourceId(normalizedResourceId, tx)
         DatabaseService.deleteStoreWorkByResourceId(normalizedResourceId, tx)
 
-        if (authorPayload.authorRef) {
-          if (!authorPayload.existingAuthor && authorPayload.author) {
-            DatabaseService.insertAuthor(authorPayload.author, tx)
-          }
-          DatabaseService.insertAuthorRef(authorPayload.authorRef, tx)
+        if (authorPayload.authorRefs.length) {
+          authorPayload.newAuthors.forEach((author) => {
+            DatabaseService.insertAuthor(author, tx)
+          })
+          authorPayload.authorRefs.forEach((authorRef) => {
+            DatabaseService.insertAuthorRef(authorRef, tx)
+          })
         }
 
         DatabaseService.insertActors(actorPayload, tx)
@@ -1849,7 +2490,7 @@ export class ResourceService {
           })
         }
 
-        syncMeta(tx, categoryInfo, normalizedResourceId, normalizedMeta.meta)
+        syncMeta(tx, categoryInfo, normalizedResourceId, withAudioArtistMeta(categoryInfo, normalizedMeta.meta, authorPayload.displayName))
       })
 
       await syncResourceMarker(existingResource, {
@@ -1867,6 +2508,16 @@ export class ResourceService {
         fileName: resourceData.fileName ?? null,
         missingStatus: false,
       })
+
+      if (!options?.silent) {
+        NotificationQueueService.getInstance().pushResourceStateChanged({
+          resourceId: normalizedResourceId,
+          categoryId: resourceForm.categoryId,
+          running: false,
+          missingStatus: false,
+          changedAt: Date.now(),
+        })
+      }
 
       this.scheduleAsmrDurationRefresh(categoryInfo, normalizedResourceId, resourceData.basePath)
 
@@ -1972,8 +2623,12 @@ function getGameSearchRoot(basePath: string) {
   return path.extname(basePath) ? path.dirname(basePath) : basePath
 }
 
+function getFileNameWithoutExtension(filePath: string) {
+  return path.basename(String(filePath ?? '').trim(), path.extname(String(filePath ?? '').trim()))
+}
+
 function getWebsiteLabelByGameId(gameId: string) {
-  if (/^RJ\d{6}(?:\d{2})?$/i.test(gameId) || /^VJ\d{6}(?:\d{2})?$/i.test(gameId)) {
+  if (/^RJ\d{6}(?:\d{2})?$/i.test(gameId) || /^BJ\d{6}(?:\d{2})?$/i.test(gameId) || /^VJ\d{6}(?:\d{2})?$/i.test(gameId)) {
     return 'DLsite'
   }
 
@@ -1989,26 +2644,33 @@ function getWebsiteLabelByGameId(gameId: string) {
 }
 
 async function buildAuthorPayload(resourceId: string, resourceForm: ResourceForm) {
-  let author = {
-    id: generateId(),
-    name: resourceForm.author,
-  }
-  let authorRef: any = null
-  let existingAuthor: any = null
+  const authorNames = normalizeAuthorNames(resourceForm)
+  const newAuthors: Array<{ id: string; name: string }> = []
+  const authorRefs: Array<{ authorId: string; resourceId: string; categoryId: string }> = []
 
-  if (resourceForm.author) {
-    existingAuthor = await DatabaseService.getAuthor(resourceForm.author)
-    authorRef = {
-      authorId: existingAuthor?.id ?? author.id,
+  for (const authorName of authorNames) {
+    const existingAuthor = await DatabaseService.getAuthor(authorName)
+    const authorId = existingAuthor?.id ?? generateId()
+
+    if (!existingAuthor) {
+      newAuthors.push({
+        id: authorId,
+        name: authorName,
+      })
+    }
+
+    authorRefs.push({
+      authorId,
       resourceId,
       categoryId: resourceForm.categoryId
-    }
+    })
   }
 
   return {
-    author,
-    authorRef,
-    existingAuthor,
+    authorNames,
+    displayName: joinArtistNames(authorNames),
+    newAuthors,
+    authorRefs,
   }
 }
 
@@ -2312,6 +2974,7 @@ async function removeResourceMarker(resource: { id: string; basePath: string; fi
 function findGameIdInText(input: string) {
   const matchers = [
     /RJ\d{6}(?:\d{2})?/i,
+    /BJ\d{6}(?:\d{2})?/i,
     /VJ\d{6}(?:\d{2})?/i,
     /d_\d+/i,
     /RA\d+/i,
@@ -2357,6 +3020,17 @@ async function findGameIdInDirectory(searchRoot: string, basePath: string) {
   }
 
   return ''
+}
+
+async function resolveWebsiteTypeByGameId(gameId: string, dictType: string) {
+  const websiteLabel = getWebsiteLabelByGameId(String(gameId ?? '').trim())
+  if (!websiteLabel) {
+    return ''
+  }
+
+  const websiteOptions = await DatabaseService.getSelectDictData(dictType)
+  const matchedWebsite = websiteOptions.find((option) => String(option?.label ?? '').trim() === websiteLabel)
+  return String(matchedWebsite?.value ?? '').trim()
 }
 
 let cachedComicMetaWebsiteId: string | null = null
@@ -2466,11 +3140,13 @@ async function resolveResourceCoverPath(
   categoryInfo: any,
   pathInfo: ResourcePathInfo
 ) {
-  if (getExtendTableName(categoryInfo) === 'single_image_meta') {
+  const extendTableName = getExtendTableName(categoryInfo)
+
+  if (extendTableName === 'single_image_meta') {
     return getResolvedFilePath(pathInfo)
   }
 
-  if (getExtendTableName(categoryInfo) === 'multi_image_meta') {
+  if (extendTableName === 'multi_image_meta') {
     const resolvedDirectoryPath = String(pathInfo?.basePath ?? '').trim()
     if (resolvedDirectoryPath) {
       const imagePaths = await getDirectoryImageFiles(resolvedDirectoryPath)
@@ -2481,7 +3157,22 @@ async function resolveResourceCoverPath(
     }
   }
 
-  return dealCover(coverPath, resourceId)
+  try {
+    return await dealCover(coverPath, resourceId)
+  } catch (error) {
+    // Some embedded album art uses formats unsupported by sharp. For music,
+    // skipping the cover is better than failing the whole import/save flow.
+    if (extendTableName === 'audio_meta') {
+      ResourceService.logger.warn('resolveResourceCoverPath skipped invalid audio cover', {
+        resourceId,
+        coverPath,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return ''
+    }
+
+    throw error
+  }
 }
 
 async function normalizeResourceMeta(
@@ -2519,6 +3210,29 @@ async function normalizeResourceMeta(
     normalizedMeta.duration = -1
   }
 
+  if (getExtendTableName(categoryInfo) === 'audio_meta') {
+    const audioPath = getResolvedFilePath(pathInfo)
+    if (audioPath) {
+      const audioInfo = await readSingleAudioFileInfo(audioPath)
+
+      if (audioInfo.duration > 0) {
+        normalizedMeta.duration = audioInfo.duration
+      }
+
+      if (audioInfo.artist && !String(normalizedMeta.artist ?? '').trim()) {
+        normalizedMeta.artist = audioInfo.artist
+      }
+
+      if (audioInfo.album && !String(normalizedMeta.album ?? '').trim()) {
+        normalizedMeta.album = audioInfo.album
+      }
+
+      if (!String(normalizedMeta.lyricsPath ?? '').trim()) {
+        normalizedMeta.lyricsPath = await findMatchedLyricsPath(audioPath)
+      }
+    }
+  }
+
   return {
     meta: normalizedMeta,
     resourceSize,
@@ -2536,7 +3250,7 @@ async function resolveResourceStorageSize(
     return getDirectorySize(pathInfo.basePath)
   }
 
-  if (extendTable === 'game_meta') {
+  if (['game_meta', 'audio_meta'].includes(extendTable)) {
     const targetPath = getResolvedFilePath(pathInfo)
     return targetPath ? getFileSize(targetPath) : null
   }
@@ -2627,6 +3341,245 @@ async function readSingleImageFileInfo(imagePath: string) {
     resolution: width > 0 && height > 0 ? `${width}x${height}` : '',
     format: normalizedFormat,
   }
+}
+
+async function readSingleAudioFileInfo(filePath: string) {
+  try {
+    const metadata = await parseFile(filePath, {
+      duration: true,
+      skipPostHeaders: true
+    })
+    const duration = Number(metadata.format.duration ?? 0)
+    const bitrate = Number(metadata.format.bitrate ?? 0)
+    const sampleRate = Number(metadata.format.sampleRate ?? 0)
+    const artists = normalizeArtistNameList([
+      ...(Array.isArray(metadata.common.artists) ? metadata.common.artists : []),
+      String(metadata.common.artist ?? '').trim()
+    ])
+    const embeddedCoverPath = await extractEmbeddedAudioCoverToCache(metadata.common.picture?.[0])
+
+    return {
+      duration: Number.isFinite(duration) && duration > 0 ? Math.round(duration) : 0,
+      bitrate: Number.isFinite(bitrate) && bitrate > 0 ? Math.round(bitrate) : null,
+      sampleRate: Number.isFinite(sampleRate) && sampleRate > 0 ? Math.round(sampleRate) : null,
+      artists,
+      artist: joinArtistNames(artists),
+      album: normalizeAudioTagText(String(metadata.common.album ?? '').trim()),
+      embeddedCoverPath,
+    }
+  } catch {
+    return {
+      duration: 0,
+      bitrate: null,
+      sampleRate: null,
+      artists: [],
+      artist: '',
+      album: '',
+      embeddedCoverPath: '',
+    }
+  }
+}
+
+function normalizeAuthorNames(resourceForm: ResourceForm) {
+  return normalizeArtistNameList([
+    ...(Array.isArray(resourceForm.authors) ? resourceForm.authors : []),
+    String(resourceForm.author ?? '').trim()
+  ])
+}
+
+function normalizeArtistNameList(values: string[]) {
+  const result: string[] = []
+  const seen = new Set<string>()
+
+  for (const value of values ?? []) {
+    const rawText = String(value ?? '').trim()
+    if (!rawText) {
+      continue
+    }
+
+    const splitValues = splitArtistText(rawText)
+    for (const splitValue of splitValues) {
+      const normalizedValue = normalizeAudioTagText(splitValue).trim()
+      const normalizedKey = normalizedValue.toLowerCase()
+      if (!normalizedValue || seen.has(normalizedKey)) {
+        continue
+      }
+
+      seen.add(normalizedKey)
+      result.push(normalizedValue)
+    }
+  }
+
+  return result
+}
+
+function splitArtistText(input: string) {
+  const normalizedInput = String(input ?? '').trim()
+  if (!normalizedInput) {
+    return []
+  }
+
+  return normalizedInput
+    .split(/\s*(?:\/|／|,|，|、|;|；|\||·| feat\. | ft\. | featuring | with | x | × | & | ＆ )\s*/i)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function joinArtistNames(names: string[]) {
+  return normalizeArtistNameList(names).join(' / ')
+}
+
+function withAudioArtistMeta(categoryInfo: any, meta: ResourceMeta, artistDisplayName: string) {
+  if (getExtendTableName(categoryInfo) !== 'audio_meta') {
+    return meta
+  }
+
+  return {
+    ...meta,
+    artist: artistDisplayName || String(meta.artist ?? '').trim()
+  }
+}
+
+async function findMatchedLyricsPath(audioFilePath: string) {
+  const normalizedAudioFilePath = path.normalize(String(audioFilePath ?? '').trim())
+  if (!normalizedAudioFilePath) {
+    return ''
+  }
+
+  const directoryPath = path.dirname(normalizedAudioFilePath)
+  const fileStem = path.basename(normalizedAudioFilePath, path.extname(normalizedAudioFilePath))
+  const lyricsExtensions = ['.lrc', '.srt', '.vtt']
+
+  const exactCandidates = lyricsExtensions.map((extension) => path.join(directoryPath, `${fileStem}${extension}`))
+  for (const candidatePath of exactCandidates) {
+    if (await fs.pathExists(candidatePath)) {
+      return candidatePath
+    }
+  }
+
+  return ''
+}
+
+function resolvePreferredArtistName(artist?: string, artists?: string[]) {
+  const normalizedArtists = normalizeArtistNameList([
+    ...(Array.isArray(artists) ? artists : []),
+    String(artist ?? '').trim()
+  ])
+
+  return String(normalizedArtists[0] ?? '').trim()
+}
+
+function buildAudioLyricsFilePath(audioFilePath: string) {
+  const normalizedAudioFilePath = path.normalize(String(audioFilePath ?? '').trim())
+  const directoryPath = path.dirname(normalizedAudioFilePath)
+  const fileStem = path.basename(normalizedAudioFilePath, path.extname(normalizedAudioFilePath))
+  return path.join(directoryPath, `${fileStem}.lrc`)
+}
+
+function getImageExtensionByContentType(contentType: string) {
+  const normalizedContentType = String(contentType ?? '').toLowerCase()
+  if (normalizedContentType.includes('png')) {
+    return '.png'
+  }
+  if (normalizedContentType.includes('webp')) {
+    return '.webp'
+  }
+  if (normalizedContentType.includes('gif')) {
+    return '.gif'
+  }
+  if (normalizedContentType.includes('bmp')) {
+    return '.bmp'
+  }
+
+  return '.jpg'
+}
+
+async function writeFetchedAudioCoverToCache(buffer: Buffer, extension: string) {
+  const cacheSetting = await DatabaseService.getSetting(Settings.CACHE_PATH)
+
+  if (!cacheSetting) {
+    throw new Error('未配置缓存目录')
+  }
+
+  const cachePath = path.join(cacheSetting.value, 'audio-covers')
+  await fs.ensureDir(cachePath)
+  const filePath = path.join(cachePath, `${generateId()}${extension}`)
+  await fs.writeFile(filePath, buffer)
+  return filePath
+}
+
+async function extractEmbeddedAudioCoverToCache(picture?: { data?: Uint8Array; format?: string } | null) {
+  const imageData = picture?.data
+  if (!imageData || !imageData.length) {
+    return ''
+  }
+
+  const pictureFormat = String(picture?.format ?? '').trim().toLowerCase()
+  const extension = getImageExtensionByContentType(pictureFormat || 'image/jpeg')
+  return writeFetchedAudioCoverToCache(Buffer.from(imageData), extension)
+}
+
+function normalizeAudioTagText(input: string) {
+  const normalizedInput = String(input ?? '').trim()
+  if (!normalizedInput) {
+    return ''
+  }
+
+  if (/[\u3400-\u9fff]/.test(normalizedInput)) {
+    return normalizedInput
+  }
+
+  if (!/[À-ÿ]/.test(normalizedInput)) {
+    return normalizedInput
+  }
+
+  const sourceBuffer = Buffer.from(normalizedInput, 'latin1')
+  const decoderCandidates = ['gb18030', 'utf-8'] as const
+  const decodedCandidates = decoderCandidates
+    .map((encoding) => {
+      try {
+        return new TextDecoder(encoding).decode(sourceBuffer).trim()
+      } catch {
+        return ''
+      }
+    })
+    .filter(Boolean)
+
+  const scoredCandidates = [normalizedInput, ...decodedCandidates]
+    .map((candidate) => ({
+      value: candidate,
+      score: scoreDecodedAudioTagText(candidate)
+    }))
+    .sort((left, right) => right.score - left.score)
+
+  return scoredCandidates[0]?.value ?? normalizedInput
+}
+
+function scoreDecodedAudioTagText(input: string) {
+  const normalizedInput = String(input ?? '').trim()
+  if (!normalizedInput) {
+    return -100
+  }
+
+  let score = 0
+
+  if (/[\u3400-\u9fff]/.test(normalizedInput)) {
+    score += 10
+  }
+
+  if (/[A-Za-z0-9]/.test(normalizedInput)) {
+    score += 2
+  }
+
+  if (/[À-ÿ]/.test(normalizedInput)) {
+    score -= 4
+  }
+
+  if (/[ÃÐÑØÖ×ÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ]/.test(normalizedInput)) {
+    score -= 6
+  }
+
+  return score
 }
 
 function getResolvedFilePath(pathInfo: ResourcePathInfo) {
@@ -2853,6 +3806,16 @@ function syncMeta(tx: any, categoryInfo: any, resourceId: string, meta: Resource
         resourceId,
         language: meta.language || null,
         scenario: meta.scenario || null,
+      }, tx)
+      return
+    case 'audio_meta':
+      DatabaseService.upsertAudioMeta({
+        resourceId,
+        artist: String(meta.artist ?? '').trim() || null,
+        album: String(meta.album ?? '').trim() || null,
+        lyricsPath: String(meta.lyricsPath ?? '').trim() || null,
+        duration: Number.isFinite(Number(meta.duration)) ? Math.round(Number(meta.duration)) : null,
+        lastPlayTime: Number.isFinite(Number(meta.lastPlayTime)) ? Math.max(0, Math.floor(Number(meta.lastPlayTime))) : 0,
       }, tx)
       return
     case 'novel_meta':

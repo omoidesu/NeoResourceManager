@@ -2,6 +2,7 @@ import { defineAsyncComponent, markRaw } from 'vue'
 
 const GameMetaForm = defineAsyncComponent(() => import('./GameMetaForm.vue'))
 const AsmrMetaForm = defineAsyncComponent(() => import('./AsmrMetaForm.vue'))
+const MusicMetaForm = defineAsyncComponent(() => import('./MusicMetaForm.vue'))
 const SoftwareMetaForm = defineAsyncComponent(() => import('./SoftwareMetaForm.vue'))
 const SingleImageMetaForm = defineAsyncComponent(() => import('./SingleImageMetaForm.vue'))
 const MultiImageMetaForm = defineAsyncComponent(() => import('./MultiImageMetaForm.vue'))
@@ -9,6 +10,7 @@ const MultiImageMetaForm = defineAsyncComponent(() => import('./MultiImageMetaFo
 export const META_FORM_COMPONENTS: Record<string, any> = {
   game_meta: markRaw(GameMetaForm),
   asmr_meta: markRaw(AsmrMetaForm),
+  audio_meta: markRaw(MusicMetaForm),
   software_meta: markRaw(SoftwareMetaForm),
   single_image_meta: markRaw(SingleImageMetaForm),
   multi_image_meta: markRaw(MultiImageMetaForm)

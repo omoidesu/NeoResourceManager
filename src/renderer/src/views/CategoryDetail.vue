@@ -3,26 +3,27 @@ import {computed, h, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref
 import type { ComputedRef } from 'vue'
 import { useRoute } from 'vue-router'
 import { CheckmarkOutline, ChevronBackOutline, ChevronForwardOutline, CloseOutline, EyeOutline, FolderOpenOutline, FunnelOutline, Play, SearchOutline, Stop, TrashOutline } from '@vicons/ionicons5'
+import { createLogger } from '../../../main/util/logger'
 import { confirmDialog, notify } from '../utils/notification'
 import { removeOngoingCenterItem, upsertOngoingCenterItem } from '../utils/notification-center'
 import ResourceCard from '../components/card/ResourceCard.vue'
 import PictureViewer from '../components/PictureViewer.vue'
 import ComicReader from '../components/ComicReader.vue'
-import AudioPlayer from '../components/AudioPlayer.vue'
 import RichTextEditor from '../components/RichTextEditor.vue'
 import { createEmptyMetaByType } from '../components/meta/meta-factory'
 import { resolveMetaFormComponent } from '../components/meta/registry'
-import { useAudioPlayerStore } from '../utils/audio-player-store'
+import { setAudioPlayerSession, setAudioPlayerVisible, useAudioPlayerStore } from '../utils/audio-player-store'
 import { DictType, ResourceLaunchMode, ResourceLogSpecialTime, Settings } from '../../../common/constants'
 import type { ResourceForm, ResourceMeta } from '../../../main/model/models'
 
 const route = useRoute()
+const logger = createLogger('category-detail')
 const injectedIsDark = inject<ComputedRef<boolean>>('appIsDark', computed(() => true))
 const audioPlayerStore = useAudioPlayerStore()
 const categoryId = computed(() => route.params.id as string)
 const resourceList = ref<any[]>([]) // 资源列表数据
-const resourceListRenderVersion = ref(0)
 const authorList = ref<any[]>([])
+const albumList = ref<any[]>([])
 const engineList = ref<any[]>([])
 const websiteTypeOptions = ref<any[]>([])
 const tagList = ref<any[]>([])
@@ -30,6 +31,7 @@ const typeList = ref<any[]>([])
 const loading = ref(true)
 const keyword = ref('')
 const authorSearch = ref<string>('')
+const albumSearch = ref<string>('')
 const tagSearch = ref<string>('')
 const typeSearch = ref<string>('')
 const showModal = ref(false)
@@ -37,6 +39,7 @@ const showEditModal = ref(false)
 const showBatchImportLoading = ref(false)
 const showBatchImportModal = ref(false)
 const showBatchLabelModal = ref(false)
+const showAudioCoverCandidateModal = ref(false)
 const fetchResourceInfoLoading = ref(false)
 const formData = ref<any>({ name: '', meta: {} })
 const editingResourceId = ref('')
@@ -56,12 +59,17 @@ const formRef = ref()
 const basePathFormItemRef = ref()
 const coverPreviewSrc = ref('')
 const detailCoverPreviewSrc = ref('')
+const audioCoverCandidates = ref<Array<{
+  label: string
+  coverPath: string
+  previewSrc: string
+  queryText: string
+}>>([])
 const detailScreenshotPreviewSrc = ref('')
 const detailDescriptionContentRef = ref<HTMLElement | null>(null)
 const detailDescriptionHeight = ref(400)
 const showPictureViewer = ref(false)
 const showComicReader = ref(false)
-const showAudioPlayer = ref(false)
 const pictureViewerScrollMode = ref(String(Settings.PICTURE_READ_SCROLL_MODE.default ?? 'zoom'))
 const pictureViewerImagePaths = ref<string[]>([])
 const pictureViewerInitialIndex = ref(0)
@@ -69,12 +77,8 @@ const pictureViewerAllowDelete = ref(true)
 const comicReaderImagePaths = ref<string[]>([])
 const comicReaderInitialIndex = ref(0)
 const currentComicReaderResourceId = ref('')
-const audioPlayerInitialPath = ref('')
-const audioPlayerInitialTime = ref(0)
-const audioPlayerPlaylist = ref<Array<{ path: string; label: string; duration?: number | null; hasSubtitle?: boolean }>>([])
-const audioPlayerResourceId = ref('')
-const audioPlayerTitle = ref('')
-const audioPlayerCoverSrc = ref('')
+const audioPlayerPlaylist = ref<Array<{ path: string; label: string; duration?: number | null; resourceId?: string; resourceTitle?: string; artist?: string; coverSrc?: string; hasSubtitle?: boolean; subtitlePath?: string }>>([])
+const audioPlayerDisplayMode = ref<'default' | 'music'>('default')
 const detailAudioContextMenuVisible = ref(false)
 const detailAudioContextMenuX = ref(0)
 const detailAudioContextMenuY = ref(0)
@@ -230,6 +234,8 @@ const modelComponentKey = computed(() => categorySettings.value.extendTable || '
 
 const createEmptyFormData = () => ({
   name: '',
+  author: '',
+  authors: [] as string[],
   description: '',
   coverPath: '',
   basePath: '',
@@ -254,7 +260,93 @@ const buildDisplayBasePath = (resource: any) => {
   return `${basePath.replace(/[\\/]+$/, '')}\\${fileName}`
 }
 
+const normalizeAudioAuthorList = (values: string[]) => {
+  const normalizedValues: string[] = []
+  const seen = new Set<string>()
+
+  for (const value of values ?? []) {
+    const rawText = String(value ?? '').trim()
+    if (!rawText) {
+      continue
+    }
+
+    const splitValues = rawText
+      .split(/\s*(?:\/|／|,|，|、|;|；|\||·| feat\. | ft\. | featuring | with | x | × | & | ＆ )\s*/i)
+      .map((item) => item.trim())
+      .filter(Boolean)
+
+    for (const splitValue of splitValues) {
+      const normalizedKey = splitValue.toLowerCase()
+      if (seen.has(normalizedKey)) {
+        continue
+      }
+
+      seen.add(normalizedKey)
+      normalizedValues.push(splitValue)
+    }
+  }
+
+  return normalizedValues
+}
+
+const joinAudioAuthorNames = (names: string[]) => normalizeAudioAuthorList(names).join(' / ')
+
+const sanitizeSelectedFilterValues = (
+  selectedValues: string[],
+  options: any[],
+  key: 'id' | 'name' = 'id'
+) => {
+  const availableValues = new Set(
+    (options ?? [])
+      .map((item) => String(item?.[key] ?? '').trim())
+      .filter(Boolean)
+  )
+
+  return (selectedValues ?? []).filter((value) => availableValues.has(String(value ?? '').trim()))
+}
+
+const assignSanitizedSelectedFilterValues = (
+  targetRef: { value: any[] },
+  options: any[],
+  key: 'id' | 'name' = 'id'
+) => {
+  const currentValues = Array.isArray(targetRef.value) ? targetRef.value : []
+  const nextValues = sanitizeSelectedFilterValues(currentValues, options, key)
+  const hasChanged = currentValues.length !== nextValues.length
+    || currentValues.some((value, index) => String(value ?? '').trim() !== String(nextValues[index] ?? '').trim())
+
+  if (hasChanged) {
+    targetRef.value = nextValues
+  }
+}
+
+const syncAudioAuthorFields = (targetForm: any, names?: string[]) => {
+  if (String(categorySettings.value.extendTable ?? '').trim() !== 'audio_meta' || !targetForm) {
+    return
+  }
+
+  const normalizedNames = normalizeAudioAuthorList(
+    Array.isArray(names)
+      ? names
+      : [
+          ...(Array.isArray(targetForm.authors) ? targetForm.authors : []),
+          String(targetForm.author ?? '').trim()
+        ]
+  )
+  const displayName = joinAudioAuthorNames(normalizedNames)
+
+  targetForm.authors = normalizedNames
+  targetForm.author = displayName
+  targetForm.meta = {
+    ...(targetForm.meta ?? {}),
+    artist: displayName
+  }
+}
+
 const mapResourceDetailToFormData = (resource: any) => {
+  const authorNames = Array.isArray(resource?.authors)
+    ? resource.authors.map((item: any) => String(item?.name ?? '')).filter(Boolean)
+    : []
   const stores = Array.isArray(resource?.stores) ? resource.stores : []
   const pixivStore = stores.find((item: any) => String(item?.store?.value ?? '').trim().toLowerCase() === 'pixiv')
   const primaryStore = stores.find((item: any) => String(item?.id ?? '') !== String(pixivStore?.id ?? '')) ?? stores[0]
@@ -270,7 +362,8 @@ const mapResourceDetailToFormData = (resource: any) => {
     description: resource?.description ?? '',
     coverPath: resource?.coverPath ?? '',
     basePath: buildDisplayBasePath(resource),
-    author: Array.isArray(resource?.authors) ? String(resource.authors[0]?.name ?? '') : '',
+    author: joinAudioAuthorNames(authorNames) || String(resource?.audioMeta?.artist ?? ''),
+    authors: authorNames,
     actors: Array.isArray(resource?.actors) ? resource.actors.map((item: any) => String(item?.name ?? '')).filter(Boolean) : [],
     tags: Array.isArray(resource?.tags) ? resource.tags.map((item: any) => String(item?.name ?? '')).filter(Boolean) : [],
     types: Array.isArray(resource?.types) ? resource.types.map((item: any) => String(item?.name ?? '')).filter(Boolean) : [],
@@ -282,6 +375,7 @@ const mapResourceDetailToFormData = (resource: any) => {
       ...(resource?.multiImageMeta ?? {}),
       ...(resource?.videoMeta ?? {}),
       ...(resource?.asmrMeta ?? {}),
+      ...(resource?.audioMeta ?? {}),
       pixivId: String(pixivStore?.workId ?? ''),
       websiteType: String(primaryStore?.storeId ?? ''),
       gameId: String(primaryStore?.workId ?? ''),
@@ -307,16 +401,19 @@ const favoriteResourceCount = ref(0)
 const completedResourceCount = ref(0)
 const runningResourceCount = ref(0)
 const selectedAuthorList = ref<string[]>([])
+const selectedAlbumList = ref<string[]>([])
 const selectedEngineList = ref<string[]>([])
 const selectedTagList = ref<string[]>([])
 const selectedTypeList = ref<string[]>([])
 const selectedResourceIds = ref<string[]>([])
 const selectionModeManuallyEnabled = ref(false)
 const isBatchDeleting = ref(false)
+const isBatchFetchingAlbumCover = ref(false)
 const isBatchLabelSubmitting = ref(false)
-const batchLabelField = ref<'tags' | 'types'>('tags')
+const batchLabelField = ref<'tags' | 'types' | 'authors' | 'album'>('tags')
 const batchLabelMode = ref<'add' | 'remove'>('add')
 const batchLabelValues = ref<string[]>([])
+const batchLabelSingleValue = ref('')
 const currentPage = ref(1)
 const jumpPageInput = ref<number | null>(1)
 const pageSize = ref(24)
@@ -324,11 +421,24 @@ const totalResources = ref(0)
 const sortBy = ref('createTime-desc')
 const localeEmulatorPath = ref('')
 const mtoolPath = ref('')
+const suppressAutoFetch = ref(false)
+let fetchDataRequestId = 0
 
-const showBatchImportButton = computed(() => ['game_meta', 'single_image_meta', 'multi_image_meta'].includes(String(categorySettings.value.extendTable ?? '')))
+const showBatchImportButton = computed(() => ['game_meta', 'single_image_meta', 'multi_image_meta', 'asmr_meta', 'audio_meta'].includes(String(categorySettings.value.extendTable ?? '')))
 const getBatchImportOngoingId = (targetCategoryId: string) => `batch-import-analysis:${targetCategoryId}`
 const batchProgressRunning = computed(() => batchAnalyzeRunning.value || batchImportRunning.value)
 const batchProgressStage = computed(() => (batchImportRunning.value ? 'import' : 'analyze'))
+const batchImportResourceLabel = computed(() => {
+  if (detailIsManga.value) {
+    return '漫画'
+  }
+
+  if (detailIsAsmr.value) {
+    return '音声'
+  }
+
+  return '游戏'
+})
 const batchAnalyzePercent = computed(() =>
   batchAnalyzeTotal.value > 0
     ? Math.min(100, Math.round((batchAnalyzeCurrent.value / batchAnalyzeTotal.value) * 100))
@@ -344,11 +454,20 @@ const batchAnalyzeDisplayIndex = computed(() => {
 const showBatchImportProgressToast = computed(() =>
   batchProgressRunning.value && batchAnalyzeInBackground.value && !batchAnalyzeToastDismissed.value
 )
+const isBatchImportItemImportable = (item: any) => {
+  if (detailIsManga.value) {
+    return Number(item?.imageCount ?? 0) > 0
+  }
+
+  if (detailIsAsmr.value) {
+    return Number(item?.audioCount ?? 0) > 0
+  }
+
+  return !!item?.launchFilePath
+}
 const selectableBatchImportItems = computed(() =>
   batchImportItems.value.filter((item) => {
-    const canImport = detailIsManga.value
-      ? Number(item?.imageCount ?? 0) > 0
-      : !!item?.launchFilePath
+    const canImport = isBatchImportItemImportable(item)
     return !item.exists && !item.errorMessage && canImport
   })
 )
@@ -357,6 +476,11 @@ const selectedBatchImportCount = computed(() =>
 )
 const selectedResourceCount = computed(() => selectedResourceIds.value.length)
 const resourceSelectionMode = computed(() => selectedResourceCount.value > 0 || selectionModeManuallyEnabled.value)
+const currentPageResourceIds = computed(() =>
+  resourceList.value
+    .map((item) => String(item?.id ?? '').trim())
+    .filter(Boolean)
+)
 const currentCategoryBatchInBackground = computed(() =>
   batchProgressRunning.value && batchAnalyzeInBackground.value
 )
@@ -423,6 +547,7 @@ const normalizedTypeList = computed(() =>
 )
 
 const normalizedAuthorSearch = computed(() => authorSearch.value.trim().toLowerCase())
+const normalizedAlbumSearch = computed(() => albumSearch.value.trim().toLowerCase())
 const normalizedTagSearch = computed(() => tagSearch.value.trim().toLowerCase())
 const normalizedTypeSearch = computed(() => typeSearch.value.trim().toLowerCase())
 
@@ -437,6 +562,14 @@ const filteredAuthorList = computed(() => {
 })
 
 const filteredEngineList = computed(() => normalizedEngineList.value)
+const normalizedAlbumList = computed(() =>
+  albumList.value
+    .map((album) => ({
+      name: String(album?.name ?? album?.albumName ?? '').trim(),
+      count: Number(album?.count ?? 0)
+    }))
+    .filter((album) => album.name)
+)
 const websiteTypeSelectOptions = computed(() =>
   websiteTypeOptions.value.map((item: any) => {
     const icon = resolveStoreIcon(String(item?.extra?.icon ?? ''))
@@ -462,12 +595,26 @@ const categoryName = computed(() => {
   return categoryInfo.value?.name || '资源'
 })
 
+const filteredAlbumList = computed(() => {
+  if (!normalizedAlbumSearch.value) {
+    return normalizedAlbumList.value
+  }
+
+  return normalizedAlbumList.value.filter((album) =>
+    String(album.name).toLowerCase().includes(normalizedAlbumSearch.value)
+  )
+})
+
 const descriptionLabel = computed(() =>
   categorySettings.value.extendTable === 'game_meta' ? '游戏简介' : `${categoryName.value}描述`
 )
+const isAudioCategory = computed(() => categorySettings.value.extendTable === 'audio_meta')
 
 const descriptionPlaceholder = computed(() =>
   categorySettings.value.extendTable === 'game_meta' ? '请输入游戏简介' : `请输入${categoryName.value}描述`
+)
+const authorInputPlaceholder = computed(() =>
+  isAudioCategory.value ? '可输入多个艺术家，按回车创建标签' : `请输入${categorySettings.value.authorText ?? '作者'}`
 )
 
 const isSingleImageCategory = computed(() => categorySettings.value.extendTable === 'single_image_meta')
@@ -502,8 +649,14 @@ const softwareScriptPlaceholder = computed(() =>
     : '例如：\ncd /d d:/myDir\ncall .\\venv\\Scripts\\activate\npy -3.10 run.py'
 )
 const filterSectionCount = computed(() => {
-  const baseCount = detailIsAsmr.value ? 2 : 3
-  return showEngineFilter.value ? baseCount + 1 : baseCount
+  let count = detailIsAsmr.value ? 2 : 3
+  if (isAudioCategory.value) {
+    count += 1
+  }
+  if (showEngineFilter.value) {
+    count += 1
+  }
+  return count
 })
 
 const filterSectionsStyle = computed(() => ({
@@ -523,7 +676,7 @@ const hasMoreDetailLogs = computed(() => visibleLogCount.value < detailLogs.valu
 const noMore = computed(() => detailLogs.value.length > 5 && !hasMoreDetailLogs.value)
 const detailStats = computed(() => selectedDetailResource.value?.stats ?? null)
 const detailUsesBrowseTerms = computed(() => isSingleImageCategory.value || detailIsManga.value)
-const detailUsesPlayTerms = computed(() => detailIsAsmr.value)
+const detailUsesPlayTerms = computed(() => detailIsAsmr.value || detailIsAudio.value)
 const detailStatsText = computed(() => ({
   firstAccess: detailUsesBrowseTerms.value ? '第一次浏览' : (detailUsesPlayTerms.value ? '第一次播放' : '第一次启动'),
   lastAccess: detailUsesBrowseTerms.value ? '最后一次浏览' : (detailUsesPlayTerms.value ? '最后一次播放' : '最后一次启动'),
@@ -547,6 +700,11 @@ const detailReadingProgressText = computed(() => {
   return `${Math.min(lastReadPage + 1, totalPages)} / ${totalPages}`
 })
 const detailPlaybackProgressText = computed(() => {
+  if (detailIsAudio.value) {
+    const lastPlayTime = Math.max(0, Number(selectedDetailResource.value?.audioMeta?.lastPlayTime ?? 0))
+    return lastPlayTime > 0 ? formatDuration(lastPlayTime) : '暂无'
+  }
+
   if (!detailIsAsmr.value) {
     return ''
   }
@@ -594,8 +752,8 @@ const collectAudioTreeImagePaths = (nodes: any[]): string[] => {
 }
 
 const detailAudioImagePaths = computed(() => collectAudioTreeImagePaths(detailAudioTree.value))
-const collectAudioTreeTracks = (nodes: any[]): Array<{ path: string; label: string; duration?: number | null; hasSubtitle?: boolean }> => {
-  const tracks: Array<{ path: string; label: string; duration?: number | null; hasSubtitle?: boolean }> = []
+const collectAudioTreeTracks = (nodes: any[]): Array<{ path: string; label: string; duration?: number | null; hasSubtitle?: boolean; subtitlePath?: string }> => {
+  const tracks: Array<{ path: string; label: string; duration?: number | null; hasSubtitle?: boolean; subtitlePath?: string }> = []
 
   const visit = (items: any[]) => {
     for (const item of items) {
@@ -654,14 +812,88 @@ const getAudioPlayerCoverPreview = async (resource: any) => {
   }
 }
 
-const applyAudioPlayerSession = async (resource: any, playlist: Array<{ path: string; label: string; duration?: number | null; hasSubtitle?: boolean }>, initialPath: string, initialTime = 0) => {
-  audioPlayerResourceId.value = String(resource?.id ?? '')
+const getAudioPlayerArtistText = (resource: any) => {
+  const authorNames = Array.isArray(resource?.authors)
+    ? resource.authors.map((item: any) => String(item?.name ?? '').trim()).filter(Boolean)
+    : []
+
+  if (authorNames.length) {
+    return authorNames.join(' / ')
+  }
+
+  return String(resource?.audioMeta?.artist ?? '').trim()
+}
+
+const buildResourceQuery = (page: number, size: number) => ({
+  keyword: keyword.value.trim(),
+  authorIds: [...selectedAuthorList.value],
+  albumNames: [...selectedAlbumList.value],
+  engineIds: [...selectedEngineList.value],
+  tagIds: [...selectedTagList.value],
+  typeIds: [...selectedTypeList.value],
+  missingOnly: missingFile.value,
+  favoriteOnly: favoriteOnly.value,
+  completedOnly: completedOnly.value,
+  runningOnly: runningOnly.value,
+  page,
+  pageSize: size,
+  sortBy: sortBy.value
+})
+
+const loadAllCategoryResources = async () => {
+  const targetPageSize = Math.max(totalResources.value, resourceList.value.length, 1)
+
+  try {
+    const result = await window.api.db.getResourceByCategoryId(categoryId.value, buildResourceQuery(1, targetPageSize))
+    if (Array.isArray(result?.items) && result.items.length) {
+      return result.items
+    }
+  } catch {
+    // fall back to the current page resources below
+  }
+
+  return resourceList.value
+}
+
+const buildMusicPlaylistTrack = (resource: any) => {
+  const targetPath = getResourceFilePath(resource)
+  if (!targetPath || resource?.missingStatus) {
+    return null
+  }
+
+  const normalizedCoverPath = normalizeCoverPreviewSource(String(resource?.coverPath ?? ''))
+
+  return {
+    path: targetPath,
+    label: String(resource?.title ?? getResourceNameFromBasePath(targetPath) ?? '当前音乐'),
+    duration: Number(resource?.audioMeta?.duration ?? 0) || undefined,
+    resourceId: String(resource?.id ?? ''),
+    resourceTitle: String(resource?.title ?? getResourceNameFromBasePath(targetPath) ?? '当前音乐'),
+    artist: getAudioPlayerArtistText(resource),
+    coverSrc: /^https?:\/\//i.test(normalizedCoverPath) || /^data:/i.test(normalizedCoverPath) ? normalizedCoverPath : '',
+    coverPath: normalizedCoverPath,
+    hasSubtitle: Boolean(resource?.audioMeta?.lyricsPath),
+    subtitlePath: String(resource?.audioMeta?.lyricsPath ?? '').trim() || undefined
+  }
+}
+
+const applyAudioPlayerSession = async (resource: any, playlist: Array<{ path: string; label: string; duration?: number | null; resourceId?: string; resourceTitle?: string; artist?: string; coverSrc?: string; coverPath?: string; hasSubtitle?: boolean; subtitlePath?: string }>, initialPath: string, initialTime = 0) => {
   audioPlayerPlaylist.value = [...playlist]
-  audioPlayerInitialPath.value = initialPath
-  audioPlayerInitialTime.value = Math.max(0, Number(initialTime ?? 0))
-  audioPlayerTitle.value = String(resource?.title ?? categoryName.value ?? '音频播放器')
-  audioPlayerCoverSrc.value = await getAudioPlayerCoverPreview(resource)
-  showAudioPlayer.value = true
+  audioPlayerDisplayMode.value = String(resource?.category?.referencePath ?? resource?.extendTable ?? categorySettings.value.extendTable ?? '').trim() === 'audio_meta'
+    ? 'music'
+    : 'default'
+  const resolvedCoverSrc = await getAudioPlayerCoverPreview(resource)
+  setAudioPlayerSession({
+    resourceId: String(resource?.id ?? ''),
+    initialPath,
+    initialTime: Math.max(0, Number(initialTime ?? 0)),
+    title: String(resource?.title ?? categoryName.value ?? '音频播放器'),
+    artist: getAudioPlayerArtistText(resource),
+    displayMode: audioPlayerDisplayMode.value,
+    coverSrc: resolvedCoverSrc,
+    playlist
+  })
+  setAudioPlayerVisible(true)
 }
 
 const resolveResourceAudioTree = async (resource: any) => {
@@ -702,6 +934,65 @@ const openAsmrPlaybackFromLaunch = async (resource: any) => {
   } catch {
     showNotifyByType('error', '播放音频', '读取音声目录失败')
   }
+}
+
+const openAudioPlaybackFromLaunch = async (resource: any) => {
+  const targetPath = getResourceFilePath(resource)
+  if (!targetPath) {
+    showNotifyByType('warning', '播放音频', '当前音乐路径无效')
+    return
+  }
+
+  const allResources = await loadAllCategoryResources()
+  const playlist = allResources
+    .map((item: any) => buildMusicPlaylistTrack(item))
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+  const normalizedTargetPath = normalizeAudioPath(targetPath)
+  const matchedTrack = playlist.find((item) => normalizeAudioPath(item.path) === normalizedTargetPath)
+
+  if (!playlist.length || !matchedTrack) {
+    showNotifyByType('warning', '播放音频', '当前没有可播放的音乐资源')
+    return
+  }
+
+  await applyAudioPlayerSession(
+    resource,
+    playlist,
+    matchedTrack.path,
+    Math.max(0, Number(resource?.audioMeta?.lastPlayTime ?? 0))
+  )
+}
+
+const handleAddMusicToPlaylist = async (resource: any) => {
+  if (!isAudioCategory.value) {
+    return
+  }
+
+  const track = buildMusicPlaylistTrack(resource)
+  if (!track) {
+    showNotifyByType('warning', '加入播放列表', '当前音乐路径无效')
+    return
+  }
+
+  const normalizedTrackPath = normalizeAudioPath(track.path)
+  const hasActiveMusicPlaylist = audioPlayerDisplayMode.value === 'music' && audioPlayerPlaylist.value.length > 0
+
+  if (!hasActiveMusicPlaylist) {
+    await openAudioPlaybackFromLaunch(resource)
+    showNotifyByType('success', '加入播放列表', `已按当前筛选条件开始播放“${resource?.title ?? '当前音乐'}”`)
+    return
+  }
+
+  const exists = audioPlayerPlaylist.value.some((item) => normalizeAudioPath(item.path) === normalizedTrackPath)
+  if (exists) {
+    showNotifyByType('info', '加入播放列表', '该音乐已在播放列表中')
+    return
+  }
+
+  const nextPlaylist = [...audioPlayerPlaylist.value, track]
+  audioPlayerPlaylist.value = nextPlaylist
+  setAudioPlayerSession({ playlist: nextPlaylist })
+  showNotifyByType('success', '加入播放列表', `已将“${track.resourceTitle || track.label}”加入播放列表`)
 }
 
 const formatAudioBitrate = (bitrate: number | null | undefined) => {
@@ -775,6 +1066,7 @@ const detailAudioContextMenuOptions = computed(() => {
   if (option?.kind === 'video') {
     return [
       { label: '播放', key: 'play' },
+      { label: '使用默认应用播放', key: 'play-default' },
       { label: `时长: ${formatAsmrDuration(option?.duration)}`, key: 'duration', disabled: true },
       { label: `分辨率: ${formatImageResolution(option?.width, option?.height)}`, key: 'resolution', disabled: true },
       { label: `比特率: ${formatAudioBitrate(option?.bitrate)}`, key: 'bitrate', disabled: true },
@@ -786,6 +1078,7 @@ const detailAudioContextMenuOptions = computed(() => {
 
   return [
     { label: '播放', key: 'play' },
+    { label: '使用默认应用播放', key: 'play-default' },
     { label: `时长: ${formatAsmrDuration(option?.duration)}`, key: 'duration', disabled: true },
     { label: `比特率: ${formatAudioBitrate(option?.bitrate)}`, key: 'bitrate', disabled: true },
     { label: `采样率: ${formatAudioSampleRate(option?.sampleRate)}`, key: 'sampleRate', disabled: true }
@@ -864,6 +1157,26 @@ const handleAudioTreeActionPlaceholder = (option: any) => {
   void openAudioPlayer(String(option.path))
 }
 
+const handleOpenPathWithDefaultApp = async (targetPath: string, title = '使用默认应用播放') => {
+  const normalizedPath = String(targetPath ?? '').trim()
+  if (!normalizedPath) {
+    showNotifyByType('warning', title, '当前文件路径无效')
+    return
+  }
+
+  try {
+    const message = await window.api.dialog.openPath(normalizedPath)
+    if (message) {
+      showNotifyByType('error', title, message)
+      return
+    }
+
+    showNotifyByType('success', title, '已使用默认应用打开文件')
+  } catch (error) {
+    showNotifyByType('error', title, error instanceof Error ? error.message : '打开文件失败')
+  }
+}
+
 const handleSelectDetailAudioContextMenu = (key: string) => {
   const option = detailAudioContextMenuTarget.value
   closeDetailAudioContextMenu()
@@ -874,6 +1187,11 @@ const handleSelectDetailAudioContextMenu = (key: string) => {
 
   if (key === 'view' && option?.kind === 'image') {
     void handleOpenAudioTreeImage(String(option?.path ?? ''))
+    return
+  }
+
+  if (key === 'play-default' && (option?.kind === 'audio' || option?.kind === 'video')) {
+    void handleOpenPathWithDefaultApp(String(option?.path ?? ''), '使用默认应用播放')
     return
   }
 
@@ -990,6 +1308,7 @@ const detailCanStop = computed(() => {
 const detailIsSoftware = computed(() => categorySettings.value.extendTable === 'software_meta')
 const detailIsManga = computed(() => categorySettings.value.extendTable === 'multi_image_meta')
 const detailIsAsmr = computed(() => categorySettings.value.extendTable === 'asmr_meta')
+const detailIsAudio = computed(() => categorySettings.value.extendTable === 'audio_meta')
 const detailOpenFolderText = computed(() => `打开${categoryName.value || '资源'}文件夹`)
 const detailMetaItems = computed(() => {
   const resource = selectedDetailResource.value
@@ -1039,6 +1358,19 @@ const detailMetaItems = computed(() => {
     pushItem(items, '画师', resource.asmrMeta?.illust)
     pushItem(items, '总时长', formatAsmrDuration(resource.asmrMeta?.duration))
     pushItem(items, '语言', resource.asmrMeta?.language)
+  } else if (extendTable === 'audio_meta') {
+    pushItem(
+      items,
+      '艺术家',
+      Array.isArray(resource.authors)
+        ? resource.authors.map((item: any) => String(item?.name ?? '')).filter(Boolean).join(' / ')
+        : resource.audioMeta?.artist
+    )
+    pushItem(items, '专辑', resource.audioMeta?.album)
+    pushItem(items, '比特率', formatAudioBitrate(resource.audioMeta?.bitrate))
+    pushItem(items, '采样率', formatAudioSampleRate(resource.audioMeta?.sampleRate))
+    pushItem(items, '歌词路径', resource.audioMeta?.lyricsPath)
+    pushItem(items, '总时长', formatDuration(resource.audioMeta?.duration))
   }
 
   return items
@@ -1095,14 +1427,61 @@ const typeSelectOptions = computed(() =>
     }))
     .filter((item) => item.label && item.value)
 )
-const batchLabelOptions = computed(() => batchLabelField.value === 'tags' ? tagSelectOptions.value : typeSelectOptions.value)
+const authorSelectOptions = computed(() =>
+  normalizedAuthorList.value
+    .map((author) => ({
+      label: author.name,
+      value: author.name
+    }))
+    .filter((item) => item.label && item.value)
+)
+const albumSelectOptions = computed(() =>
+  normalizedAlbumList.value
+    .map((album) => ({
+      label: album.name,
+      value: album.name
+    }))
+    .filter((item) => item.label && item.value)
+)
+const batchLabelIsSingleValue = computed(() => batchLabelField.value === 'album')
+const batchLabelOptions = computed(() => {
+  if (batchLabelField.value === 'tags') {
+    return tagSelectOptions.value
+  }
+
+  if (batchLabelField.value === 'types') {
+    return typeSelectOptions.value
+  }
+
+  if (batchLabelField.value === 'authors') {
+    return authorSelectOptions.value
+  }
+
+  return albumSelectOptions.value
+})
 const batchLabelTitle = computed(() => {
-  const fieldLabel = batchLabelField.value === 'tags' ? '标签' : '分类'
+  const fieldLabel = batchLabelField.value === 'tags'
+    ? '标签'
+    : batchLabelField.value === 'types'
+      ? '分类'
+      : batchLabelField.value === 'authors'
+        ? '歌手'
+        : '专辑'
   const actionLabel = batchLabelMode.value === 'add' ? '添加' : '移除'
   return `批量${actionLabel}${fieldLabel}`
 })
 const batchLabelPlaceholder = computed(() => {
-  const fieldLabel = batchLabelField.value === 'tags' ? '标签' : '分类'
+  if (batchLabelField.value === 'album') {
+    return batchLabelMode.value === 'add'
+      ? '可选择已有专辑，也可输入新的专辑名'
+      : '请选择或输入需要移除的专辑名'
+  }
+
+  const fieldLabel = batchLabelField.value === 'tags'
+    ? '标签'
+    : batchLabelField.value === 'types'
+      ? '分类'
+      : '歌手'
   return `可选择已有${fieldLabel}，也可输入新${fieldLabel}，按空格、顿号、英文逗号或回车批量添加`
 })
 
@@ -1191,6 +1570,47 @@ const normalizeCoverPreviewSource = (coverPath: string) => {
   return coverPath
 }
 
+const formatAudioCoverCandidateQuery = (query: Record<string, string>) =>
+  Object.entries(query ?? {})
+    .map(([key, value]) => {
+      const label = key === 'title' ? '歌名' : key === 'artist' ? '歌手' : key === 'album' ? '专辑' : key
+      return `${label}：${String(value ?? '').trim()}`
+    })
+    .filter(Boolean)
+    .join(' / ')
+
+const resolveCoverPreviewUrl = async (coverPath: string) => {
+  const normalizedCoverPath = normalizeCoverPreviewSource(String(coverPath ?? '').trim())
+  if (!normalizedCoverPath) {
+    return ''
+  }
+
+  if (/^https?:\/\//i.test(normalizedCoverPath) || /^data:/i.test(normalizedCoverPath)) {
+    return normalizedCoverPath
+  }
+
+  try {
+    return (await window.api.dialog.getImagePreviewUrl(normalizedCoverPath, {
+      maxWidth: 480,
+      maxHeight: 320,
+      fit: 'cover',
+      quality: 84
+    })) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+const closeAudioCoverCandidateModal = () => {
+  showAudioCoverCandidateModal.value = false
+  audioCoverCandidates.value = []
+}
+
+const handleUseAudioCoverCandidate = (coverPath: string) => {
+  formData.value.coverPath = String(coverPath ?? '').trim()
+  closeAudioCoverCandidateModal()
+}
+
 const formatDateTime = (value: string | number | Date | null | undefined) => {
   if (!value) {
     return '暂无'
@@ -1202,15 +1622,6 @@ const formatDateTime = (value: string | number | Date | null | undefined) => {
   }
 
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`
-}
-
-const isUnknownEndTime = (value: string | number | Date | null | undefined) => {
-  if (!value) {
-    return false
-  }
-
-  const date = new Date(value)
-  return !Number.isNaN(date.getTime()) && date.getTime() === new Date(ResourceLogSpecialTime.UNKNOWN_END_TIME).getTime()
 }
 
 const formatDuration = (seconds: number | null | undefined) => {
@@ -1237,6 +1648,15 @@ const formatAsmrDuration = (seconds: number | null | undefined) => {
   }
 
   return formatDuration(normalizedSeconds)
+}
+
+const isUnknownEndTime = (value: string | number | Date | null | undefined) => {
+  if (!value) {
+    return false
+  }
+
+  const date = new Date(value)
+  return !Number.isNaN(date.getTime()) && date.getTime() === new Date(ResourceLogSpecialTime.UNKNOWN_END_TIME).getTime()
 }
 
 const formatLogEndTime = (value: string | number | Date | null | undefined) => {
@@ -1368,6 +1788,7 @@ const getFileNameWithoutExtension = (basePath: string) => {
 
   return fileName.slice(0, dotIndex)
 }
+
 
 const readComicProgress = async (resourceId: string) => {
   const normalizedResourceId = String(resourceId ?? '').trim()
@@ -1523,6 +1944,14 @@ const ensureSoftwareScriptRuntimes = async () => {
 }
 
 const applyDefaultPathName = (basePath: string) => {
+  if (categorySettings.value.extendTable === 'audio_meta') {
+    const fileStem = getFileNameWithoutExtension(basePath)
+    if (fileStem) {
+      formData.value.name = fileStem
+    }
+    return
+  }
+
   if (categorySettings.value.extendTable === 'single_image_meta') {
     const fileStem = getFileNameWithoutExtension(basePath)
     if (fileStem) {
@@ -1653,6 +2082,14 @@ const enrichBatchImportItem = async (item: any) => {
     }
   }
 
+  if (detailIsAsmr.value) {
+    return {
+      ...item,
+      launchFileIcon: '',
+      fetchInfoEnabled: item.fetchInfoEnabled !== false
+    }
+  }
+
   if (!item?.launchFilePath) {
     return {
       ...item,
@@ -1699,11 +2136,14 @@ const addResourceRule = computed(() => ({
 
 const fetchData = async () => {
   if (!categoryId.value) return
+  const requestId = ++fetchDataRequestId
   loading.value = true
   try {
+    const activeCategoryId = String(categoryId.value ?? '').trim()
     const resourceQuery = {
       keyword: keyword.value.trim(),
       authorIds: [...selectedAuthorList.value],
+      albumNames: [...selectedAlbumList.value],
       engineIds: [...selectedEngineList.value],
       tagIds: [...selectedTagList.value],
       typeIds: [...selectedTypeList.value],
@@ -1717,7 +2157,12 @@ const fetchData = async () => {
     }
 
     // 1. 获取分类元数据
-    categoryInfo.value = await window.api.db.getCategoryById(categoryId.value)
+    const nextCategoryInfo = await window.api.db.getCategoryById(activeCategoryId)
+    if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
+      return
+    }
+
+    categoryInfo.value = nextCategoryInfo
     websiteTypeOptions.value = await window.api.db.getSelectDictData(
       detailIsManga.value
         ? DictType.MANGA_SITE_TYPE
@@ -1725,17 +2170,22 @@ const fetchData = async () => {
           ? DictType.ASMR_SITE_TYPE
           : DictType.GAME_SITE_TYPE
     )
+    if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
+      return
+    }
     const localeEmulatorSetting = await window.api.db.getSetting(Settings.LOCALE_EMULATOR_PATH)
     localeEmulatorPath.value = String(localeEmulatorSetting?.value ?? '')
     const mtoolSetting = await window.api.db.getSetting(Settings.MTOOL_PATH)
     mtoolPath.value = String(mtoolSetting?.value ?? '')
+    if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
+      return
+    }
     // 2. 获取该分类下的资源列表（带标签）
-      const resourceResponse = await window.api.db.getResourceByCategoryId(categoryId.value, resourceQuery)
+      const resourceResponse = await window.api.db.getResourceByCategoryId(activeCategoryId, resourceQuery)
+      if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
+        return
+      }
       resourceList.value = resourceResponse?.items ?? []
-      resourceListRenderVersion.value += 1
-      selectedResourceIds.value = selectedResourceIds.value.filter((id) =>
-        resourceList.value.some((item) => String(item?.id ?? '') === id)
-      )
       totalResources.value = Number(resourceResponse?.total ?? 0)
       if (selectedDetailResource.value?.id) {
         const matchedDetailResource = resourceList.value.find((item) => item.id === selectedDetailResource.value.id)
@@ -1744,25 +2194,49 @@ const fetchData = async () => {
         }
       }
       // 3. 获取作者列表
-    authorList.value = await window.api.db.getAuthorByCategoryId(categoryId.value)
+    authorList.value = await window.api.db.getAuthorByCategoryId(activeCategoryId)
+    albumList.value = isAudioCategory.value
+      ? await window.api.db.getAlbumByCategoryId(activeCategoryId)
+      : []
+    if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
+      return
+    }
+    assignSanitizedSelectedFilterValues(selectedAuthorList, normalizedAuthorList.value, 'id')
+    assignSanitizedSelectedFilterValues(selectedAlbumList, normalizedAlbumList.value, 'name')
     // 4. 获取引擎列表
     engineList.value = showEngineFilter.value
-      ? await window.api.db.getEngineByCategoryId(categoryId.value)
+      ? await window.api.db.getEngineByCategoryId(activeCategoryId)
       : []
+    if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
+      return
+    }
+    assignSanitizedSelectedFilterValues(selectedEngineList, normalizedEngineList.value, 'id')
     // 4. 获取统计
-    missingResourceCount.value = await window.api.db.getMissingResourceCountByCategoryId(categoryId.value)
-    favoriteResourceCount.value = await window.api.db.getFavoriteResourceCountByCategoryId(categoryId.value)
-    completedResourceCount.value = await window.api.db.getCompletedResourceCountByCategoryId(categoryId.value)
-    runningResourceCount.value = await window.api.db.getRunningResourceCountByCategoryId(categoryId.value)
+    missingResourceCount.value = await window.api.db.getMissingResourceCountByCategoryId(activeCategoryId)
+    favoriteResourceCount.value = await window.api.db.getFavoriteResourceCountByCategoryId(activeCategoryId)
+    completedResourceCount.value = await window.api.db.getCompletedResourceCountByCategoryId(activeCategoryId)
+    runningResourceCount.value = await window.api.db.getRunningResourceCountByCategoryId(activeCategoryId)
+    if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
+      return
+    }
     // 5. 获取标签列表
-    tagList.value = await window.api.db.getTagByCategoryId(categoryId.value)
+    tagList.value = await window.api.db.getTagByCategoryId(activeCategoryId)
+    assignSanitizedSelectedFilterValues(selectedTagList, normalizedTagList.value, 'id')
     // 6. 获取分类列表
-    typeList.value = await window.api.db.getTypeByCategoryId(categoryId.value)
+    typeList.value = await window.api.db.getTypeByCategoryId(activeCategoryId)
+    if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
+      return
+    }
+    assignSanitizedSelectedFilterValues(selectedTypeList, normalizedTypeList.value, 'id')
 
   } catch (error) {
-    showNotifyByType('error', '加载失败', error instanceof Error ? error.message : '加载分类数据失败')
+    if (requestId === fetchDataRequestId) {
+      showNotifyByType('error', '加载失败', error instanceof Error ? error.message : '加载分类数据失败')
+    }
   } finally {
-    loading.value = false
+    if (requestId === fetchDataRequestId) {
+      loading.value = false
+    }
   }
 }
 
@@ -1772,10 +2246,12 @@ const resetSelected = () => {
   completedOnly.value = false
   runningOnly.value = false
   selectedAuthorList.value = []
+  selectedAlbumList.value = []
   selectedEngineList.value = []
   selectedTagList.value = []
   selectedTypeList.value = []
   authorSearch.value = ''
+  albumSearch.value = ''
   tagSearch.value = ''
   typeSearch.value = ''
 }
@@ -1796,16 +2272,30 @@ watch(categoryId, (nextCategoryId, previousCategoryId) => {
     syncBatchImportStateFromRefs(previousCategoryId)
   }
 
+  suppressAutoFetch.value = true
   syncBatchImportRefsFromState(String(nextCategoryId ?? ''))
+  keyword.value = ''
+  resetSelected()
   selectionModeManuallyEnabled.value = false
   selectedResourceIds.value = []
+  resourceList.value = []
+  totalResources.value = 0
+  authorList.value = []
+  albumList.value = []
+  engineList.value = []
+  tagList.value = []
+  typeList.value = []
   currentPage.value = 1
+  suppressAutoFetch.value = false
   fetchData()
 }, { immediate: true })
 
 watch(
-  [keyword, missingFile, favoriteOnly, completedOnly, runningOnly, selectedAuthorList, selectedEngineList, selectedTagList, selectedTypeList, pageSize, sortBy],
+  [keyword, missingFile, favoriteOnly, completedOnly, runningOnly, selectedAuthorList, selectedAlbumList, selectedEngineList, selectedTagList, selectedTypeList, pageSize, sortBy],
   () => {
+    if (suppressAutoFetch.value) {
+      return
+    }
     currentPage.value = 1
     fetchData()
   },
@@ -1813,6 +2303,10 @@ watch(
 )
 
 watch(currentPage, () => {
+  if (suppressAutoFetch.value) {
+    jumpPageInput.value = currentPage.value
+    return
+  }
   jumpPageInput.value = currentPage.value
   fetchData()
 })
@@ -2142,6 +2636,16 @@ const handleBatchImportClick = () => {
       return
     }
 
+    if (detailIsAsmr.value) {
+      await handleBatchImportAsmrs()
+      return
+    }
+
+    if (isAudioCategory.value) {
+      await handleBatchImportAudioFiles()
+      return
+    }
+
     const currentState = ensureBatchImportState(targetCategoryId)
 
     if (currentState.analyzeRunning || currentState.importRunning) {
@@ -2328,6 +2832,323 @@ const handleBatchImportComics = async () => {
   }
 }
 
+const applyAudioCoverAnalysis = async () => {
+  if (String(categorySettings.value.extendTable ?? '').trim() !== 'audio_meta') {
+    return
+  }
+}
+
+const buildAudioFetchPayload = (basePath: string, analysis?: any) => ({
+  basePath: String(basePath ?? '').trim(),
+  title: String(analysis?.name ?? formData.value?.name ?? '').trim(),
+  album: String(analysis?.album ?? formData.value?.meta?.album ?? '').trim(),
+  artist: String(analysis?.artist ?? formData.value?.author ?? '').trim(),
+  artists: normalizeAudioAuthorList([
+    ...(Array.isArray(analysis?.artists) ? analysis.artists : []),
+    ...(Array.isArray(formData.value?.authors) ? formData.value.authors : []),
+    String(analysis?.artist ?? formData.value?.author ?? '').trim()
+  ])
+})
+
+const fetchAudioLyricsSilently = async (payload: any) => {
+  const fetchAudioLyrics = window.api?.service?.fetchAudioLyrics
+  if (typeof fetchAudioLyrics !== 'function') {
+    return {
+      type: 'error',
+      message: '当前窗口尚未加载最新接口，请重启应用后再试'
+    }
+  }
+
+  return await fetchAudioLyrics({
+    basePath: String(payload?.basePath ?? ''),
+    title: String(payload?.title ?? ''),
+    album: String(payload?.album ?? ''),
+    artist: String(payload?.artist ?? ''),
+    artists: Array.isArray(payload?.artists) ? payload.artists.map((item: string) => String(item ?? '')).filter(Boolean) : []
+  })
+}
+
+const fetchAudioAlbumCoverSilently = async (payload: any) => {
+  const fetchAudioAlbumCover = window.api?.service?.fetchAudioAlbumCover
+  if (typeof fetchAudioAlbumCover !== 'function') {
+    return {
+      type: 'error',
+      message: '当前窗口尚未加载最新接口，请重启应用后再试'
+    }
+  }
+
+  return await fetchAudioAlbumCover({
+    basePath: String(payload?.basePath ?? ''),
+    title: String(payload?.title ?? ''),
+    album: String(payload?.album ?? ''),
+    artist: String(payload?.artist ?? ''),
+    artists: Array.isArray(payload?.artists) ? payload.artists.map((item: string) => String(item ?? '')).filter(Boolean) : []
+  })
+}
+
+const promptForMissingAudioAssets = async (basePath: string, analysis: any) => {
+  const fetchPayload = buildAudioFetchPayload(basePath, analysis)
+
+  if (!String(analysis?.lyricsPath ?? '').trim()) {
+    const confirmed = await confirmDialog('获取歌词', '未匹配到同名歌词文件，是否尝试自动获取歌词？')
+    if (confirmed) {
+      const result = await fetchAudioLyricsSilently(fetchPayload)
+      if (result?.type === 'success' && result?.data?.lyricsPath) {
+        formData.value.meta = {
+          ...(formData.value.meta ?? {}),
+          lyricsPath: String(result.data.lyricsPath)
+        }
+        showNotifyByType('success', '获取歌词', result?.message ?? '已获取歌词')
+      } else if (result?.message) {
+        showNotifyByType(result?.type ?? 'warning', '获取歌词', result.message)
+      }
+    }
+  }
+
+  if (!String(analysis?.embeddedCoverPath ?? '').trim()) {
+    const confirmed = await confirmDialog('获取专辑封面', '未检测到文件内嵌封面，是否尝试自动获取专辑封面？')
+    if (confirmed) {
+      const result = await fetchAudioAlbumCoverSilently(fetchPayload)
+      if (result?.type === 'success' && result?.data?.coverPath) {
+        formData.value.coverPath = String(result.data.coverPath)
+        showNotifyByType('success', '获取专辑封面', result?.message ?? '已获取专辑封面')
+      } else if (result?.message) {
+        showNotifyByType(result?.type ?? 'warning', '获取专辑封面', result.message)
+      }
+    }
+  }
+}
+
+const applyAudioPathAnalysis = async (basePath: string) => {
+  if (String(categorySettings.value.extendTable ?? '').trim() !== 'audio_meta') {
+    return
+  }
+
+  const fileStem = getFileNameWithoutExtension(basePath)
+  if (fileStem) {
+    formData.value.name = fileStem
+  }
+
+  try {
+    const analysis = await window.api.service.analyzeAudioFilePath(basePath)
+    if (!analysis) {
+      return
+    }
+
+    if (analysis.name) {
+      formData.value.name = String(analysis.name)
+    }
+
+    const authorNames = normalizeAudioAuthorList([
+      ...(Array.isArray(analysis.artists) ? analysis.artists : []),
+      String(analysis.artist ?? '').trim()
+    ])
+    syncAudioAuthorFields(formData.value, authorNames)
+
+    formData.value.meta = {
+      ...(formData.value.meta ?? {}),
+      artist: joinAudioAuthorNames(authorNames) || String(analysis.artist ?? formData.value.meta?.artist ?? ''),
+      album: String(analysis.album ?? formData.value.meta?.album ?? ''),
+      lyricsPath: String(analysis.lyricsPath ?? formData.value.meta?.lyricsPath ?? ''),
+      duration: Number.isFinite(Number(analysis.duration)) ? Math.max(0, Math.floor(Number(analysis.duration))) : Number(formData.value.meta?.duration ?? 0)
+    }
+    formData.value.coverPath = String(analysis.embeddedCoverPath ?? '').trim()
+    await promptForMissingAudioAssets(basePath, analysis)
+  } catch (error) {
+    notify('error', '分析失败', error instanceof Error ? error.message : '分析音乐文件失败')
+  }
+}
+
+const handleAudioAuthorsChange = (value: string[]) => {
+  syncAudioAuthorFields(formData.value, value)
+}
+
+const handleFetchAlbumCover = async () => {
+  showNotifyByType('info', '获取专辑封面', '正在获取专辑封面，请稍候')
+
+  try {
+    const fetchAudioAlbumCover = window.api?.service?.fetchAudioAlbumCover
+    if (typeof fetchAudioAlbumCover !== 'function') {
+      showNotifyByType('error', '获取专辑封面', '当前窗口尚未加载最新接口，请重启应用后再试')
+      return
+    }
+
+    const payload = {
+      basePath: String(formData.value?.basePath ?? ''),
+      title: String(formData.value?.name ?? ''),
+      album: String(formData.value?.meta?.album ?? ''),
+      artist: String(formData.value?.author ?? ''),
+      artists: Array.isArray(formData.value?.authors)
+        ? formData.value.authors.map((item: string) => String(item ?? '')).filter(Boolean)
+        : []
+    }
+
+    const result = await fetchAudioAlbumCover(payload)
+
+    const resultType = result?.type ?? 'info'
+    const resultMessage = result?.message ?? '操作完成'
+
+    if (resultType === 'success') {
+      const rawCandidates = Array.isArray(result?.data?.coverCandidates) ? result.data.coverCandidates : []
+      const resolvedCandidates = await Promise.all(
+        rawCandidates.map(async (candidate: any) => {
+          const coverPath = String(candidate?.coverPath ?? '').trim()
+          return {
+            label: String(candidate?.label ?? '').trim(),
+            coverPath,
+            previewSrc: await resolveCoverPreviewUrl(coverPath),
+            queryText: formatAudioCoverCandidateQuery(candidate?.query ?? {})
+          }
+        })
+      )
+
+      const availableCandidates = resolvedCandidates.filter((candidate) => candidate.coverPath && candidate.previewSrc)
+
+      if (availableCandidates.length) {
+        audioCoverCandidates.value = availableCandidates
+        showAudioCoverCandidateModal.value = true
+      } else if (result?.data?.coverPath) {
+        formData.value.coverPath = String(result.data.coverPath)
+      }
+    }
+
+    showNotifyByType(resultType, '获取专辑封面', resultMessage)
+  } catch (error) {
+    showNotifyByType('error', '获取专辑封面', error instanceof Error ? error.message : '获取专辑封面失败')
+  }
+}
+
+const analyzeBatchImportAsmrDirectories = async (targetCategoryId: string, directoryPaths: string[]) => {
+  const items: any[] = new Array(directoryPaths.length)
+  let nextIndex = 0
+  let completedCount = 0
+
+  const updateAnalyzeProgress = (directoryPath?: string, index?: number) => {
+    const currentDirectoryName = getResourceNameFromBasePath(directoryPath || '') || directoryPath || '正在准备分析目录'
+    const currentIndex = typeof index === 'number'
+      ? Math.min(directoryPaths.length, index + 1)
+      : Math.min(directoryPaths.length, completedCount + 1)
+
+    patchBatchImportState(targetCategoryId, {
+      analyzeCurrent: completedCount,
+      analyzeMessage: `正在分析第 ${currentIndex} / ${directoryPaths.length} 个音声目录\n${currentDirectoryName}`
+    })
+    syncBatchImportOngoingCenter()
+  }
+
+  const worker = async () => {
+    while (!ensureBatchImportState(targetCategoryId).analyzeCancelled) {
+      const currentIndex = nextIndex
+      nextIndex += 1
+
+      if (currentIndex >= directoryPaths.length) {
+        return
+      }
+
+      const directoryPath = directoryPaths[currentIndex]
+      const directoryName = getResourceNameFromBasePath(directoryPath)
+      updateAnalyzeProgress(directoryName || directoryPath, currentIndex)
+
+      try {
+        const analysisResult = await window.api.service.analyzeAsmrDirectory(directoryPath)
+        const analysisData = analysisResult?.data ?? {}
+        const audioCount = Math.max(0, Number(analysisData?.audioCount ?? 0))
+        items[currentIndex] = await enrichBatchImportItem({
+          directoryPath: String(analysisData?.directoryPath ?? directoryPath),
+          directoryName: String(analysisData?.directoryName ?? directoryName ?? ''),
+          coverPath: String(analysisData?.coverPath ?? ''),
+          audioCount,
+          exists: Boolean(analysisData?.exists),
+          existingResourceTitle: String(analysisData?.existingResourceTitle ?? ''),
+          gameId: String(analysisData?.gameId ?? ''),
+          websiteType: String(analysisData?.websiteType ?? ''),
+          checked: !analysisData?.exists && audioCount > 0,
+          errorMessage: analysisResult?.type === 'error' ? String(analysisResult?.message ?? '') : ''
+        })
+      } catch (error) {
+        items[currentIndex] = {
+          directoryPath,
+          directoryName,
+          coverPath: '',
+          audioCount: 0,
+          exists: false,
+          checked: false,
+          errorMessage: error instanceof Error ? error.message : '分析失败'
+        }
+      } finally {
+        completedCount += 1
+        patchBatchImportState(targetCategoryId, {
+          analyzeCurrent: completedCount
+        })
+        syncBatchImportOngoingCenter()
+      }
+    }
+  }
+
+  const workerCount = Math.min(directoryPaths.length, BATCH_ANALYZE_CONCURRENCY)
+  await Promise.all(Array.from({ length: workerCount }, () => worker()))
+
+  return items.filter(Boolean)
+}
+
+const handleBatchImportAsmrs = async () => {
+  const targetCategoryId = categoryId.value
+  const currentState = ensureBatchImportState(targetCategoryId)
+
+  if (currentState.analyzeRunning || currentState.importRunning) {
+    patchBatchImportState(targetCategoryId, {
+      analyzeInBackground: false,
+      analyzeToastDismissed: false,
+      showLoading: true
+    })
+    syncBatchImportOngoingCenter(targetCategoryId)
+    return
+  }
+
+  try {
+    const directoryPaths = await window.api.dialog.selectFolders()
+    if (!directoryPaths?.length) {
+      return
+    }
+
+    patchBatchImportState(targetCategoryId, {
+      items: [],
+      fetchInfoEnabled: true,
+      analyzeTotal: directoryPaths.length,
+      analyzeCurrent: 0,
+      analyzeMessage: '正在分析音声目录，请稍候...',
+      analyzeCancelled: false,
+      analyzeInBackground: false,
+      analyzeToastDismissed: false,
+      analyzeRunning: true,
+      importRunning: false,
+      showLoading: true,
+      showPreview: false
+    })
+    syncBatchImportOngoingCenter(targetCategoryId)
+
+    const items = await analyzeBatchImportAsmrDirectories(targetCategoryId, directoryPaths)
+
+    patchBatchImportState(targetCategoryId, {
+      items,
+      showPreview: items.length > 0,
+      showLoading: false
+    })
+
+    if (!items.length && ensureBatchImportState(targetCategoryId).analyzeCancelled) {
+      showNotifyByType('info', '批量导入音声', '已停止分析')
+    }
+  } finally {
+    patchBatchImportState(targetCategoryId, {
+      analyzeRunning: false,
+      analyzeInBackground: false,
+      showLoading: false,
+      analyzeToastDismissed: false
+    })
+    clearBatchImportOngoingCenter(targetCategoryId)
+  }
+}
+
 const handleBatchImportImages = async () => {
   try {
     const extensions = [...(categorySettings.value.extensions ?? [])]
@@ -2434,6 +3255,344 @@ const handleBatchImportImages = async () => {
     }
   } catch (error) {
     showNotifyByType('error', '批量导入图片', error instanceof Error ? error.message : '批量导入图片失败')
+  }
+}
+
+const buildBatchAudioResourcePayload = (filePath: string, analysis: any, coverPath: string, lyricsPath: string): ResourceForm => {
+  const authorNames = normalizeAudioAuthorList([
+    ...(Array.isArray(analysis?.artists) ? analysis.artists : []),
+    String(analysis?.artist ?? '').trim()
+  ])
+  const artistDisplayName = joinAudioAuthorNames(authorNames) || String(analysis?.artist ?? '').trim()
+  const fileStem = getFileNameWithoutExtension(filePath)
+  const audioMetaBase = createEmptyMetaByType('audio_meta') as unknown as ResourceMeta
+
+  return {
+    name: String(analysis?.name ?? '').trim() || fileStem || getFileName(filePath),
+    description: '',
+    coverPath: String(coverPath ?? '').trim(),
+    basePath: String(filePath ?? '').trim(),
+    author: artistDisplayName,
+    authors: authorNames,
+    actors: [],
+    tags: [],
+    types: [],
+    categoryId: categoryInfo.value.id,
+    meta: {
+      ...audioMetaBase,
+      artist: artistDisplayName,
+      album: String(analysis?.album ?? '').trim(),
+      lyricsPath: String(lyricsPath ?? '').trim(),
+      duration: Number.isFinite(Number(analysis?.duration)) ? Math.max(0, Math.floor(Number(analysis.duration))) : 0,
+      bitrate: Number.isFinite(Number(analysis?.bitrate)) ? Number(analysis.bitrate) : null,
+      sampleRate: Number.isFinite(Number(analysis?.sampleRate)) ? Number(analysis.sampleRate) : null
+    }
+  }
+}
+
+const runBatchImportAudioAssetBackfill = async (tasks: Array<{
+  resourceId: string
+  filePath: string
+  analysis: any
+  shouldFetchLyrics: boolean
+  shouldFetchCover: boolean
+}>) => {
+  if (!tasks.length) {
+    return {
+      fetchedLyricsCount: 0,
+      fetchedCoverCount: 0,
+      failedLyricsCount: 0,
+      failedCoverCount: 0
+    }
+  }
+
+  let fetchedLyricsCount = 0
+  let fetchedCoverCount = 0
+  let failedLyricsCount = 0
+  let failedCoverCount = 0
+
+  for (const task of tasks) {
+    const resourceId = String(task?.resourceId ?? '').trim()
+    const filePath = String(task?.filePath ?? '').trim()
+    const analysis = task?.analysis
+
+    if (!resourceId || !filePath) {
+      continue
+    }
+
+    try {
+      const detailResult = await window.api.service.getResourceDetail(resourceId)
+      const detail = detailResult?.data
+      if (!detail) {
+        logger.warn('batch import audio: backfill skipped missing detail', {
+          resourceId,
+          filePath
+        })
+        continue
+      }
+
+      const detailFormData = cloneFormData(mapResourceDetailToFormData(detail))
+      let hasChanges = false
+
+      if (task.shouldFetchLyrics && !String(detailFormData?.meta?.lyricsPath ?? '').trim()) {
+        const lyricsResult = await fetchAudioLyricsSilently(buildAudioFetchPayload(filePath, analysis))
+        logger.info('batch import audio: async fetch lyrics result', {
+          resourceId,
+          filePath,
+          lyricsResult
+        })
+        if (lyricsResult?.type === 'success' && lyricsResult?.data?.lyricsPath) {
+          detailFormData.meta = {
+            ...(detailFormData.meta ?? {}),
+            lyricsPath: String(lyricsResult.data.lyricsPath)
+          }
+          fetchedLyricsCount += 1
+          hasChanges = true
+        } else if (lyricsResult?.type === 'error') {
+          failedLyricsCount += 1
+        }
+      }
+
+      if (task.shouldFetchCover && !String(detailFormData?.coverPath ?? '').trim()) {
+        const coverResult = await fetchAudioAlbumCoverSilently(buildAudioFetchPayload(filePath, analysis))
+        logger.info('batch import audio: async fetch cover result', {
+          resourceId,
+          filePath,
+          coverResult
+        })
+        if (coverResult?.type === 'success' && coverResult?.data?.coverPath) {
+          detailFormData.coverPath = String(coverResult.data.coverPath)
+          fetchedCoverCount += 1
+          hasChanges = true
+        } else if (coverResult?.type === 'error') {
+          failedCoverCount += 1
+        }
+      }
+
+      if (!hasChanges) {
+        continue
+      }
+
+      syncAudioAuthorFields(detailFormData)
+      detailFormData.categoryId = categoryInfo.value.id
+      const updatePayload = cloneFormData(detailFormData)
+      const updateResult = await window.api.service.updateResource(resourceId, updatePayload, {
+        silent: true
+      })
+      logger.info('batch import audio: async update result', {
+        resourceId,
+        filePath,
+        updateResult
+      })
+      if (updateResult?.type === 'error') {
+        if (String(updatePayload?.meta?.lyricsPath ?? '').trim()) {
+          failedLyricsCount += 1
+        }
+        if (String(updatePayload?.coverPath ?? '').trim()) {
+          failedCoverCount += 1
+        }
+      }
+    } catch (error) {
+      logger.error('batch import audio: async asset backfill failed', {
+        resourceId,
+        filePath,
+        error: error instanceof Error ? error.message : error
+      })
+      if (task.shouldFetchLyrics) {
+        failedLyricsCount += 1
+      }
+      if (task.shouldFetchCover) {
+        failedCoverCount += 1
+      }
+    }
+  }
+
+  return {
+    fetchedLyricsCount,
+    fetchedCoverCount,
+    failedLyricsCount,
+    failedCoverCount
+  }
+}
+
+const handleBatchImportAudioFiles = async () => {
+  try {
+    const extensions = [...(categorySettings.value.extensions ?? [])]
+    logger.info('batch import audio: selecting files', {
+      categoryId: categoryId.value,
+      extensions
+    })
+    const filePaths = await window.api.dialog.selectFiles(extensions)
+    if (!Array.isArray(filePaths) || !filePaths.length) {
+      logger.info('batch import audio: selection cancelled')
+      return
+    }
+
+    logger.info('batch import audio: selected files', {
+      count: filePaths.length,
+      filePaths
+    })
+
+    const analyses = await Promise.all(filePaths.map(async (filePath) => ({
+      filePath: String(filePath ?? '').trim(),
+      analysis: await window.api.service.analyzeAudioFilePath(String(filePath ?? '').trim())
+    })))
+
+    const validItems = analyses.filter((item) => item.filePath && item.analysis)
+    const invalidItems = analyses.filter((item) => !item.filePath || !item.analysis).map((item) => item.filePath)
+    logger.info('batch import audio: analyses completed', {
+      selectedCount: filePaths.length,
+      validCount: validItems.length,
+      invalidCount: invalidItems.length,
+      invalidItems
+    })
+    const missingLyricsCount = validItems.filter((item) => !String(item.analysis?.lyricsPath ?? '').trim()).length
+    const missingCoverCount = validItems.filter((item) => !String(item.analysis?.embeddedCoverPath ?? '').trim()).length
+
+    const shouldFetchLyrics = missingLyricsCount > 0
+      ? await confirmDialog('批量获取歌词', `有 ${missingLyricsCount} 首音乐未匹配到同名歌词文件，是否尝试自动获取歌词？`)
+      : false
+    const shouldFetchCover = missingCoverCount > 0
+      ? await confirmDialog('批量获取封面', `有 ${missingCoverCount} 首音乐未检测到文件内嵌封面，是否尝试自动获取专辑封面？`)
+      : false
+
+    logger.info('batch import audio: fetch strategy decided', {
+      missingLyricsCount,
+      missingCoverCount,
+      shouldFetchLyrics,
+      shouldFetchCover
+    })
+
+    let successCount = 0
+    let skippedCount = 0
+    let failedCount = 0
+    const backgroundAssetTasks: Array<{
+      resourceId: string
+      filePath: string
+      analysis: any
+      shouldFetchLyrics: boolean
+      shouldFetchCover: boolean
+    }> = []
+
+    for (const item of validItems) {
+      const filePath = item.filePath
+      const analysis = item.analysis
+      logger.info('batch import audio: processing item start', {
+        filePath,
+        title: String(analysis?.name ?? '').trim(),
+        artist: String(analysis?.artist ?? '').trim(),
+        album: String(analysis?.album ?? '').trim(),
+        lyricsPath: String(analysis?.lyricsPath ?? '').trim(),
+        embeddedCoverPath: String(analysis?.embeddedCoverPath ?? '').trim()
+      })
+      const existsResult = await window.api.service.checkResourceExistsByPath(filePath)
+      logger.info('batch import audio: exists check result', {
+        filePath,
+        existsResult
+      })
+      if (existsResult?.exists) {
+        skippedCount += 1
+        logger.info('batch import audio: skipped existing resource', {
+          filePath
+        })
+        continue
+      }
+
+      if (existsResult?.type === 'error') {
+        failedCount += 1
+        logger.error('batch import audio: exists check failed', {
+          filePath,
+          existsResult
+        })
+        continue
+      }
+
+      let lyricsPath = String(analysis?.lyricsPath ?? '').trim()
+      let coverPath = String(analysis?.embeddedCoverPath ?? '').trim()
+      const payload = buildBatchAudioResourcePayload(filePath, analysis, coverPath, lyricsPath)
+      logger.info('batch import audio: save payload prepared', {
+        filePath,
+        payload: {
+          name: payload.name,
+          basePath: payload.basePath,
+          author: payload.author,
+          authors: payload.authors,
+          coverPath: payload.coverPath,
+          categoryId: payload.categoryId,
+          meta: payload.meta
+        }
+      })
+      const result = await window.api.service.saveResource(payload)
+      logger.info('batch import audio: save result', {
+        filePath,
+        result
+      })
+      if (result?.type === 'error') {
+        failedCount += 1
+        logger.error('batch import audio: save failed', {
+          filePath,
+          result
+        })
+      } else {
+        successCount += 1
+        const savedResourceId = String(result?.data?.resourceId ?? '').trim()
+        const needsLyricsBackfill = !lyricsPath && shouldFetchLyrics
+        const needsCoverBackfill = !coverPath && shouldFetchCover
+        if (savedResourceId && (needsLyricsBackfill || needsCoverBackfill)) {
+          backgroundAssetTasks.push({
+            resourceId: savedResourceId,
+            filePath,
+            analysis,
+            shouldFetchLyrics: needsLyricsBackfill,
+            shouldFetchCover: needsCoverBackfill
+          })
+          logger.info('batch import audio: queued async asset backfill', {
+            resourceId: savedResourceId,
+            filePath,
+            needsLyricsBackfill,
+            needsCoverBackfill
+          })
+        }
+      }
+    }
+
+    logger.info('batch import audio: finished', {
+      successCount,
+      skippedCount,
+      failedCount,
+      queuedBackfillCount: backgroundAssetTasks.length
+    })
+
+    if (successCount > 0) {
+      await fetchData()
+    }
+
+    const notifyType = failedCount > 0 && successCount === 0 ? 'error' : 'success'
+    showNotifyByType(
+      notifyType,
+      '批量导入音乐',
+      backgroundAssetTasks.length
+        ? `导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}。歌词与封面正在后台获取。`
+        : `导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}`
+    )
+
+    if (backgroundAssetTasks.length) {
+      void (async () => {
+        const backfillResult = await runBatchImportAudioAssetBackfill(backgroundAssetTasks)
+        logger.info('batch import audio: async asset backfill finished', backfillResult)
+        if (backfillResult.fetchedLyricsCount > 0 || backfillResult.fetchedCoverCount > 0) {
+          await fetchData()
+        }
+        showNotifyByType(
+          backfillResult.failedLyricsCount > 0 || backfillResult.failedCoverCount > 0 ? 'warning' : 'success',
+          '批量获取音乐资源',
+          `后台处理完成：获取歌词 ${backfillResult.fetchedLyricsCount}，获取封面 ${backfillResult.fetchedCoverCount}${backfillResult.failedLyricsCount > 0 ? `，歌词失败 ${backfillResult.failedLyricsCount}` : ''}${backfillResult.failedCoverCount > 0 ? `，封面失败 ${backfillResult.failedCoverCount}` : ''}`
+        )
+      })()
+    }
+  } catch (error) {
+    logger.error('batch import audio: fatal error', error)
+    showNotifyByType('error', '批量导入音乐', error instanceof Error ? error.message : '批量导入音乐失败')
   }
 }
 
@@ -2550,7 +3709,7 @@ const handleSelectBatchLaunchFile = (index: number) => {
 const handleBatchImportSelectAll = () => {
   batchImportItems.value = batchImportItems.value.map((item) => ({
     ...item,
-    checked: !item.exists && !item.errorMessage && (detailIsManga.value ? Number(item?.imageCount ?? 0) > 0 : !!item.launchFilePath)
+    checked: !item.exists && !item.errorMessage && isBatchImportItemImportable(item)
   }))
 }
 
@@ -2564,14 +3723,14 @@ const handleBatchImportDeselectAll = () => {
 const handleBatchImportInvert = () => {
   batchImportItems.value = batchImportItems.value.map((item) => ({
     ...item,
-    checked: !item.exists && !item.errorMessage && (detailIsManga.value ? Number(item?.imageCount ?? 0) > 0 : !!item.launchFilePath)
+    checked: !item.exists && !item.errorMessage && isBatchImportItemImportable(item)
       ? !item.checked
       : false
   }))
 }
 
 const canToggleBatchImportItem = (item: any) =>
-  !item?.exists && !item?.errorMessage && (detailIsManga.value ? Number(item?.imageCount ?? 0) > 0 : !!item?.launchFilePath)
+  !item?.exists && !item?.errorMessage && isBatchImportItemImportable(item)
 
 const handleToggleBatchImportItem = (index: number) => {
   const item = batchImportItems.value[index]
@@ -2586,19 +3745,32 @@ const handleConfirmBatchImport = () => {
   void (async () => {
     const targetCategoryId = categoryId.value
     const selectedItems = batchImportItems.value
-      .filter((item) => item.checked && (detailIsManga.value ? Number(item?.imageCount ?? 0) > 0 : item.launchFilePath))
-      .map((item) => detailIsManga.value
-        ? {
+      .filter((item) => item.checked && isBatchImportItemImportable(item))
+      .map((item) => {
+        if (detailIsManga.value) {
+          return {
             directoryPath: item.directoryPath,
             fetchInfoEnabled: batchImportFetchInfoEnabled.value
           }
-        : {
+        }
+
+        if (detailIsAsmr.value) {
+          return {
             directoryPath: item.directoryPath,
-            launchFilePath: item.launchFilePath,
             websiteType: item.websiteType,
             gameId: item.gameId,
             fetchInfoEnabled: batchImportFetchInfoEnabled.value
-          })
+          }
+        }
+
+        return {
+          directoryPath: item.directoryPath,
+          launchFilePath: item.launchFilePath,
+          websiteType: item.websiteType,
+          gameId: item.gameId,
+          fetchInfoEnabled: batchImportFetchInfoEnabled.value
+        }
+      })
 
     if (!selectedItems.length) {
       showNotifyByType('warning', '批量导入', '请至少选择一个可导入的目录')
@@ -2621,7 +3793,9 @@ const handleConfirmBatchImport = () => {
 
       const result = detailIsManga.value
         ? await window.api.service.importBatchMultiImageDirectories(targetCategoryId, selectedItems)
-        : await window.api.service.importBatchGameDirectories(targetCategoryId, selectedItems)
+        : detailIsAsmr.value
+          ? await window.api.service.importBatchAsmrDirectories(targetCategoryId, selectedItems)
+          : await window.api.service.importBatchGameDirectories(targetCategoryId, selectedItems)
       const resultType = result?.type ?? 'info'
       const resultMessage = result?.message ?? '批量导入完成'
       const resultItems = Array.isArray(result?.data) ? result.data : []
@@ -2629,7 +3803,7 @@ const handleConfirmBatchImport = () => {
       if (resultItems.length) {
         const resultMap = new Map<string, any>(
           resultItems.map((item: any) => [
-            detailIsManga.value
+            detailIsManga.value || detailIsAsmr.value
               ? String(item?.directoryPath ?? '').trim()
               : `${String(item?.directoryPath ?? '').trim()}::${String(item?.launchFilePath ?? '').trim()}`,
             item
@@ -2638,7 +3812,7 @@ const handleConfirmBatchImport = () => {
 
         batchImportItems.value = batchImportItems.value.map((item) => {
           const matchedResult = resultMap.get(
-            detailIsManga.value
+            detailIsManga.value || detailIsAsmr.value
               ? String(item?.directoryPath ?? '').trim()
               : `${String(item?.directoryPath ?? '').trim()}::${String(item?.launchFilePath ?? '').trim()}`
           )
@@ -2713,6 +3887,7 @@ const handleSubmitResource = async () => {
   }
 
   formData.value['categoryId'] = categoryInfo.value.id
+  syncAudioAuthorFields(formData.value)
   const payload = cloneFormData(formData.value)
   const result = await window.api.service.saveResource(payload)
   const resultType = result?.type ?? 'info'
@@ -2787,6 +3962,8 @@ const handleDropResourceFile = (event: DragEvent) => {
     formData.value = createEmptyFormData()
     formData.value.basePath = droppedPath
     applyDefaultPathName(droppedPath)
+    await applyAudioPathAnalysis(droppedPath)
+    await applyAudioCoverAnalysis()
     await applyGamePathAnalysis(droppedPath)
     await applyMultiImageDirectoryAnalysis(droppedPath)
     showModal.value = true
@@ -2811,6 +3988,7 @@ const handleSubmitEditResource = async () => {
   }
 
   formData.value.categoryId = categoryInfo.value.id
+  syncAudioAuthorFields(formData.value)
   const payload = cloneFormData(formData.value)
   const result = await window.api.service.updateResource(editingResourceId.value, payload)
   const resultType = result?.type ?? 'info'
@@ -2931,6 +4109,8 @@ const handleSelectBasePath = async () => {
       formData.value.basePath = resourcePath
       await basePathFormItemRef.value?.validate({ trigger: 'change' })
       applyDefaultPathName(resourcePath)
+      await applyAudioPathAnalysis(resourcePath)
+        await applyAudioCoverAnalysis()
       await applyGamePathAnalysis(resourcePath)
       await applyMultiImageDirectoryAnalysis(resourcePath)
     }
@@ -3174,6 +4354,11 @@ const handleLaunchResource = async (resource: any) => {
     return
   }
 
+  if (detailIsAudio.value) {
+    await openAudioPlaybackFromLaunch(resource)
+    return
+  }
+
   try {
     const result = await window.api.service.launchResource(
       String(resource?.id ?? ''),
@@ -3235,14 +4420,14 @@ const handlePreviewSingleImageResource = async (resource: any) => {
 
 const handleStopResource = async (resource: any) => {
   try {
-    if (String(categorySettings.value.extendTable ?? '').trim() === 'asmr_meta') {
+    if (['asmr_meta', 'audio_meta'].includes(String(categorySettings.value.extendTable ?? '').trim())) {
       const stopControl = audioPlayerStore.controls.value.stop
       if (stopControl) {
         await Promise.resolve(stopControl())
       } else {
         await window.api.service.stopAsmrPlayback(String(resource?.id ?? ''))
       }
-      showAudioPlayer.value = false
+      setAudioPlayerVisible(false)
       showNotifyByType('success', '停止资源', `已停止${resource?.title ?? categoryName.value}`)
       await fetchData()
       return
@@ -3330,9 +4515,31 @@ const handleShowResourceDetail = (resource: any) => {
     closeDetailAudioContextMenu()
     showPictureViewer.value = false
     showComicReader.value = false
-    showAudioPlayer.value = false
     visibleLogCount.value = 5
     currentScreenshotIndex.value = 0
+
+    if (detailIsAudio.value) {
+      const detailResourceId = String(selectedDetailResource.value?.id ?? '')
+      const detailBasePath = getResourceFilePath(selectedDetailResource.value)
+      if (detailResourceId && detailBasePath) {
+        try {
+          const analysis = await window.api.service.analyzeAudioFilePath(detailBasePath)
+          if (analysis && detailResourceId === String(selectedDetailResource.value?.id ?? '')) {
+            selectedDetailResource.value = {
+              ...selectedDetailResource.value,
+              audioMeta: {
+                ...(selectedDetailResource.value?.audioMeta ?? {}),
+                duration: analysis.duration ?? selectedDetailResource.value?.audioMeta?.duration,
+                bitrate: analysis.bitrate ?? selectedDetailResource.value?.audioMeta?.bitrate ?? null,
+                sampleRate: analysis.sampleRate ?? selectedDetailResource.value?.audioMeta?.sampleRate ?? null
+              }
+            }
+          }
+        } catch {
+          // ignore detail audio analysis errors
+        }
+      }
+    }
 
     await refreshDetailScreenshots(0)
     await refreshDetailAudioTree()
@@ -3452,6 +4659,11 @@ const handleOpenResourceFolder = async (resource: any) => {
   } catch (error) {
     showNotifyByType('error', '打开文件夹', error instanceof Error ? error.message : '打开文件夹失败')
   }
+}
+
+const handleDefaultAppPlayResource = async (resource: any) => {
+  const targetPath = getResourceFilePath(resource)
+  await handleOpenPathWithDefaultApp(targetPath, '使用默认应用播放')
 }
 
 const handleOpenScreenshotFolder = async (resource: any) => {
@@ -3792,11 +5004,12 @@ const handleExitSelectionMode = () => {
 
 const resetBatchLabelDialog = () => {
   batchLabelValues.value = []
+  batchLabelSingleValue.value = ''
   batchLabelInputValue.value = ''
   isBatchLabelSubmitting.value = false
 }
 
-const openBatchLabelDialog = (field: 'tags' | 'types', mode: 'add' | 'remove') => {
+const openBatchLabelDialog = (field: 'tags' | 'types' | 'authors' | 'album', mode: 'add' | 'remove') => {
   if (!selectedResourceCount.value) {
     showNotifyByType('warning', '批量编辑', `请先选择需要批量修改的${categoryName.value}`)
     return
@@ -3817,42 +5030,147 @@ const handleBatchLabelValuesChange = (values: string[]) => {
   batchLabelValues.value = normalizeSelectedValues(values)
 }
 
+const handleBatchLabelSingleValueChange = (value: string | null) => {
+  batchLabelSingleValue.value = String(value ?? '').trim()
+}
+
 const handleSubmitBatchLabelAction = async () => {
   if (!selectedResourceIds.value.length) {
     showNotifyByType('warning', batchLabelTitle.value, `请先选择需要批量修改的${categoryName.value}`)
     return
   }
 
-  if (!batchLabelValues.value.length) {
-    showNotifyByType('warning', batchLabelTitle.value, batchLabelField.value === 'tags' ? '请先选择或输入标签' : '请先选择或输入分类')
+  const selectedBatchValues = batchLabelIsSingleValue.value
+    ? (batchLabelSingleValue.value ? [batchLabelSingleValue.value] : [])
+    : batchLabelValues.value
+
+  if (!selectedBatchValues.length) {
+    const message = batchLabelField.value === 'tags'
+      ? '请先选择或输入标签'
+      : batchLabelField.value === 'types'
+        ? '请先选择或输入分类'
+        : batchLabelField.value === 'authors'
+          ? '请先选择或输入歌手'
+          : '请先选择或输入专辑'
+    showNotifyByType('warning', batchLabelTitle.value, message)
     return
   }
 
   try {
     isBatchLabelSubmitting.value = true
-    const result = await window.api.service.batchUpdateResourceLabels(
-      [...selectedResourceIds.value],
-      batchLabelField.value,
-      batchLabelMode.value,
-      [...batchLabelValues.value]
-    )
-    const resultType = result?.type ?? 'info'
-    const affectedCount = Number(result?.data?.affectedIds?.length ?? 0)
-    const valueNames = batchLabelValues.value.join('、')
-    const resultMessage = typeof result?.message === 'string' && result.message
-      ? buildBatchLabelResultMessage({
-          field: batchLabelField.value,
-          mode: batchLabelMode.value,
-          categoryName: categoryName.value,
-          affectedCount,
-          valueNames,
-          fallbackMessage: result.message
-        })
-      : `${batchLabelTitle.value}完成`
 
-    showNotifyByType(resultType, batchLabelTitle.value, resultMessage)
+    if (batchLabelField.value === 'tags' || batchLabelField.value === 'types') {
+      const result = await window.api.service.batchUpdateResourceLabels(
+        [...selectedResourceIds.value],
+        batchLabelField.value,
+        batchLabelMode.value,
+        [...selectedBatchValues]
+      )
+      const resultType = result?.type ?? 'info'
+      const affectedCount = Number(result?.data?.affectedIds?.length ?? 0)
+      const valueNames = selectedBatchValues.join('、')
+      const resultMessage = typeof result?.message === 'string' && result.message
+        ? buildBatchLabelResultMessage({
+            field: batchLabelField.value,
+            mode: batchLabelMode.value,
+            categoryName: categoryName.value,
+            affectedCount,
+            valueNames,
+            fallbackMessage: result.message
+          })
+        : `${batchLabelTitle.value}完成`
 
-    if (resultType !== 'error') {
+      showNotifyByType(resultType, batchLabelTitle.value, resultMessage)
+
+      if (resultType !== 'error') {
+        closeBatchLabelDialog()
+        await fetchData()
+      }
+      return
+    }
+
+    let successCount = 0
+    let skippedCount = 0
+    let failedCount = 0
+    const selectedIds = [...selectedResourceIds.value].map((id) => String(id ?? '').trim()).filter(Boolean)
+    const selectedValueSet = new Set(selectedBatchValues.map((value) => String(value ?? '').trim()).filter(Boolean))
+
+    for (const resourceId of selectedIds) {
+      try {
+        const detailResult = await window.api.service.getResourceDetail(resourceId)
+        const detail = detailResult?.data
+        if (!detail) {
+          skippedCount += 1
+          continue
+        }
+
+        const detailFormData = cloneFormData(mapResourceDetailToFormData(detail))
+        let changed = false
+
+        if (batchLabelField.value === 'authors') {
+          const currentAuthors = normalizeAudioAuthorList(Array.isArray(detailFormData?.authors) ? detailFormData.authors : [])
+          const nextAuthors = batchLabelMode.value === 'add'
+            ? normalizeAudioAuthorList([...currentAuthors, ...selectedBatchValues])
+            : currentAuthors.filter((name) => !selectedValueSet.has(String(name ?? '').trim()))
+
+          if (nextAuthors.join('\u0000') === currentAuthors.join('\u0000')) {
+            skippedCount += 1
+            continue
+          }
+
+          syncAudioAuthorFields(detailFormData, nextAuthors)
+          changed = true
+        } else if (batchLabelField.value === 'album') {
+          const currentAlbum = String(detailFormData?.meta?.album ?? '').trim()
+          const nextAlbum = batchLabelMode.value === 'add'
+            ? String(selectedBatchValues[0] ?? '').trim()
+            : (selectedValueSet.has(currentAlbum) ? '' : currentAlbum)
+
+          if (nextAlbum === currentAlbum) {
+            skippedCount += 1
+            continue
+          }
+
+          detailFormData.meta = {
+            ...(detailFormData.meta ?? {}),
+            album: nextAlbum
+          }
+          changed = true
+        }
+
+        if (!changed) {
+          skippedCount += 1
+          continue
+        }
+
+        detailFormData.categoryId = categoryInfo.value.id
+        const updatePayload = cloneFormData(detailFormData)
+        const updateResult = await window.api.service.updateResource(resourceId, updatePayload)
+        if (updateResult?.type === 'error') {
+          failedCount += 1
+          continue
+        }
+
+        successCount += 1
+      } catch {
+        failedCount += 1
+      }
+    }
+
+    const title = batchLabelTitle.value
+    const message = buildBatchMetadataResultMessage({
+      field: batchLabelField.value,
+      mode: batchLabelMode.value,
+      categoryName: categoryName.value,
+      successCount,
+      skippedCount,
+      failedCount,
+      valueNames: selectedBatchValues.join('、')
+    })
+
+    showNotifyByType(failedCount > 0 ? 'warning' : 'success', title, message)
+
+    if (successCount > 0) {
       closeBatchLabelDialog()
       await fetchData()
     }
@@ -3886,10 +5204,31 @@ const buildBatchLabelResultMessage = (params: {
   return `已批量${mode === 'add' ? '添加' : '移除'}${affectedCount}个${normalizedCategoryName}的${normalizedValueNames}分类`
 }
 
+const buildBatchMetadataResultMessage = (params: {
+  field: 'authors' | 'album'
+  mode: 'add' | 'remove'
+  categoryName: string
+  successCount: number
+  skippedCount: number
+  failedCount: number
+  valueNames: string
+}) => {
+  const { field, mode, categoryName, successCount, skippedCount, failedCount, valueNames } = params
+  const normalizedCategoryName = String(categoryName ?? '').trim() || '资源'
+  const fieldLabel = field === 'authors' ? '歌手' : '专辑'
+  const valueLabel = String(valueNames ?? '').trim()
+  const actionLabel = mode === 'add' ? '添加' : '移除'
+  const suffix = valueLabel ? `：${valueLabel}` : ''
+
+  return `批量${actionLabel}${fieldLabel}完成，成功 ${successCount} 个，跳过 ${skippedCount} 个，失败 ${failedCount} 个${suffix}。涉及 ${normalizedCategoryName}。`
+}
+
 const handleSelectAllResources = () => {
-  selectedResourceIds.value = resourceList.value
-    .map((item) => String(item?.id ?? '').trim())
-    .filter(Boolean)
+  const selectedSet = new Set(selectedResourceIds.value)
+  for (const resourceId of currentPageResourceIds.value) {
+    selectedSet.add(resourceId)
+  }
+  selectedResourceIds.value = [...selectedSet]
 }
 
 const handleDeselectAllResources = () => {
@@ -3898,10 +5237,161 @@ const handleDeselectAllResources = () => {
 
 const handleInvertSelectedResources = () => {
   const selectedSet = new Set(selectedResourceIds.value)
-  selectedResourceIds.value = resourceList.value
-    .map((item) => String(item?.id ?? '').trim())
-    .filter(Boolean)
-    .filter((id) => !selectedSet.has(id))
+  for (const resourceId of currentPageResourceIds.value) {
+    if (selectedSet.has(resourceId)) {
+      selectedSet.delete(resourceId)
+    } else {
+      selectedSet.add(resourceId)
+    }
+  }
+  selectedResourceIds.value = [...selectedSet]
+}
+
+const handleBatchFetchAlbumCover = async () => {
+  if (!isAudioCategory.value) {
+    return
+  }
+
+  if (!selectedResourceIds.value.length) {
+    showNotifyByType('warning', '批量获取封面', `请先选择需要获取封面的${categoryName.value}`)
+    return
+  }
+
+  const selectedIds = [...selectedResourceIds.value].map((id) => String(id ?? '').trim()).filter(Boolean)
+
+  if (!selectedIds.length) {
+    showNotifyByType('warning', '批量获取封面', `未找到已选中的${categoryName.value}`)
+    return
+  }
+
+  try {
+    isBatchFetchingAlbumCover.value = true
+    logger.info('batch fetch album cover: start', {
+      categoryId: categoryId.value,
+      resourceIds: selectedIds,
+      count: selectedIds.length
+    })
+
+    let successCount = 0
+    let skippedCount = 0
+    let failedCount = 0
+
+    for (const resourceId of selectedIds) {
+      let resourceName = ''
+      try {
+        const detailResult = await window.api.service.getResourceDetail(resourceId)
+        const detail = detailResult?.data
+        resourceName = String(detail?.title ?? '').trim()
+
+        if (!detail) {
+          skippedCount += 1
+          logger.warn('batch fetch album cover: missing detail', {
+            resourceId,
+            resourceName
+          })
+          continue
+        }
+
+        const basePath = getResourceFilePath(detail)
+        if (!basePath) {
+          skippedCount += 1
+          logger.warn('batch fetch album cover: skip invalid resource', {
+            resourceId,
+            resourceName,
+            basePath
+          })
+          continue
+        }
+
+        const detailFormData = cloneFormData(mapResourceDetailToFormData(detail))
+        const payload = {
+          basePath,
+          title: String(detail?.title ?? resourceName),
+          album: String(detail?.audioMeta?.album ?? '').trim(),
+          artist: joinAudioAuthorNames(
+            Array.isArray(detailFormData?.authors) ? detailFormData.authors : []
+          ) || String(detailFormData?.author ?? '').trim(),
+          artists: normalizeAudioAuthorList([
+            ...(Array.isArray(detailFormData?.authors) ? detailFormData.authors : []),
+            String(detailFormData?.author ?? '').trim()
+          ])
+        }
+
+        logger.info('batch fetch album cover: request', {
+          resourceId,
+          resourceName,
+          payload
+        })
+
+        const coverResult = await fetchAudioAlbumCoverSilently(payload)
+        if (coverResult?.type !== 'success' || !coverResult?.data?.coverPath) {
+          skippedCount += 1
+          logger.warn('batch fetch album cover: no cover result', {
+            resourceId,
+            resourceName,
+            result: coverResult
+          })
+          continue
+        }
+
+        detailFormData.coverPath = String(coverResult.data.coverPath)
+        syncAudioAuthorFields(detailFormData)
+        detailFormData.categoryId = categoryInfo.value.id
+
+        const updatePayload = cloneFormData(detailFormData)
+        const updateResult = await window.api.service.updateResource(resourceId, updatePayload)
+        if (updateResult?.type === 'error') {
+          failedCount += 1
+          logger.error('batch fetch album cover: update failed', {
+            resourceId,
+            resourceName,
+            result: updateResult
+          })
+          continue
+        }
+
+        successCount += 1
+        logger.info('batch fetch album cover: success', {
+          resourceId,
+          resourceName,
+          coverPath: detailFormData.coverPath
+        })
+      } catch (error) {
+        failedCount += 1
+        logger.error('batch fetch album cover: unexpected failure', {
+          resourceId,
+          resourceName,
+          error: error instanceof Error ? error.message : error
+        })
+      }
+    }
+
+    logger.info('batch fetch album cover: completed', {
+      successCount,
+      skippedCount,
+      failedCount
+    })
+
+    if (successCount > 0) {
+      await fetchData()
+    }
+
+    if (successCount > 0 && failedCount === 0 && skippedCount === 0) {
+      showNotifyByType('success', '批量获取封面', `已为 ${successCount} 个${categoryName.value}获取专辑封面`)
+      return
+    }
+
+    showNotifyByType(
+      failedCount > 0 ? 'warning' : 'info',
+      '批量获取封面',
+      `批量获取封面完成：成功 ${successCount} 个，跳过 ${skippedCount} 个，失败 ${failedCount} 个`
+    )
+  } catch (error) {
+    logger.error('batch fetch album cover: fatal error', error)
+    showNotifyByType('error', '批量获取封面', error instanceof Error ? error.message : '批量获取封面失败')
+  } finally {
+    isBatchFetchingAlbumCover.value = false
+  }
 }
 
 const handleDeleteSelectedResources = () => {
@@ -4110,6 +5600,23 @@ const handleToggleCompleted = async (resource: any) => {
                 </n-flex>
               </n-checkbox-group>
             </div>
+            <div v-if="isAudioCategory" class="filter-section">
+              <n-divider title-placement="left" style="margin-bottom: 5px;">专辑筛选</n-divider>
+              <n-input
+                v-model:value="albumSearch"
+                placeholder="请输入专辑名称"
+                class="album-search"
+                clearable
+              />
+              <n-checkbox-group v-model:value="selectedAlbumList" class="filter-group">
+                <n-flex vertical class="filter-list">
+                  <n-checkbox v-for="album in filteredAlbumList" :key="album.name" :value="album.name">
+                    {{ album.name }}
+                    <n-tag type="success" :bordered="false" round size="small">{{ album.count }}</n-tag>
+                  </n-checkbox>
+                </n-flex>
+              </n-checkbox-group>
+            </div>
             <div class="filter-section">
               <n-divider title-placement="left" style="margin-bottom: 5px;">标签筛选</n-divider>
               <n-input v-model:value="tagSearch" placeholder="请输入标签名称" class="tag-search" clearable/>
@@ -4222,6 +5729,25 @@ const handleToggleCompleted = async (resource: any) => {
             <n-button @click="openBatchLabelDialog('types', 'remove')">
               移除分类
             </n-button>
+            <n-button v-if="isAudioCategory" @click="openBatchLabelDialog('authors', 'add')">
+              添加歌手
+            </n-button>
+            <n-button v-if="isAudioCategory" @click="openBatchLabelDialog('authors', 'remove')">
+              删除歌手
+            </n-button>
+            <n-button v-if="isAudioCategory" @click="openBatchLabelDialog('album', 'add')">
+              添加专辑
+            </n-button>
+            <n-button v-if="isAudioCategory" @click="openBatchLabelDialog('album', 'remove')">
+              删除专辑
+            </n-button>
+            <n-button
+              v-if="isAudioCategory"
+              :loading="isBatchFetchingAlbumCover"
+              @click="handleBatchFetchAlbumCover"
+            >
+              获取封面
+            </n-button>
             <n-button
               type="error"
               :loading="isBatchDeleting"
@@ -4246,7 +5772,7 @@ const handleToggleCompleted = async (resource: any) => {
             <div v-else class="resource-grid">
               <ResourceCard
                 v-for="resource in resourceList"
-                :key="`${resource.id}-${resource.coverPath ?? ''}-${resourceListRenderVersion}`"
+                :key="`${resource.id}-${resource.coverPath ?? ''}`"
                 :resource="resource"
                 :category-name="categoryName"
                 :hide-type-line="detailIsAsmr"
@@ -4264,6 +5790,8 @@ const handleToggleCompleted = async (resource: any) => {
                 :stop-needs-confirm="categorySettings.extendTable === 'game_meta'"
                 :selected="selectedResourceIds.includes(String(resource?.id ?? ''))"
                 :selection-mode="resourceSelectionMode"
+                :show-default-app-play="isAudioCategory"
+                :show-add-to-playlist="isAudioCategory"
                 @launch="handleLaunchResource"
                 @admin-launch="handleAdminLaunchResource"
                 @mtool-launch="handleMtoolLaunchResource"
@@ -4272,6 +5800,8 @@ const handleToggleCompleted = async (resource: any) => {
                 @show-detail="handleShowResourceDetail"
                 @edit="handleEditResource"
                 @open-folder="handleOpenResourceFolder"
+                @default-app-play="handleDefaultAppPlayResource"
+                @add-to-playlist="handleAddMusicToPlaylist"
                 @open-screenshot-folder="handleOpenScreenshotFolder"
                 @toggle-favorite="handleToggleFavorite"
                 @toggle-completed="handleToggleCompleted"
@@ -4522,7 +6052,7 @@ const handleToggleCompleted = async (resource: any) => {
                     <span class="detail-drawer__label">阅读进度</span>
                     <span class="detail-drawer__value">{{ detailReadingProgressText }}</span>
                   </div>
-                  <div v-if="detailIsAsmr" class="detail-drawer__item">
+                  <div v-if="detailIsAsmr || detailIsAudio" class="detail-drawer__item">
                     <span class="detail-drawer__label">播放进度</span>
                     <span class="detail-drawer__value">{{ detailPlaybackProgressText }}</span>
                   </div>
@@ -4631,41 +6161,41 @@ const handleToggleCompleted = async (resource: any) => {
                 </template>
               </div>
 
-              <div v-else-if="!isSingleImageCategory && !detailIsManga" class="detail-drawer__section">
+              <div v-else-if="!isSingleImageCategory && !detailIsManga && !detailIsAudio" class="detail-drawer__section">
                 <div class="detail-drawer__section-title">{{ detailGallerySectionTitle }}</div>
-              <n-empty v-if="!detailLogs.length" description="暂无启动日志" />
-              <n-infinite-scroll
-                v-else
-                class="detail-drawer__logs-scroll"
-                :distance="8"
-                @load="handleLoadMoreLogs"
-              >
-                <div class="detail-drawer__logs">
-                  <div v-for="(logItem, index) in visibleDetailLogs" :key="`${selectedDetailResource.id}-${index}-${logItem.startTime}`" class="detail-drawer__log">
-                    <div class="detail-drawer__log-row">
-                      <span class="detail-drawer__log-label">启动方式</span>
-                      <span class="detail-drawer__log-value">{{ formatLaunchMode(logItem.launchMode) }}</span>
-                    </div>
-                    <div class="detail-drawer__log-row">
-                      <span class="detail-drawer__log-label">开始时间</span>
-                      <span class="detail-drawer__log-value">{{ formatDateTime(logItem.startTime) }}</span>
-                    </div>
-                    <div class="detail-drawer__log-row">
-                      <span class="detail-drawer__log-label">结束时间</span>
-                      <span class="detail-drawer__log-value">{{ formatLogEndTime(logItem.endTime) }}</span>
-                    </div>
-                    <div class="detail-drawer__log-row">
-                      <span class="detail-drawer__log-label">运行时长</span>
-                      <span class="detail-drawer__log-value">{{ formatLogDuration(logItem) }}</span>
+                <n-empty v-if="!detailLogs.length" description="暂无启动日志" />
+                <n-infinite-scroll
+                  v-else
+                  class="detail-drawer__logs-scroll"
+                  :distance="8"
+                  @load="handleLoadMoreLogs"
+                >
+                  <div class="detail-drawer__logs">
+                    <div v-for="(logItem, index) in visibleDetailLogs" :key="`${selectedDetailResource.id}-${index}-${logItem.startTime}`" class="detail-drawer__log">
+                      <div class="detail-drawer__log-row">
+                        <span class="detail-drawer__log-label">启动方式</span>
+                        <span class="detail-drawer__log-value">{{ formatLaunchMode(logItem.launchMode) }}</span>
+                      </div>
+                      <div class="detail-drawer__log-row">
+                        <span class="detail-drawer__log-label">开始时间</span>
+                        <span class="detail-drawer__log-value">{{ formatDateTime(logItem.startTime) }}</span>
+                      </div>
+                      <div class="detail-drawer__log-row">
+                        <span class="detail-drawer__log-label">结束时间</span>
+                        <span class="detail-drawer__log-value">{{ formatLogEndTime(logItem.endTime) }}</span>
+                      </div>
+                      <div class="detail-drawer__log-row">
+                        <span class="detail-drawer__log-label">运行时长</span>
+                        <span class="detail-drawer__log-value">{{ formatLogDuration(logItem) }}</span>
+                      </div>
                     </div>
                   </div>
-                </div>
-                <div v-if="hasMoreDetailLogs" class="detail-drawer__logs-more">
-                  <n-button quaternary size="small" @click="handleLoadMoreLogs">展示更多</n-button>
-                </div>
-                <div v-if="noMore">
-                  <div class="detail-drawer__logs-finish">没有更多了 🤪</div>
-                </div>
+                  <div v-if="hasMoreDetailLogs" class="detail-drawer__logs-more">
+                    <n-button quaternary size="small" @click="handleLoadMoreLogs">展示更多</n-button>
+                  </div>
+                  <div v-if="noMore">
+                    <div class="detail-drawer__logs-finish">没有更多了 🤪</div>
+                  </div>
                 </n-infinite-scroll>
               </div>
 
@@ -4725,7 +6255,7 @@ const handleToggleCompleted = async (resource: any) => {
           <template v-if="batchProgressRunning && batchAnalyzeTotal > 0">
             <span class="batch-import-loading__title-text">
               {{ batchProgressStage === 'import'
-                ? `正在导入第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${detailIsManga ? '漫画' : '游戏'}`
+                ? `正在导入第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${batchImportResourceLabel}`
                 : `正在分析第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个目录` }}
             </span>
             <span class="batch-import-loading__title-directory" :title="getBatchProgressDirectoryName()">
@@ -4777,10 +6307,10 @@ const handleToggleCompleted = async (resource: any) => {
         <div class="batch-import-toast__progress-text">{{ batchAnalyzePercent }}%</div>
       </div>
       <div class="batch-import-toast__content">
-        <div class="batch-import-toast__title">{{ batchProgressStage === 'import' ? `正在后台导入${detailIsManga ? '漫画' : '游戏'}` : `正在后台分析${detailIsManga ? '漫画' : '游戏'}目录` }}</div>
+        <div class="batch-import-toast__title">{{ batchProgressStage === 'import' ? `正在后台导入${batchImportResourceLabel}` : `正在后台分析${batchImportResourceLabel}目录` }}</div>
         <div class="batch-import-toast__subtitle">
           {{ batchProgressStage === 'import'
-            ? `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${detailIsManga ? '漫画' : '游戏'}`
+            ? `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${batchImportResourceLabel}`
             : `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个目录` }}
         </div>
         <div class="batch-import-toast__subtitle" :title="getBatchProgressDirectoryName()">
@@ -4825,7 +6355,7 @@ const handleToggleCompleted = async (resource: any) => {
                 <div class="batch-import-item__row">
                   <n-checkbox
                     :checked="item.checked"
-                    :disabled="item.exists || !!item.errorMessage || (detailIsManga ? Number(item?.imageCount ?? 0) <= 0 : !item.launchFilePath)"
+                    :disabled="item.exists || !!item.errorMessage || !isBatchImportItemImportable(item)"
                     @click.stop
                     @update:checked="(value: boolean) => { batchImportItems[index].checked = value }"
                   />
@@ -4843,15 +6373,18 @@ const handleToggleCompleted = async (resource: any) => {
                     >
                       {{ item.importResultType === 'success' ? '已导入' : item.importResultType === 'error' ? '导入失败' : '已跳过' }}
                     </n-tag>
-                    <n-button v-if="!detailIsManga" size="small" @click.stop="handleSelectBatchLaunchFile(index)">
+                    <n-button v-if="!detailIsManga && !detailIsAsmr" size="small" @click.stop="handleSelectBatchLaunchFile(index)">
                       手动选择
                     </n-button>
                   </n-space>
                 </div>
                 <div class="batch-import-item__detail">
-                  <div class="batch-import-item__label">{{ detailIsManga ? '漫画图片' : '启动文件' }}</div>
+                  <div class="batch-import-item__label">{{ detailIsManga ? '漫画图片' : (detailIsAsmr ? '音频文件' : '启动文件') }}</div>
                   <div v-if="detailIsManga" class="batch-import-item__value">
                     {{ item.imageCount ? `共 ${item.imageCount} 张图片` : '目录中未找到可用图片' }}
+                  </div>
+                  <div v-else-if="detailIsAsmr" class="batch-import-item__value">
+                    {{ item.audioCount ? `共 ${item.audioCount} 个音频文件` : '目录中未找到可用音频文件' }}
                   </div>
                   <div v-else-if="item.launchFilePath" class="batch-import-item__value">
                     <img
@@ -4863,7 +6396,7 @@ const handleToggleCompleted = async (resource: any) => {
                     {{ item.launchFilePath }}
                   </div>
                   <div v-else class="batch-import-item__value batch-import-item__value--error">
-                    {{ item.errorMessage || '未分析出可用启动文件，请手动选择' }}
+                    {{ item.errorMessage || (detailIsAsmr ? '目录中未找到可用音频文件' : '未分析出可用启动文件，请手动选择') }}
                   </div>
                   <div v-if="showBatchImportButton && !detailIsManga" class="batch-import-item__fields">
                     <div class="batch-import-item__field">
@@ -4931,8 +6464,17 @@ const handleToggleCompleted = async (resource: any) => {
         <n-alert type="info" :show-icon="false">
           当前已选择 {{ selectedResourceCount }} 个{{ categoryName ?? '资源' }}
         </n-alert>
-        <n-form-item :label="batchLabelField === 'tags' ? `${categoryName}标签` : `${categoryName}分类`">
+        <n-form-item
+          :label="batchLabelField === 'tags'
+            ? `${categoryName}标签`
+            : batchLabelField === 'types'
+              ? `${categoryName}分类`
+              : batchLabelField === 'authors'
+                ? `${categoryName}歌手`
+                : `${categoryName}专辑`"
+        >
           <n-select
+            v-if="!batchLabelIsSingleValue"
             :value="batchLabelValues"
             multiple
             filterable
@@ -4948,6 +6490,18 @@ const handleToggleCompleted = async (resource: any) => {
             :on-create="createSelectOption"
             @update:value="handleBatchLabelValuesChange"
           />
+          <n-select
+            v-else
+            :value="batchLabelSingleValue"
+            filterable
+            tag
+            clearable
+            :options="batchLabelOptions"
+            :placeholder="batchLabelPlaceholder"
+            :on-search="handleBatchLabelSearch"
+            :on-create="createSelectOption"
+            @update:value="handleBatchLabelSingleValueChange"
+          />
         </n-form-item>
         <div class="batch-label-modal__footer">
           <n-space justify="end">
@@ -4956,6 +6510,44 @@ const handleToggleCompleted = async (resource: any) => {
             </n-button>
             <n-button type="primary" :loading="isBatchLabelSubmitting" @click="handleSubmitBatchLabelAction">
               确认
+            </n-button>
+          </n-space>
+        </div>
+      </n-space>
+    </n-modal>
+
+    <n-modal
+      v-model:show="showAudioCoverCandidateModal"
+      preset="card"
+      title="选择专辑封面"
+      :style="{ width: '820px' }"
+      @after-leave="closeAudioCoverCandidateModal"
+    >
+      <n-space vertical :size="16">
+        <n-alert type="info" :show-icon="false">
+          已按“歌名 + 歌手 / 歌名 + 专辑 / 歌手 + 专辑”查找到可用封面，请选择要使用的那一张。
+        </n-alert>
+        <div class="audio-cover-candidate-list">
+          <button
+            v-for="candidate in audioCoverCandidates"
+            :key="`${candidate.label}-${candidate.coverPath}`"
+            type="button"
+            class="audio-cover-candidate"
+            @click="handleUseAudioCoverCandidate(candidate.coverPath)"
+          >
+            <div class="audio-cover-candidate__preview">
+              <img :src="candidate.previewSrc" :alt="candidate.label" class="audio-cover-candidate__image" />
+            </div>
+            <div class="audio-cover-candidate__body">
+              <div class="audio-cover-candidate__title">{{ candidate.label }}</div>
+              <div class="audio-cover-candidate__query">{{ candidate.queryText }}</div>
+            </div>
+          </button>
+        </div>
+        <div class="batch-label-modal__footer">
+          <n-space justify="end">
+            <n-button @click="closeAudioCoverCandidateModal">
+              取消
             </n-button>
           </n-space>
         </div>
@@ -5001,16 +6593,29 @@ const handleToggleCompleted = async (resource: any) => {
                 v-model:metaData="formData.meta"
                 :actors="formData.actors"
                 :base-path="formData.basePath"
+                :title="formData.name"
                 :fetch-info-loading="fetchResourceInfoLoading"
                 @update:actors="(value: string[]) => { formData.actors = value }"
                 @check-engine="handleCheckGameEngine"
                 @fetch-game-info="handleFetchGameInfo"
               />
+              <n-form-item v-if="categorySettings.authorText" :label="categorySettings.authorText" path="author">
+                <n-select
+                  v-if="isAudioCategory"
+                  :value="formData.authors"
+                  multiple
+                  filterable
+                  tag
+                  clearable
+                  :options="authorSelectOptions"
+                  :placeholder="authorInputPlaceholder"
+                  :on-create="createSelectOption"
+                  @update:value="handleAudioAuthorsChange"
+                />
+                <n-input v-else v-model:value="formData.author" :placeholder="authorInputPlaceholder"/>
+              </n-form-item>
               <n-form-item :label="descriptionLabel" path="description">
                 <RichTextEditor v-model="formData.description" :placeholder="descriptionPlaceholder" />
-              </n-form-item>
-              <n-form-item v-if="categorySettings.authorText" :label="categorySettings.authorText" path="author">
-                <n-input v-model:value="formData.author" :placeholder="`请输入${categorySettings.authorText}`"/>
               </n-form-item>
               <n-form-item :label="`${categoryName}标签`" path="tags">
                 <n-select
@@ -5061,14 +6666,28 @@ const handleToggleCompleted = async (resource: any) => {
                   <n-space size="small" wrap>
                     <n-button size="small" @click="handleChooseCustomCover">选择自定义封面</n-button>
                     <n-button
-                      v-if="categorySettings.extendTable !== 'multi_image_meta'"
+                      v-if="categorySettings.extendTable === 'audio_meta'"
+                      size="small"
+                      @click="handleFetchAlbumCover"
+                    >
+                      获取专辑封面
+                    </n-button>
+                    <n-button
+                      v-if="!['multi_image_meta', 'asmr_meta', 'audio_meta'].includes(categorySettings.extendTable)"
                       size="small"
                       :disabled="!hasBasePath"
                       @click="handleUseScreenshotCover"
                     >
                       使用截图作为封面
                     </n-button>
-                    <n-button size="small" :disabled="!editingResourceId" @click="handleChooseCoverFromScreenshotFolder">从截图文件夹选择</n-button>
+                    <n-button
+                      v-if="categorySettings.extendTable !== 'audio_meta'"
+                      size="small"
+                      :disabled="!editingResourceId"
+                      @click="handleChooseCoverFromScreenshotFolder"
+                    >
+                      从截图文件夹选择
+                    </n-button>
                     <n-button
                       v-if="categorySettings.extendTable === 'multi_image_meta'"
                       size="small"
@@ -5145,16 +6764,6 @@ const handleToggleCompleted = async (resource: any) => {
       :initial-index="comicReaderInitialIndex"
       @page-change="handleComicReaderPageChange"
     />
-    <AudioPlayer
-      v-model:show="showAudioPlayer"
-      :resource-id="audioPlayerResourceId"
-      :playlist="audioPlayerPlaylist"
-      :initial-path="audioPlayerInitialPath"
-      :initial-time="audioPlayerInitialTime"
-      :cover-src="audioPlayerCoverSrc"
-      :title="audioPlayerTitle || categoryName"
-    />
-
     <div v-if="isDragOver && categorySettings.resourcePathType === 'file'" class="drag-overlay">
       <div class="drag-overlay__panel">
         <div class="drag-overlay__title">拖拽文件到这里添加{{ categoryName }}</div>
@@ -5201,16 +6810,29 @@ const handleToggleCompleted = async (resource: any) => {
             v-model:metaData="formData.meta"
             :actors="formData.actors"
             :base-path="formData.basePath"
+            :title="formData.name"
             :fetch-info-loading="fetchResourceInfoLoading"
             @update:actors="(value: string[]) => { formData.actors = value }"
             @check-engine="handleCheckGameEngine"
             @fetch-game-info="handleFetchGameInfo"
           />
+          <n-form-item v-if="categorySettings.authorText" :label="categorySettings.authorText" path="author">
+            <n-select
+              v-if="isAudioCategory"
+              :value="formData.authors"
+              multiple
+              filterable
+              tag
+              clearable
+              :options="authorSelectOptions"
+              :placeholder="authorInputPlaceholder"
+              :on-create="createSelectOption"
+              @update:value="handleAudioAuthorsChange"
+            />
+            <n-input v-else v-model:value="formData.author" :placeholder="authorInputPlaceholder"/>
+          </n-form-item>
           <n-form-item :label="descriptionLabel" path="description">
             <RichTextEditor v-model="formData.description" :placeholder="descriptionPlaceholder" />
-          </n-form-item>
-          <n-form-item v-if="categorySettings.authorText" :label="categorySettings.authorText" path="author">
-            <n-input v-model:value="formData.author" :placeholder="`请输入${categorySettings.authorText}`"/>
           </n-form-item>
           <n-form-item :label="`${categoryName}标签`" path="tags">
             <n-select
@@ -5259,12 +6881,19 @@ const handleToggleCompleted = async (resource: any) => {
                 <span v-else class="cover-preview__label">{{ coverPreviewLabel }}</span>
               </div>
               <n-space size="small" wrap>
-                <n-button size="small" @click="handleChooseCustomCover">选择自定义封面</n-button>
-                <n-button
-                  v-if="categorySettings.extendTable !== 'multi_image_meta'"
-                  size="small"
-                  :disabled="!hasBasePath"
-                  @click="handleUseScreenshotCover"
+                    <n-button size="small" @click="handleChooseCustomCover">选择自定义封面</n-button>
+                    <n-button
+                      v-if="categorySettings.extendTable === 'audio_meta'"
+                      size="small"
+                      @click="handleFetchAlbumCover"
+                    >
+                      获取专辑封面
+                    </n-button>
+                    <n-button
+                      v-if="!['multi_image_meta', 'asmr_meta', 'audio_meta'].includes(categorySettings.extendTable)"
+                      size="small"
+                    :disabled="!hasBasePath"
+                    @click="handleUseScreenshotCover"
                 >
                   使用截图作为封面
                 </n-button>
@@ -5496,6 +7125,60 @@ const handleToggleCompleted = async (resource: any) => {
   border-radius: 999px;
 }
 
+.audio-cover-candidate-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.audio-cover-candidate {
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  text-align: left;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
+}
+
+.audio-cover-candidate:hover {
+  transform: translateY(-2px);
+  border-color: rgba(99, 226, 183, 0.34);
+  background: rgba(99, 226, 183, 0.06);
+}
+
+.audio-cover-candidate__preview {
+  aspect-ratio: 1;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.audio-cover-candidate__image {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.audio-cover-candidate__body {
+  padding: 12px;
+}
+
+.audio-cover-candidate__title {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.audio-cover-candidate__query {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  opacity: 0.72;
+  word-break: break-word;
+}
+
 .filter-list::-webkit-scrollbar-track {
   background: transparent;
 }
@@ -5508,7 +7191,7 @@ const handleToggleCompleted = async (resource: any) => {
   width: 100%;
 }
 
-.author-search, .tag-search, .type-search {
+.author-search, .album-search, .tag-search, .type-search {
   margin-top: 5px;
   margin-bottom: 10px;
 }

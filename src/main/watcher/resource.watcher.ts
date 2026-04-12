@@ -40,9 +40,7 @@ export class ResourceWatcher {
   }
 
   public static getInstance(): ResourceWatcher {
-    if (!ResourceWatcher.instance) {
-      ResourceWatcher.instance = new ResourceWatcher()
-    }
+    ResourceWatcher.instance ??= new ResourceWatcher();
 
     return ResourceWatcher.instance
   }

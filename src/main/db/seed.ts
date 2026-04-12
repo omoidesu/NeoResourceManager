@@ -368,9 +368,9 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
       extra: createCategoryExtra('novel_meta', 'file', '本', ['txt', 'epub', 'mobi', 'pdf'], '作者', '阅读')
     }, {
       id: generateId(),
-      name: '音频',
-      description: '音频',
-      value: 'audio',
+      name: '音乐',
+      description: '音乐',
+      value: 'music',
       typeId: dictTypeIds.resource,
       extra: createCategoryExtra('audio_meta', 'file', '个', ['mp3', 'wav', 'aac', 'ogg', 'flac', 'ape', 'ogg'], '艺术家', '播放')
     }, {
@@ -973,6 +973,11 @@ function ensureBaseSeed(tx: SeedTransaction, currentVersion: string, options: { 
   syncSeedData(tx, definitions, options)
 }
 
+function reconcileCategorySeedData(tx: SeedTransaction, currentVersion: string) {
+  const definitions = buildSeedDefinitions(currentVersion)
+  syncSeedData(tx, definitions, { includeCategories: true })
+}
+
 function applyVersionSeedPatches(
   tx: SeedTransaction,
   options: {
@@ -1011,6 +1016,9 @@ export const seedDatabase = async () => {
 
     // 不存在该设置项表示数据库未初始化
     if (initialized && !needsUpgrade) {
+      db.transaction((tx) => {
+        reconcileCategorySeedData(tx, currentVersion)
+      })
       logger.info('database seed is up to date', {
         currentVersion,
         databaseVersion: storedVersion

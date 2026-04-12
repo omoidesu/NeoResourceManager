@@ -1,5 +1,6 @@
 export class ResourceForm {
   author!: string
+  authors?: string[]
   actors!: string[]
   basePath!: string
   categoryId!: string
@@ -13,18 +14,24 @@ export class ResourceForm {
 
 export class ResourceMeta {
   additionalStores!: ResourceStoreItem[]
+  album?: string
+  artist?: string
+  bitrate?: number | null
   commandLineArgs!: string
   duration?: number
   engine!: string
   gameId!: string
   illust: string = ''
   language!: string
+  lastPlayTime?: number
+  lyricsPath?: string
   nameEn!: string
   nameJp!: string
   nameZh!: string
   nickname!: string
   pixivId!: string
   resolution!: string
+  sampleRate?: number | null
   format!: string
   scenario: string = ''
   translator!: string

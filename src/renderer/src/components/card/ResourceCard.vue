@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NIcon } from 'naive-ui'
 import {
   CheckmarkCircleOutline,
@@ -35,6 +35,8 @@ const props = defineProps<{
   stopNeedsConfirm?: boolean
   selected?: boolean
   selectionMode?: boolean
+  showDefaultAppPlay?: boolean
+  showAddToPlaylist?: boolean
 }>()
 const emit = defineEmits<{
   (event: 'launch', resource: any): void
@@ -45,6 +47,8 @@ const emit = defineEmits<{
   (event: 'show-detail', resource: any): void
   (event: 'edit', resource: any): void
   (event: 'open-folder', resource: any): void
+  (event: 'default-app-play', resource: any): void
+  (event: 'add-to-playlist', resource: any): void
   (event: 'open-screenshot-folder', resource: any): void
   (event: 'toggle-favorite', resource: any): void
   (event: 'toggle-completed', resource: any): void
@@ -57,13 +61,19 @@ const resourceTags = computed(() => props.resource?.tags ?? [])
 const resourceTypes = computed(() => props.resource?.types ?? [])
 const resourceAuthors = computed(() => props.resource?.authors ?? [])
 const resourceActors = computed(() => props.resource?.actors ?? [])
+const resourceAlbum = computed(() => String(props.resource?.audioMeta?.album ?? '').trim())
+const showAlbumLine = computed(() => String(props.categoryName ?? '').trim() === '音乐' && Boolean(resourceAlbum.value))
 const coverPreviewSrc = ref('')
 const fileIconSrc = ref('')
 const showContextMenu = ref(false)
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
 const showStopConfirm = ref(false)
+const cardTriggerRef = ref<HTMLElement | null>(null)
+const shouldLoadCoverPreview = ref(props.showCover === false)
 let stopClickTimer: ReturnType<typeof setTimeout> | null = null
+let coverPreviewObserver: IntersectionObserver | null = null
+let coverPreviewTaskId = 0
 
 const normalizeCoverPreviewSource = (coverPath: string) => {
   if (!coverPath) {
@@ -92,6 +102,18 @@ const contextMenuOptions = computed(() => ([
     disabled: !canLaunch.value,
     icon: renderMenuIcon(Play)
   },
+  ...(props.showDefaultAppPlay ? [{
+    label: '使用默认应用播放',
+    key: 'default-app-play',
+    disabled: !Boolean(props.resource?.basePath) || Boolean(props.resource?.missingStatus),
+    icon: renderMenuIcon(Play)
+  }] : []),
+  ...(props.showAddToPlaylist ? [{
+    label: '加入播放列表',
+    key: 'add-to-playlist',
+    disabled: !Boolean(props.resource?.basePath) || Boolean(props.resource?.missingStatus),
+    icon: renderMenuIcon(Play)
+  }] : []),
   ...(props.showMtoolLaunch ? [{
     label: '通过 MTool 启动',
     key: 'mtool-launch',
@@ -343,6 +365,16 @@ const handleSelectMenu = (key: string) => {
     return
   }
 
+  if (key === 'default-app-play') {
+    emit('default-app-play', props.resource)
+    return
+  }
+
+  if (key === 'add-to-playlist') {
+    emit('add-to-playlist', props.resource)
+    return
+  }
+
   if (key === 'open-screenshot-folder') {
     emit('open-screenshot-folder', props.resource)
     return
@@ -374,8 +406,19 @@ const handleSelectMenu = (key: string) => {
 }
 
 watch(
-  () => props.resource?.coverPath,
-  async (coverPath) => {
+  () => [props.resource?.coverPath, shouldLoadCoverPreview.value, props.showCover] as const,
+  async ([coverPath, shouldLoadCover, showCover]) => {
+    const taskId = ++coverPreviewTaskId
+    if (showCover === false) {
+      coverPreviewSrc.value = ''
+      return
+    }
+
+    if (!shouldLoadCover) {
+      coverPreviewSrc.value = ''
+      return
+    }
+
     if (!coverPath) {
       coverPreviewSrc.value = ''
       return
@@ -388,13 +431,20 @@ watch(
     }
 
     try {
-      coverPreviewSrc.value = (await window.api.dialog.getImagePreviewUrl(coverPath, {
+      const previewUrl = await window.api.dialog.getImagePreviewUrl(coverPath, {
         maxWidth: 520,
         maxHeight: 340,
         fit: 'cover',
         quality: 78
-      })) ?? ''
+      })
+      if (taskId !== coverPreviewTaskId) {
+        return
+      }
+      coverPreviewSrc.value = previewUrl ?? ''
     } catch {
+      if (taskId !== coverPreviewTaskId) {
+        return
+      }
       coverPreviewSrc.value = ''
     }
   },
@@ -430,6 +480,41 @@ watch(
 
 onBeforeUnmount(() => {
   clearStopClickTimer()
+  coverPreviewTaskId += 1
+  coverPreviewObserver?.disconnect()
+  coverPreviewObserver = null
+})
+
+onMounted(() => {
+  if (props.showCover === false) {
+    shouldLoadCoverPreview.value = false
+    return
+  }
+
+  if (typeof IntersectionObserver === 'undefined') {
+    shouldLoadCoverPreview.value = true
+    return
+  }
+
+  const target = cardTriggerRef.value
+  if (!target) {
+    shouldLoadCoverPreview.value = true
+    return
+  }
+
+  coverPreviewObserver = new IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.isIntersecting)) {
+      shouldLoadCoverPreview.value = true
+      coverPreviewObserver?.disconnect()
+      coverPreviewObserver = null
+    }
+  }, {
+    root: null,
+    rootMargin: '240px 0px',
+    threshold: 0.01
+  })
+
+  coverPreviewObserver.observe(target)
 })
 </script>
 
@@ -448,7 +533,7 @@ onBeforeUnmount(() => {
       <div class="resource-card-dropdown-anchor" />
     </n-dropdown>
 
-      <div class="resource-card-trigger" @contextmenu="handleContextMenu" @click="handleShowDetail">
+      <div ref="cardTriggerRef" class="resource-card-trigger" @contextmenu="handleContextMenu" @click="handleShowDetail">
       <n-card
         size="small"
         class="resource-card"
@@ -560,6 +645,21 @@ onBeforeUnmount(() => {
                   type="success"
                 >
                   {{ actor.name }}
+                </n-tag>
+              </n-space>
+            </div>
+
+            <div v-if="showAlbumLine" class="resource-card__meta-line">
+              <span class="resource-card__meta-label">专辑</span>
+              <n-space size="small">
+                <n-tag
+                  size="small"
+                  :bordered="false"
+                  round
+                  type="success"
+                  :title="resourceAlbum"
+                >
+                  {{ resourceAlbum }}
                 </n-tag>
               </n-space>
             </div>
@@ -857,6 +957,17 @@ onBeforeUnmount(() => {
   font-size: 12px;
   opacity: 0.6;
   line-height: 24px;
+  white-space: nowrap;
+}
+
+.resource-card__meta-text {
+  min-width: 0;
+  align-self: center;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.82);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

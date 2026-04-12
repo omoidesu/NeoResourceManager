@@ -29,6 +29,14 @@ export const createEmptyMetaByType = (extendTable: string) => {
         website: '',
         websiteType: ''
       }
+    case 'audio_meta':
+      return {
+        artist: '',
+        album: '',
+        lyricsPath: '',
+        duration: 0,
+        lastPlayTime: 0
+      }
     case 'single_image_meta':
       return {
         pixivId: '',

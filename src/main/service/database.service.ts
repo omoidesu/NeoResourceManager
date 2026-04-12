@@ -10,7 +10,7 @@ import {
   tagResource,
   typeResource,
   resourceType, dictType, author, authorWork, storeWork,
-  actor, gameMeta, softwareMeta, singleImageMeta, multiImageMeta, videoMeta, asmrMeta, novelMeta, websiteMeta,
+  actor, gameMeta, softwareMeta, singleImageMeta, multiImageMeta, videoMeta, asmrMeta, audioMeta, novelMeta, websiteMeta,
 } from '../db/schema'
 import {and, asc, count, desc, eq, inArray, sql} from 'drizzle-orm'
 import {generateId} from '../util/id-generator'
@@ -22,6 +22,7 @@ type DbExecutor = typeof db | DbTransaction
 type ResourceQueryParams = {
   keyword?: string
   authorIds?: string[]
+  albumNames?: string[]
   tagIds?: string[]
   typeIds?: string[]
   engineIds?: string[]
@@ -41,6 +42,7 @@ export class DatabaseService {
   ) {
     const keyword = String(query.keyword ?? '').trim()
     const authorIds = (query.authorIds ?? []).filter(Boolean)
+    const albumNames = (query.albumNames ?? []).map((item) => String(item ?? '').trim()).filter(Boolean)
     const tagIds = (query.tagIds ?? []).filter(Boolean)
     const typeIds = (query.typeIds ?? []).filter(Boolean)
     const engineIds = (query.engineIds ?? []).filter(Boolean)
@@ -83,6 +85,15 @@ export class DatabaseService {
         where ${authorWork.resourceId} = ${resource.id}
           and ${inArray(authorWork.authorId, authorIds)}
           and coalesce(${authorWork.isDeleted}, 0) = 0
+      )`)
+    }
+
+    if (albumNames.length) {
+      conditions.push(sql`exists (
+        select 1
+        from ${audioMeta}
+        where ${audioMeta.resourceId} = ${resource.id}
+          and ${inArray(audioMeta.album, albumNames)}
       )`)
     }
 
@@ -273,6 +284,7 @@ export class DatabaseService {
         gameMeta: true,
         singleImageMeta: true,
         asmrMeta: true,
+        audioMeta: true,
         actors: true,
         tags: {
           with: {
@@ -376,6 +388,26 @@ export class DatabaseService {
       ))
       .groupBy(author.id, author.name)
       .orderBy(desc(authorCount))
+  }
+
+  static async getAlbumByCategoryId(categoryId: string) {
+    const albumCount = count(audioMeta.resourceId)
+
+    return db
+      .select({
+        albumName: audioMeta.album,
+        count: albumCount,
+      })
+      .from(resource)
+      .leftJoin(audioMeta, eq(resource.id, audioMeta.resourceId))
+      .where(and(
+        eq(resource.categoryId, categoryId),
+        eq(resource.isDeleted, false),
+        sql`${audioMeta.album} is not null`,
+        sql`trim(${audioMeta.album}) <> ''`
+      ))
+      .groupBy(audioMeta.album)
+      .orderBy(desc(albumCount), asc(audioMeta.album))
   }
 
   static async getEngineByCategoryId(categoryId: string) {
@@ -770,6 +802,46 @@ export class DatabaseService {
       .run()
   }
 
+  static insertAudioMeta(metaData: typeof audioMeta.$inferInsert, tx?: DbExecutor) {
+    const executor = tx ?? db
+    executor.insert(audioMeta).values(metaData).run()
+  }
+
+  static upsertAudioMeta(metaData: typeof audioMeta.$inferInsert, tx?: DbExecutor) {
+    const executor = tx ?? db
+    executor
+      .insert(audioMeta)
+      .values(metaData)
+      .onConflictDoUpdate({
+        target: audioMeta.resourceId,
+        set: {
+          artist: metaData.artist ?? null,
+          album: metaData.album ?? null,
+          lyricsPath: metaData.lyricsPath ?? null,
+          duration: metaData.duration ?? null,
+          lastPlayTime: metaData.lastPlayTime ?? 0,
+        }
+      })
+      .run()
+  }
+
+  static updateAudioPlaybackProgress(resourceId: string, lastPlayTime: number, tx?: DbExecutor) {
+    const executor = tx ?? db
+    executor
+      .insert(audioMeta)
+      .values({
+        resourceId,
+        lastPlayTime,
+      })
+      .onConflictDoUpdate({
+        target: audioMeta.resourceId,
+        set: {
+          lastPlayTime,
+        }
+      })
+      .run()
+  }
+
   static insertNovelMeta(metaData: typeof novelMeta.$inferInsert, tx?: DbExecutor) {
     const executor = tx ?? db
     executor.insert(novelMeta).values(metaData).run()
@@ -1060,6 +1132,7 @@ export class DatabaseService {
           multiImageMeta: true,
           videoMeta: true,
           asmrMeta: true,
+          audioMeta: true,
           actors: true,
           stores: {
             with: {

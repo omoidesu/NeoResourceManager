@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ChevronBackOutline, ChevronForwardOutline, CloseOutline, Pause, Play, Square, VolumeHighOutline, VolumeMuteOutline } from '@vicons/ionicons5'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from 'vue'
+import { ChevronBackOutline, ChevronForwardOutline, CloseOutline, Pause, Play, Repeat, Shuffle, Square, SwapHorizontal, VolumeHighOutline, VolumeMuteOutline } from '@vicons/ionicons5'
 import { notify } from '../utils/notification'
 import { createLogger } from '../../../main/util/logger'
 import {
   clearAudioPlayerControls,
   registerAudioPlayerControls,
+  type AudioPlaybackMode,
   setAudioPlayerPlaybackState,
   setAudioPlayerSession,
   setAudioPlayerVisible
@@ -16,7 +17,13 @@ type AudioTrack = {
   path: string
   label: string
   duration?: number | null
+  resourceId?: string
+  resourceTitle?: string
+  artist?: string
+  coverSrc?: string
+  coverPath?: string
   hasSubtitle?: boolean
+  subtitlePath?: string
 }
 
 type SubtitleCue = {
@@ -33,12 +40,16 @@ const props = withDefaults(defineProps<{
   initialTime?: number
   coverSrc?: string
   title?: string
+  artist?: string
+  displayMode?: 'default' | 'music'
 }>(), {
   resourceId: '',
   initialPath: '',
   initialTime: 0,
   coverSrc: '',
-  title: '音频播放器'
+  title: '音频播放器',
+  artist: '',
+  displayMode: 'default'
 })
 
 const emit = defineEmits<{
@@ -57,14 +68,78 @@ const audioUrlMap = ref<Record<string, string>>({})
 const audioObjectUrlMap = ref<Record<string, string>>({})
 const subtitleCueList = ref<SubtitleCue[]>([])
 const subtitleLoadState = ref<'idle' | 'loading' | 'ready' | 'empty'>('idle')
+const lyricLineRefs = ref<Array<HTMLElement | null>>([])
+const currentCoverPreviewSrc = ref('')
+const isLyricScrollPreviewing = ref(false)
 const pendingAutoplay = ref(false)
 const pendingSeekTime = ref(0)
 const playbackError = ref('')
 const playbackSessionActive = ref(false)
 const stopPlaybackTask = ref<Promise<void> | null>(null)
+const playbackMode = ref<AudioPlaybackMode>('order')
+let lyricScrollPreviewTimer: ReturnType<typeof setTimeout> | null = null
 
 const currentTrack = computed(() => props.playlist[currentIndex.value] ?? null)
 const currentAudioSrc = computed(() => audioUrlMap.value[currentTrack.value?.path ?? ''] ?? '')
+const currentResourceId = computed(() => String(currentTrack.value?.resourceId ?? props.resourceId ?? '').trim())
+const resourceTitleText = computed(() => String(currentTrack.value?.resourceTitle ?? '').trim() || String(props.title ?? '').trim() || String(currentTrack.value?.label ?? '').trim() || '音频播放器')
+const artistText = computed(() => String(currentTrack.value?.artist ?? props.artist ?? '').trim())
+const currentCoverSrc = computed(() => currentCoverPreviewSrc.value)
+const isMusicDisplayMode = computed(() => props.displayMode === 'music')
+const fullPlayerPrimaryText = computed(() => {
+  if (isMusicDisplayMode.value) {
+    return resourceTitleText.value
+  }
+
+  return String(currentTrack.value?.label ?? '').trim() || resourceTitleText.value
+})
+const fullPlayerSecondaryText = computed(() => {
+  if (isMusicDisplayMode.value) {
+    return artistText.value || String(currentTrack.value?.label ?? '').trim() || resourceTitleText.value
+  }
+
+  return resourceTitleText.value
+})
+const miniPlayerPrimaryText = computed(() => {
+  if (isMusicDisplayMode.value) {
+    return artistText.value || String(currentTrack.value?.label ?? '').trim() || resourceTitleText.value
+  }
+
+  return String(currentTrack.value?.label ?? '').trim() || resourceTitleText.value
+})
+const miniPlayerSecondaryText = computed(() => {
+  if (isMusicDisplayMode.value) {
+    return resourceTitleText.value
+  }
+
+  return resourceTitleText.value !== miniPlayerPrimaryText.value ? resourceTitleText.value : ''
+})
+const playbackModeIcon = computed(() => {
+  if (playbackMode.value === 'loop' || playbackMode.value === 'repeat-one') {
+    return Repeat
+  }
+
+  if (playbackMode.value === 'shuffle') {
+    return Shuffle
+  }
+
+  return SwapHorizontal
+})
+const playbackModeLabel = computed(() => {
+  if (playbackMode.value === 'loop') {
+    return '列表循环'
+  }
+
+  if (playbackMode.value === 'shuffle') {
+    return '随机播放'
+  }
+
+  if (playbackMode.value === 'repeat-one') {
+    return '单曲循环'
+  }
+
+  return '顺序播放'
+})
 const playlistBaseSegments = computed(() => {
   const directorySegments = props.playlist
     .map((track) => String(track?.path ?? '').replace(/\\/g, '/').trim())
@@ -97,6 +172,75 @@ const currentSubtitleText = computed(() => {
   const activeCue = subtitleCueList.value.find((cue) => currentTime.value >= cue.start && currentTime.value <= cue.end)
   return activeCue?.text ?? ''
 })
+const activeSubtitleIndex = computed(() =>
+  subtitleCueList.value.findIndex((cue) => currentTime.value >= cue.start && currentTime.value <= cue.end)
+)
+
+const getLyricLineStyle = (index: number) => {
+  if (isLyricScrollPreviewing.value) {
+    const isActive = index === activeSubtitleIndex.value
+    return {
+      opacity: isActive ? 1 : 0.9,
+      filter: 'none',
+      transform: isActive ? 'scale(1.02)' : 'scale(1)',
+      color: isActive ? 'rgba(255, 255, 255, 0.98)' : 'rgba(255, 255, 255, 0.76)'
+    }
+  }
+
+  const activeIndex = activeSubtitleIndex.value
+  if (activeIndex < 0) {
+    return {
+      opacity: 0.56,
+      filter: 'blur(0.8px)',
+      transform: 'scale(0.992)',
+      color: 'rgba(255, 255, 255, 0.52)'
+    }
+  }
+
+  const distance = Math.abs(index - activeIndex)
+  const blur = Math.min(distance * 0.8, 6)
+  const opacity = Math.max(1 - distance * 0.14, 0.08)
+  const scale = Math.max(1 - distance * 0.018, 0.9)
+  const colorAlpha = Math.max(0.96 - distance * 0.14, 0.14)
+
+  return {
+    opacity,
+    filter: `blur(${blur}px)`,
+    transform: index === activeIndex ? 'scale(1.035)' : `scale(${scale})`,
+    color: `rgba(255, 255, 255, ${colorAlpha})`
+  }
+}
+
+const setLyricLineRef = (element: Element | ComponentPublicInstance | null, index: number) => {
+  if (!element) {
+    lyricLineRefs.value[index] = null
+    return
+  }
+
+  lyricLineRefs.value[index] = ('$el' in element ? element.$el : element) as HTMLElement
+}
+
+const scrollToActiveLyric = (behavior: ScrollBehavior = 'smooth') => {
+  if (!isMusicDisplayMode.value) {
+    return
+  }
+
+  const activeIndex = activeSubtitleIndex.value
+  if (activeIndex < 0) {
+    return
+  }
+
+  const activeElement = lyricLineRefs.value[activeIndex]
+  if (!activeElement) {
+    return
+  }
+
+  activeElement.scrollIntoView({
+    block: 'center',
+    inline: 'nearest',
+    behavior
+  })
+}
 
 const clampIndex = (index: number) => {
   if (!props.playlist.length) {
@@ -112,6 +256,52 @@ const clampIndex = (index: number) => {
   }
 
   return index
+}
+
+const resolveNextTrackIndex = (direction: 'previous' | 'next' | 'ended') => {
+  if (!props.playlist.length) {
+    return currentIndex.value
+  }
+
+  if (playbackMode.value === 'repeat-one' && direction === 'ended') {
+    return currentIndex.value
+  }
+
+  if (direction === 'previous') {
+    return clampIndex(currentIndex.value - 1)
+  }
+
+  if (playbackMode.value === 'shuffle' && props.playlist.length > 1) {
+    let nextIndex = currentIndex.value
+    while (nextIndex === currentIndex.value) {
+      nextIndex = Math.floor(Math.random() * props.playlist.length)
+    }
+    return nextIndex
+  }
+
+  const nextIndex = currentIndex.value + 1
+  if (nextIndex >= props.playlist.length) {
+    if (playbackMode.value === 'loop') {
+      return 0
+    }
+
+    if (direction === 'ended') {
+      return -1
+    }
+  }
+
+  return clampIndex(nextIndex)
+}
+
+const cyclePlaybackMode = () => {
+  const nextModeMap: Record<AudioPlaybackMode, AudioPlaybackMode> = {
+    order: 'loop',
+    loop: 'shuffle',
+    shuffle: 'repeat-one',
+    'repeat-one': 'order'
+  }
+
+  playbackMode.value = nextModeMap[playbackMode.value]
 }
 
 const canReuseCurrentPlayback = () => {
@@ -209,8 +399,9 @@ const revokeAllAudioObjectUrls = () => {
 }
 
 const buildPlaybackLogContext = () => ({
-  resourceId: String(props.resourceId ?? '').trim(),
-  title: String(props.title ?? '').trim(),
+  resourceId: currentResourceId.value,
+  title: resourceTitleText.value,
+  artist: artistText.value,
   initialPath: String(props.initialPath ?? '').trim(),
   initialTime: Number(props.initialTime ?? 0),
   currentIndex: currentIndex.value,
@@ -245,9 +436,9 @@ const playCurrentAudio = async () => {
     playbackError.value = ''
     logger.info('audio playback started', buildPlaybackLogContext())
 
-    if (!playbackSessionActive.value && String(props.resourceId ?? '').trim()) {
+    if (!playbackSessionActive.value && currentResourceId.value) {
       try {
-        await window.api.service.startAsmrPlayback(String(props.resourceId ?? ''))
+        await window.api.service.startAsmrPlayback(currentResourceId.value)
         playbackSessionActive.value = true
       } catch {
         // ignore playback log errors
@@ -294,16 +485,16 @@ const persistPlaybackProgressFor = async (
 
 const persistPlaybackProgress = async (playbackTimeOverride?: number) => {
   await persistPlaybackProgressFor(
-    String(props.resourceId ?? ''),
+    currentResourceId.value,
     String(currentTrack.value?.path ?? ''),
     playbackTimeOverride
   )
 }
 
-const finalizePlaybackSession = async (resourceIdOverride?: string) => {
-  const resourceId = String(resourceIdOverride ?? props.resourceId ?? '').trim()
-  const filePath = String(currentTrack.value?.path ?? '').trim()
-  const playbackTime = getResolvedPlaybackTime()
+const finalizePlaybackSession = async (resourceIdOverride?: string, filePathOverride?: string, playbackTimeOverride?: number) => {
+  const resourceId = String(resourceIdOverride ?? currentResourceId.value ?? '').trim()
+  const filePath = String(filePathOverride ?? currentTrack.value?.path ?? '').trim()
+  const playbackTime = Math.max(0, Math.floor(Number(playbackTimeOverride ?? getResolvedPlaybackTime())))
 
   if (filePath) {
     await persistPlaybackProgressFor(resourceId, filePath, playbackTime)
@@ -329,7 +520,7 @@ const stopPlayback = async () => {
   stopPlaybackTask.value = (async () => {
     audioRef.value?.pause()
 
-    await finalizePlaybackSession(String(props.resourceId ?? ''))
+    await finalizePlaybackSession(currentResourceId.value, String(currentTrack.value?.path ?? ''))
 
     if (audioRef.value) {
       audioRef.value.currentTime = 0
@@ -344,7 +535,9 @@ const stopPlayback = async () => {
       currentTrack: null,
       currentTime: 0,
       duration: 0,
-      isPlaying: false
+      isPlaying: false,
+      playbackMode: playbackMode.value,
+      coverSrc: ''
     })
     setAudioPlayerVisible(false)
     emit('update:show', false)
@@ -499,7 +692,7 @@ const parseSrtOrVtt = (content: string) => {
   return cues
 }
 
-const loadSubtitleForTrack = async (trackPath: string) => {
+const loadSubtitleForTrack = async (trackPath: string, explicitSubtitlePath?: string) => {
   subtitleCueList.value = []
   subtitleLoadState.value = 'loading'
 
@@ -509,12 +702,15 @@ const loadSubtitleForTrack = async (trackPath: string) => {
     return
   }
 
-  const subtitleCandidates = ['.lrc', '.srt', '.vtt'].map((extension) =>
+  const subtitleCandidates = [
+    String(explicitSubtitlePath ?? '').trim(),
+    ...['.lrc', '.srt', '.vtt'].map((extension) =>
     [
       normalizedPath.replace(/\.[^./\\]+$/, extension),
       `${normalizedPath}${extension}`
     ]
   ).flat()
+  ].filter(Boolean)
 
   for (const subtitlePath of subtitleCandidates) {
     const content = await window.api.dialog.readTextFile(subtitlePath)
@@ -535,13 +731,22 @@ const loadSubtitleForTrack = async (trackPath: string) => {
 }
 
 const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
+  const nextIndex = clampIndex(index)
+  const previousTrackPath = String(currentTrack.value?.path ?? '').trim()
+  const previousResourceId = currentResourceId.value
+  const nextTrackPath = String(props.playlist[nextIndex]?.path ?? '').trim()
+
+  if (previousTrackPath && previousTrackPath !== nextTrackPath) {
+    await finalizePlaybackSession(previousResourceId, previousTrackPath)
+  }
+
   logger.info('syncTrack invoked', {
     ...buildPlaybackLogContext(),
-    nextIndex: index,
+    nextIndex,
     autoplay,
     startTime
   })
-  currentIndex.value = clampIndex(index)
+  currentIndex.value = nextIndex
   currentTime.value = 0
   duration.value = Number(currentTrack.value?.duration ?? 0) || 0
   pendingAutoplay.value = autoplay
@@ -556,7 +761,7 @@ const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
 
   await Promise.all([
     ensureAudioUrl(trackPath),
-    loadSubtitleForTrack(trackPath)
+    loadSubtitleForTrack(trackPath, String(currentTrack.value?.subtitlePath ?? ''))
   ])
 
   await nextTick()
@@ -597,15 +802,23 @@ const togglePlayback = async () => {
 }
 
 const goPrevious = () => {
-  void syncTrack(currentIndex.value - 1, true)
+  const previousIndex = resolveNextTrackIndex('previous')
+  void syncTrack(previousIndex, true)
 }
 
 const goNext = () => {
-  void syncTrack(currentIndex.value + 1, true)
+  const nextIndex = resolveNextTrackIndex('next')
+  void syncTrack(nextIndex, true)
 }
 
 const handleAudioEnded = () => {
-  goNext()
+  const nextIndex = resolveNextTrackIndex('ended')
+  if (nextIndex < 0) {
+    void stopPlayback()
+    return
+  }
+
+  void syncTrack(nextIndex, true, 0)
 }
 
 const handleLoadedMetadata = () => {
@@ -677,6 +890,45 @@ const handleSeek = (value: number) => {
 
   audioElement.currentTime = Math.max(0, Number(value ?? 0))
   currentTime.value = audioElement.currentTime
+}
+
+const handleLyricJump = (cue: SubtitleCue) => {
+  handleSeek(Math.max(0, Number(cue.start ?? 0)))
+}
+
+const previewLyricsWhileScrolling = () => {
+  isLyricScrollPreviewing.value = true
+
+  if (lyricScrollPreviewTimer) {
+    clearTimeout(lyricScrollPreviewTimer)
+  }
+
+  lyricScrollPreviewTimer = setTimeout(() => {
+    isLyricScrollPreviewing.value = false
+    lyricScrollPreviewTimer = null
+  }, 900)
+}
+
+const resolveCoverPreviewSource = async (coverPath: string) => {
+  const normalizedCoverPath = String(coverPath ?? '').trim()
+  if (!normalizedCoverPath) {
+    return ''
+  }
+
+  if (/^https?:\/\//i.test(normalizedCoverPath) || /^data:/i.test(normalizedCoverPath)) {
+    return normalizedCoverPath
+  }
+
+  try {
+    return (await window.api.dialog.getImagePreviewUrl(normalizedCoverPath, {
+      maxWidth: 720,
+      maxHeight: 720,
+      fit: 'cover',
+      quality: 84
+    })) ?? ''
+  } catch {
+    return ''
+  }
 }
 
 const handleVolumeChange = (value: number) => {
@@ -779,12 +1031,14 @@ watch(() => props.resourceId, async (nextResourceId, previousResourceId) => {
     return
   }
 
-  await finalizePlaybackSession(normalizedPreviousResourceId)
+  await finalizePlaybackSession(normalizedPreviousResourceId, String(currentTrack.value?.path ?? ''))
 })
 
-watch(() => [props.title, props.coverSrc, props.playlist] as const, ([nextTitle, nextCoverSrc, nextPlaylist]) => {
+watch(() => [props.title, props.artist, props.displayMode, props.coverSrc, props.playlist] as const, ([nextTitle, nextArtist, nextDisplayMode, nextCoverSrc, nextPlaylist]) => {
   setAudioPlayerSession({
     title: nextTitle,
+    artist: nextArtist,
+    displayMode: nextDisplayMode,
     coverSrc: nextCoverSrc,
     playlist: nextPlaylist
   })
@@ -795,7 +1049,8 @@ watch(() => [currentTrack.value, currentTime.value, duration.value, isPlaying.va
     currentTrack: track,
     currentTime: time,
     duration: totalDuration,
-    isPlaying: playing
+    isPlaying: playing,
+    playbackMode: playbackMode.value
   })
 
   if (!track?.path) {
@@ -806,12 +1061,15 @@ watch(() => [currentTrack.value, currentTime.value, duration.value, isPlaying.va
   upsertOngoingCenterItem({
     id: AUDIO_PLAYER_ONGOING_ID,
     title: '正在播放',
-    content: `${track.label}\n${props.title}`,
+    content: [miniPlayerPrimaryText.value, miniPlayerSecondaryText.value].filter(Boolean).join('\n'),
     kind: 'audio-player',
     meta: {
-      title: props.title,
-      coverSrc: props.coverSrc,
+      title: resourceTitleText.value,
+      artist: artistText.value,
+      coverSrc: currentCoverSrc.value,
       trackLabel: track.label,
+      primaryText: miniPlayerPrimaryText.value,
+      secondaryText: miniPlayerSecondaryText.value,
       currentTime: time,
       duration: totalDuration,
       isPlaying: playing
@@ -823,6 +1081,12 @@ watch(() => [currentTrack.value, currentTime.value, duration.value, isPlaying.va
   })
 }, { immediate: true })
 
+watch(playbackMode, (mode) => {
+  setAudioPlayerPlaybackState({
+    playbackMode: mode
+  })
+})
+
 watch(volume, (nextVolume) => {
   if (audioRef.value) {
     audioRef.value.volume = Math.max(0, Math.min(1, nextVolume / 100))
@@ -833,6 +1097,48 @@ watch(currentTrack, (track) => {
   if (!track) {
     subtitleCueList.value = []
   }
+  lyricLineRefs.value = []
+})
+
+watch(() => [currentTrack.value?.coverSrc, currentTrack.value?.coverPath, props.coverSrc] as const, async ([trackCoverSrc, trackCoverPath, fallbackCoverSrc]) => {
+  currentCoverPreviewSrc.value = await resolveCoverPreviewSource(
+    String(trackCoverSrc ?? '').trim()
+    || String(trackCoverPath ?? '').trim()
+    || String(fallbackCoverSrc ?? '').trim()
+  )
+}, { immediate: true })
+
+watch(currentCoverPreviewSrc, (nextCoverSrc) => {
+  setAudioPlayerPlaybackState({
+    coverSrc: nextCoverSrc
+  })
+}, { immediate: true })
+
+watch(activeSubtitleIndex, async (nextIndex, previousIndex) => {
+  if (!isMusicDisplayMode.value || nextIndex < 0 || nextIndex === previousIndex) {
+    return
+  }
+
+  await nextTick()
+  scrollToActiveLyric(isPlaying.value ? 'smooth' : 'auto')
+})
+
+watch(() => subtitleCueList.value.length, async (length) => {
+  if (!isMusicDisplayMode.value || length <= 0) {
+    return
+  }
+
+  await nextTick()
+  scrollToActiveLyric('auto')
+})
+
+watch(() => props.show, async (visible) => {
+  if (!visible || !isMusicDisplayMode.value) {
+    return
+  }
+
+  await nextTick()
+  scrollToActiveLyric('auto')
 })
 
 onMounted(() => {
@@ -841,6 +1147,7 @@ onMounted(() => {
     playPause: () => togglePlayback(),
     previous: goPrevious,
     next: goNext,
+    cyclePlaybackMode,
     stop: stopPlayback,
     seek: handleSeek,
     reopen: () => {
@@ -854,12 +1161,16 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
   void persistPlaybackProgress()
   audioRef.value?.pause()
-  if (playbackSessionActive.value && String(props.resourceId ?? '').trim()) {
-    void window.api.service.stopAsmrPlayback(String(props.resourceId ?? ''))
+  if (playbackSessionActive.value && currentResourceId.value) {
+    void window.api.service.stopAsmrPlayback(currentResourceId.value)
   }
   clearAudioPlayerControls()
   removeOngoingCenterItem(AUDIO_PLAYER_ONGOING_ID)
   revokeAllAudioObjectUrls()
+  if (lyricScrollPreviewTimer) {
+    clearTimeout(lyricScrollPreviewTimer)
+    lyricScrollPreviewTimer = null
+  }
 })
 </script>
 
@@ -894,24 +1205,62 @@ onBeforeUnmount(() => {
 
       <div class="audio-player__layout">
         <div class="audio-player__main">
-          <div class="audio-player__cover-panel">
-            <div class="audio-player__cover-shell">
-              <img v-if="coverSrc" :src="coverSrc" alt="专辑封面" class="audio-player__cover-image" />
-              <div v-else class="audio-player__cover-placeholder">NO COVER</div>
+          <div
+            class="audio-player__hero"
+            :class="{ 'audio-player__hero--music': isMusicDisplayMode }"
+          >
+            <div class="audio-player__cover-panel" :class="{ 'audio-player__cover-panel--music': isMusicDisplayMode }">
+              <div class="audio-player__cover-shell">
+                <img v-if="currentCoverSrc" :src="currentCoverSrc" alt="专辑封面" class="audio-player__cover-image" />
+                <div v-else class="audio-player__cover-placeholder">NO COVER</div>
+              </div>
+              <div class="audio-player__title">{{ fullPlayerPrimaryText }}</div>
+              <div class="audio-player__meta">{{ fullPlayerSecondaryText }}</div>
             </div>
-            <div class="audio-player__title">{{ currentTrack?.label || title }}</div>
-            <div class="audio-player__meta">{{ title }}</div>
-          </div>
 
-          <div class="audio-player__subtitle-stage">
-            <div v-if="currentSubtitleText" class="audio-player__subtitle">
-              <span>{{ currentSubtitleText }}</span>
+            <div
+              v-if="isMusicDisplayMode"
+              class="audio-player__lyrics-panel"
+              :class="{ 'audio-player__lyrics-panel--previewing': isLyricScrollPreviewing }"
+            >
+              <div class="audio-player__lyrics-backdrop"></div>
+              <div class="audio-player__lyrics-header">歌词</div>
+              <div class="audio-player__lyrics-scroll" @wheel.passive="previewLyricsWhileScrolling">
+                <div v-if="subtitleCueList.length" class="audio-player__lyrics-list">
+                  <div
+                    v-for="(cue, index) in subtitleCueList"
+                    :key="`${cue.start}-${index}`"
+                    class="audio-player__lyric-line"
+                    :class="{ 'audio-player__lyric-line--active': index === activeSubtitleIndex }"
+                    :ref="(element) => setLyricLineRef(element, index)"
+                    :style="getLyricLineStyle(index)"
+                    @click="handleLyricJump(cue)"
+                  >
+                    {{ cue.text }}
+                  </div>
+                </div>
+                <div
+                  v-else-if="subtitleLoadState === 'loading'"
+                  class="audio-player__lyrics-empty"
+                >
+                  正在读取歌词
+                </div>
+                <div v-else class="audio-player__lyrics-empty">
+                  暂无歌词
+                </div>
+              </div>
             </div>
-            <div v-else-if="subtitleLoadState === 'loading'" class="audio-player__subtitle audio-player__subtitle--muted">
-              正在读取字幕
-            </div>
-            <div v-else class="audio-player__subtitle audio-player__subtitle--muted">
-              暂无字幕
+
+            <div v-else class="audio-player__subtitle-stage">
+              <div v-if="currentSubtitleText" class="audio-player__subtitle">
+                <span>{{ currentSubtitleText }}</span>
+              </div>
+              <div v-else-if="subtitleLoadState === 'loading'" class="audio-player__subtitle audio-player__subtitle--muted">
+                正在读取字幕
+              </div>
+              <div v-else class="audio-player__subtitle audio-player__subtitle--muted">
+                暂无字幕
+              </div>
             </div>
           </div>
 
@@ -930,6 +1279,16 @@ onBeforeUnmount(() => {
 
             <div class="audio-player__control-row">
               <div class="audio-player__control-group">
+                <n-tooltip v-if="isMusicDisplayMode" trigger="hover">
+                  <template #trigger>
+                    <n-button circle secondary @click="cyclePlaybackMode">
+                      <template #icon>
+                        <n-icon :component="playbackModeIcon" />
+                      </template>
+                    </n-button>
+                  </template>
+                  {{ playbackModeLabel }}
+                </n-tooltip>
                 <n-button circle secondary @click="goPrevious">
                   <template #icon>
                     <n-icon :component="ChevronBackOutline" />
@@ -976,7 +1335,7 @@ onBeforeUnmount(() => {
                   <div class="audio-player__track-name">{{ track.label }}</div>
                   <div class="audio-player__track-meta">
                     <div class="audio-player__track-directory">{{ getTrackDirectoryLabel(track.path) }}</div>
-                    <span v-if="track.hasSubtitle" class="audio-player__subtitle-badge">字幕</span>
+                    <span v-if="track.hasSubtitle" class="audio-player__subtitle-badge">{{ isMusicDisplayMode ? '歌词' : '字幕' }}</span>
                   </div>
                 </div>
                 <div class="audio-player__track-duration">{{ formatTime(track.duration) }}</div>
@@ -1071,12 +1430,32 @@ onBeforeUnmount(() => {
     rgb(20, 22, 26);
 }
 
+.audio-player__hero {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.audio-player__hero--music {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.1fr);
+  gap: 32px;
+  align-items: stretch;
+  padding: 4px 0 20px;
+}
+
 .audio-player__cover-panel {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 12px;
   flex: 0 0 auto;
+}
+
+.audio-player__cover-panel--music {
+  justify-content: center;
+  min-width: 0;
 }
 
 .audio-player__cover-shell {
@@ -1117,6 +1496,109 @@ onBeforeUnmount(() => {
 .audio-player__meta {
   font-size: 13px;
   color: rgba(255, 255, 255, 0.58);
+}
+
+.audio-player__lyrics-panel {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 30px 0 26px 40px;
+  overflow: hidden;
+}
+
+.audio-player__lyrics-backdrop {
+  position: absolute;
+  inset: 0 0 0 18px;
+  border-radius: 28px;
+  background:
+    linear-gradient(180deg, rgba(19, 22, 28, 0.94) 0%, rgba(19, 22, 28, 0.7) 14%, rgba(19, 22, 28, 0.14) 44%, rgba(19, 22, 28, 0.08) 56%, rgba(19, 22, 28, 0.7) 86%, rgba(19, 22, 28, 0.94) 100%),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015));
+  pointer-events: none;
+  z-index: 0;
+  transition: opacity 0.32s ease;
+}
+
+.audio-player__lyrics-panel--previewing .audio-player__lyrics-backdrop {
+  opacity: 0.01;
+}
+
+.audio-player__lyrics-header {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.audio-player__lyrics-scroll {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18vh 26px 18vh 14px;
+  scrollbar-width: none;
+  scroll-behavior: smooth;
+}
+
+.audio-player__lyrics-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.audio-player__lyrics-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 14px 0 8px;
+}
+
+.audio-player__lyric-line {
+  transform-origin: center center;
+  color: rgba(255, 255, 255, 0.3);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: pointer;
+  transition:
+    color 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.52s cubic-bezier(0.22, 1, 0.36, 1),
+    filter 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+    text-shadow 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+  opacity: 0.86;
+  filter: blur(0.15px);
+}
+
+.audio-player__lyric-line:hover {
+  text-shadow: 0 8px 18px rgba(0, 0, 0, 0.2);
+}
+
+.audio-player__lyric-line--active {
+  color: rgba(255, 255, 255, 0.98);
+  opacity: 1;
+  transform: scale(1.035);
+  filter: none;
+  text-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+}
+
+.audio-player__lyrics-empty {
+  position: relative;
+  z-index: 1;
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: rgba(255, 255, 255, 0.44);
+  font-size: 15px;
 }
 
 .audio-player__subtitle-stage {
@@ -1312,6 +1794,25 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 
+  .audio-player__hero--music {
+    grid-template-columns: 1fr;
+    gap: 20px;
+    padding-bottom: 12px;
+  }
+
+  .audio-player__lyrics-panel {
+    padding: 18px 0 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .audio-player__lyrics-backdrop {
+    inset: 12px 0 0;
+  }
+
+  .audio-player__lyrics-scroll {
+    padding: 11vh 14px 11vh 10px;
+  }
+
   .audio-player__playlist {
     border-left: none;
     border-top: 1px solid rgba(255, 255, 255, 0.08);
@@ -1324,6 +1825,10 @@ onBeforeUnmount(() => {
 
   .audio-player__subtitle {
     font-size: 18px;
+  }
+
+  .audio-player__lyric-line {
+    font-size: 16px;
   }
 
   .audio-player__control-row {

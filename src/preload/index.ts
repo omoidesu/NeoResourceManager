@@ -18,6 +18,7 @@ const api = {
     // resource
     getResourceByCategoryId: (categoryId: string, query?: any) => ipcRenderer.invoke('db:get-resource-by-category-id', categoryId, query),
     getAuthorByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-author-by-category-id', categoryId),
+    getAlbumByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-album-by-category-id', categoryId),
     getEngineByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-engine-by-category-id', categoryId),
     getMissingResourceCountByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-missing-resource-count-by-category-id', categoryId),
     getFavoriteResourceCountByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-favorite-resource-count-by-category-id', categoryId),
@@ -65,20 +66,27 @@ const api = {
   service: {
     saveResource: (resourceForm: ResourceForm) => ipcRenderer.invoke('service:save-resource', resourceForm),
     getResourceDetail: (resourceId: string) => ipcRenderer.invoke('service:get-resource-detail', resourceId),
-    updateResource: (resourceId: string, resourceForm: ResourceForm) =>
-      ipcRenderer.invoke('service:update-resource', resourceId, resourceForm),
+    updateResource: (resourceId: string, resourceForm: ResourceForm, options?: { silent?: boolean }) =>
+      ipcRenderer.invoke('service:update-resource', resourceId, resourceForm, options),
     checkResourceExistsByPath: (basePath: string) => ipcRenderer.invoke('service:check-resource-exists-by-path', basePath),
     analyzeGamePath: (basePath: string) => ipcRenderer.invoke('service:analyze-game-path', basePath),
+    analyzeAudioFilePath: (basePath: string) => ipcRenderer.invoke('service:analyze-audio-file-path', basePath),
+    fetchAudioAlbumCover: (payload: any) => ipcRenderer.invoke('service:fetch-audio-album-cover', payload),
+    fetchAudioLyrics: (payload: any) => ipcRenderer.invoke('service:fetch-audio-lyrics', payload),
     detectGameEngine: (basePath: string, resourceId?: string | null) => ipcRenderer.invoke('service:detect-game-engine', basePath, resourceId),
     detectGameLaunchFile: (basePath: string) => ipcRenderer.invoke('service:detect-game-launch-file', basePath),
     analyzeGameDirectory: (directoryPath: string, launchFilePath?: string | null) =>
       ipcRenderer.invoke('service:analyze-game-directory', directoryPath, launchFilePath),
     analyzeMultiImageDirectory: (directoryPath: string) =>
       ipcRenderer.invoke('service:analyze-multi-image-directory', directoryPath),
+    analyzeAsmrDirectory: (directoryPath: string) =>
+      ipcRenderer.invoke('service:analyze-asmr-directory', directoryPath),
     importBatchGameDirectories: (categoryId: string, items: any[]) =>
       ipcRenderer.invoke('service:import-batch-game-directories', categoryId, items),
     importBatchMultiImageDirectories: (categoryId: string, items: any[]) =>
       ipcRenderer.invoke('service:import-batch-multi-image-directories', categoryId, items),
+    importBatchAsmrDirectories: (categoryId: string, items: any[]) =>
+      ipcRenderer.invoke('service:import-batch-asmr-directories', categoryId, items),
     fetchResourceInfo: (websiteId: string, resourceId: string) =>
       ipcRenderer.invoke('service:fetch-resource-info', websiteId, resourceId),
     captureCoverScreenshot: (basePath: string) =>

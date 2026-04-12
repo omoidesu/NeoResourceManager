@@ -57,6 +57,20 @@
       "when": 1775623200000,
       "tag": "0007_add_asmr_playback_progress",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1775709600000,
+      "tag": "0008_add_audio_meta",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1775721600000,
+      "tag": "0009_add_audio_meta_lyrics_path",
+      "breakpoints": true
     }
   ]
 }

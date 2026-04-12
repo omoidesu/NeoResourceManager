@@ -102,6 +102,15 @@ export const asmrMeta = sqliteTable('asmr_meta', {
   language: text('language'),
 });
 
+export const audioMeta = sqliteTable('audio_meta', {
+  resourceId: text('resource_id').primaryKey().references(() => resource.id),
+  artist: text('artist'),
+  album: text('album'),
+  lyricsPath: text('lyrics_path'),
+  duration: integer('duration'),
+  lastPlayTime: integer('last_play_time').default(0),
+});
+
 export const novelMeta = sqliteTable('novel_meta', {
   resourceId: text('resource_id').primaryKey().references(() => resource.id),
   translator: text('translator'),
@@ -223,6 +232,7 @@ export const resourceRelations = relations(resource, ({one, many}) => ({
   multiImageMeta: one(multiImageMeta, {fields: [resource.id], references: [multiImageMeta.resourceId]}),
   videoMeta: one(videoMeta, {fields: [resource.id], references: [videoMeta.resourceId]}),
   asmrMeta: one(asmrMeta, {fields: [resource.id], references: [asmrMeta.resourceId]}),
+  audioMeta: one(audioMeta, {fields: [resource.id], references: [audioMeta.resourceId]}),
   // 列表关联
   actors: many(actor),
   authors: many(authorWork),
