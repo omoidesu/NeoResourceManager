@@ -15,6 +15,7 @@ import axios from 'axios'
 import { WindowScreenshotService } from './window-screenshot.service'
 import { detectGameEngineProfile } from '../util/game-engine-detector'
 import { detectGameLaunchFile } from '../util/game-launch-file-detector'
+import { analyzeNovelFile } from '../util/novel-file-analyzer'
 import { parseFile } from 'music-metadata'
 
 const fs = require('fs-extra')
@@ -917,6 +918,48 @@ export class ResourceService {
     }
   }
 
+  static async getNovelReadingProgress(resourceId: string) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    if (!normalizedResourceId) {
+      return {
+        type: 'warning',
+        message: '资源ID无效',
+        data: {
+          lastReadPercent: 0,
+        }
+      }
+    }
+
+    const lastReadPercent = await DatabaseService.getNovelReadingProgress(normalizedResourceId)
+    return {
+      type: 'success',
+      message: '获取阅读进度成功',
+      data: {
+        lastReadPercent: Math.max(0, Math.min(1, Number(lastReadPercent ?? 0)))
+      }
+    }
+  }
+
+  static async updateNovelReadingProgress(resourceId: string, lastReadPercent: number) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    if (!normalizedResourceId) {
+      return {
+        type: 'warning',
+        message: '资源ID无效',
+      }
+    }
+
+    DatabaseService.upsertNovelReadingProgress(
+      normalizedResourceId,
+      Math.max(0, Math.min(1, Number(lastReadPercent ?? 0)))
+    )
+
+    return {
+      type: 'success',
+      message: '阅读进度已保存',
+    }
+  }
+
   static async updateAsmrPlaybackProgress(resourceId: string, lastPlayFile: string, lastPlayTime: number) {
     const normalizedResourceId = String(resourceId ?? '').trim()
     const normalizedLastPlayFile = String(lastPlayFile ?? '').trim()
@@ -1412,6 +1455,43 @@ export class ResourceService {
     }
   }
 
+  static async analyzeNovelFilePath(basePath: string) {
+    const normalizedBasePath = path.normalize(String(basePath ?? '').trim())
+    if (!normalizedBasePath) {
+      return {
+        type: 'warning',
+        message: '文件路径不能为空',
+        data: {
+          isbn: '',
+          coverDataUrl: ''
+        }
+      }
+    }
+
+    try {
+      const analysis = await analyzeNovelFile(normalizedBasePath)
+      const hasResult = Boolean(String(analysis.isbn ?? '').trim() || String(analysis.coverDataUrl ?? '').trim())
+      return {
+        type: hasResult ? 'success' : 'warning',
+        message: hasResult ? '已分析小说文件' : '未读取到可用的小说元数据',
+        data: analysis
+      }
+    } catch (error) {
+      ResourceService.logger.warn('analyzeNovelFilePath failed', {
+        basePath: normalizedBasePath,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return {
+        type: 'warning',
+        message: error instanceof Error ? error.message : '分析小说文件失败',
+        data: {
+          isbn: '',
+          coverDataUrl: ''
+        }
+      }
+    }
+  }
+
   static async fetchAudioAlbumCover(input: {
     title?: string
     album?: string
@@ -1784,7 +1864,7 @@ export class ResourceService {
         fileName: pathDealResult.fileName,
         size: normalizedMeta.resourceSize,
       }
-      const authorPayload = await buildAuthorPayload(resourceId, resourceForm)
+      const authorPayload = await buildAuthorPayload(resourceId, resourceForm, categoryInfo)
 
       // 标签与关联表 newTags tagRefs
       const dbTagMap: Map<string, any> = new Map()
@@ -2455,7 +2535,7 @@ export class ResourceService {
         missingStatus: false,
       }
 
-      const authorPayload = await buildAuthorPayload(normalizedResourceId, resourceForm)
+      const authorPayload = await buildAuthorPayload(normalizedResourceId, resourceForm, categoryInfo)
       const actorPayload = buildActorPayload(normalizedResourceId, resourceForm)
       const tagPayload = await buildTagPayload(normalizedResourceId, resourceForm)
       const typePayload = await buildTypePayload(normalizedResourceId, resourceForm)
@@ -2597,6 +2677,10 @@ export class ResourceService {
 function hasUsefulFetchedData(data: Partial<{
   name: string
   author: string
+  description: string
+  isbn: string
+  publisher: string
+  year: number | null
   cover: string
   tag: string[]
   type: string[]
@@ -2608,6 +2692,10 @@ function hasUsefulFetchedData(data: Partial<{
   return Boolean(
     String(data.name ?? '').trim()
     || String(data.author ?? '').trim()
+    || String(data.description ?? '').trim()
+    || String(data.isbn ?? '').trim()
+    || String(data.publisher ?? '').trim()
+    || Number.isFinite(Number(data.year))
     || String(data.cover ?? '').trim()
     || (Array.isArray(data.tag) && data.tag.length)
     || (Array.isArray(data.type) && data.type.length)
@@ -2643,8 +2731,8 @@ function getWebsiteLabelByGameId(gameId: string) {
   return ''
 }
 
-async function buildAuthorPayload(resourceId: string, resourceForm: ResourceForm) {
-  const authorNames = normalizeAuthorNames(resourceForm)
+async function buildAuthorPayload(resourceId: string, resourceForm: ResourceForm, categoryInfo?: any) {
+  const authorNames = normalizeAuthorNames(resourceForm, categoryInfo)
   const newAuthors: Array<{ id: string; name: string }> = []
   const authorRefs: Array<{ authorId: string; resourceId: string; categoryId: string }> = []
 
@@ -3099,6 +3187,24 @@ async function dealCover(coverPath: string, resourceId: string): Promise<string>
   const normalizedTargetPath = path.normalize(path.resolve(targetPath))
 
   const normalizedCoverPath = normalizeRemoteCoverPath(coverPath)
+  const dataUrlMatch = normalizedCoverPath.match(/^data:([^;,]+)?;base64,(.+)$/i)
+  if (dataUrlMatch) {
+    try {
+      await sharp(Buffer.from(dataUrlMatch[2], 'base64'))
+        .resize({width: 560, fit: 'contain', background: {r: 0, g: 0, b: 0, alpha: 0}})
+        .webp()
+        .toFile(targetPath)
+
+      return targetPath
+    } catch (error) {
+      ResourceService.logger.warn('dealCover skipped invalid data url cover', {
+        resourceId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return ''
+    }
+  }
+
   if (!isRemoteCoverPath(normalizedCoverPath)) {
     const normalizedInputPath = path.normalize(path.resolve(normalizedCoverPath))
     if (normalizedInputPath.toLowerCase() === normalizedTargetPath.toLowerCase()) {
@@ -3380,11 +3486,16 @@ async function readSingleAudioFileInfo(filePath: string) {
   }
 }
 
-function normalizeAuthorNames(resourceForm: ResourceForm) {
-  return normalizeArtistNameList([
-    ...(Array.isArray(resourceForm.authors) ? resourceForm.authors : []),
-    String(resourceForm.author ?? '').trim()
-  ])
+function normalizeAuthorNames(resourceForm: ResourceForm, categoryInfo?: any) {
+  const includeAuthorList = getExtendTableName(categoryInfo) === 'audio_meta'
+  if (includeAuthorList) {
+    return normalizeArtistNameList([
+      ...(Array.isArray(resourceForm.authors) ? resourceForm.authors : []),
+      String(resourceForm.author ?? '').trim()
+    ])
+  }
+
+  return normalizeAuthorNameList([String(resourceForm.author ?? '').trim()])
 }
 
 function normalizeArtistNameList(values: string[]) {
@@ -3411,6 +3522,56 @@ function normalizeArtistNameList(values: string[]) {
   }
 
   return result
+}
+
+function normalizeAuthorNameList(values: string[]) {
+  return normalizeNameList(values, splitAuthorText)
+}
+
+function normalizeNameList(values: string[], splitter: (value: string) => string[]) {
+  const result: string[] = []
+  const seen = new Set<string>()
+
+  for (const value of values ?? []) {
+    const rawText = String(value ?? '').trim()
+    if (!rawText) {
+      continue
+    }
+
+    for (const splitValue of splitter(rawText)) {
+      const normalizedValue = normalizeAudioTagText(splitValue).trim()
+      const normalizedKey = normalizedValue.toLowerCase()
+      if (!normalizedValue || seen.has(normalizedKey)) {
+        continue
+      }
+
+      seen.add(normalizedKey)
+      result.push(normalizedValue)
+    }
+  }
+
+  return result
+}
+
+function splitAuthorText(input: string) {
+  const normalizedInput = String(input ?? '').trim()
+  if (!normalizedInput) {
+    return []
+  }
+
+  const protectedParts: string[] = []
+  const placeholderPrefix = '\uE000AUTHOR_PART_'
+  const protectedInput = normalizedInput.replace(/(\([^)]*\)|（[^）]*）|\[[^\]]*\]|【[^】]*】)/g, (part) => {
+    const placeholder = `${placeholderPrefix}${protectedParts.length}\uE001`
+    protectedParts.push(part)
+    return placeholder
+  })
+
+  return protectedInput
+    .split(/\s*(?:，|、|；|;|\|)\s*/)
+    .map((item) => item.replace(new RegExp(`${placeholderPrefix}(\\d+)\\uE001`, 'g'), (_match, index) => protectedParts[Number(index)] ?? ''))
+    .map((item) => item.trim())
+    .filter(Boolean)
 }
 
 function splitArtistText(input: string) {
@@ -3821,6 +3982,10 @@ function syncMeta(tx: any, categoryInfo: any, resourceId: string, meta: Resource
     case 'novel_meta':
       DatabaseService.upsertNovelMeta({
         resourceId,
+        translator: String(meta.translator ?? '').trim() || null,
+        isbn: String(meta.isbn ?? '').trim() || null,
+        publisher: String(meta.publisher ?? '').trim() || null,
+        year: String(meta.year ?? '').trim() && Number.isFinite(Number(meta.year)) ? Math.floor(Number(meta.year)) : null,
       }, tx)
       return
     case 'website_meta':

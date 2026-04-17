@@ -1,4 +1,4 @@
-export const createEmptyMetaByType = (extendTable: string) => {
+export const createEmptyMetaByType = (extendTable: string): Record<string, unknown> => {
   switch (String(extendTable ?? '').trim()) {
     case 'game_meta':
       return {
@@ -53,6 +53,14 @@ export const createEmptyMetaByType = (extendTable: string) => {
         websiteType: '',
         gameId: '',
         website: ''
+      }
+    case 'novel_meta':
+      return {
+        translator: '',
+        isbn: '',
+        year: null,
+        publisher: '',
+        lastReadPercent: 0
       }
     default:
       return {}

@@ -9,6 +9,7 @@ import { FetchInfo } from './fetchInfo'
 type PluginLifecycleHook = () => Promise<void> | void
 export type ExternalFetchPluginContext = {
   requestJson: <T = unknown>(url: string, options?: { timeoutMs?: number }) => Promise<T>
+  requestText: (url: string, options?: { timeoutMs?: number; headers?: Record<string, string> }) => Promise<string>
   logger: {
     debug: (message: string, payload?: unknown) => void
     info: (message: string, payload?: unknown) => void
@@ -47,6 +48,9 @@ export class PluginLoader {
   constructor(
     private readonly contextProvider: () => Promise<ExternalFetchPluginContext> = async () => ({
       requestJson: async () => {
+        throw new Error('插件上下文尚未初始化')
+      },
+      requestText: async () => {
         throw new Error('插件上下文尚未初始化')
       },
       logger: createPluginLogger(createLogger('plugin:context'))
@@ -166,10 +170,14 @@ export class PluginLoader {
 
         result.name = data.name ?? ''
         result.author = data.author ?? ''
+        result.description = data.description ?? ''
         result.cv = data.cv ?? ''
         result.illust = data.illust ?? ''
         result.scenario = data.scenario ?? ''
         result.translator = data.translator ?? ''
+        result.isbn = data.isbn ?? ''
+        result.publisher = data.publisher ?? ''
+        result.year = data.year ?? null
         result.cover = data.cover ?? ''
         result.website = data.website ?? ''
         result.tag = Array.isArray(data.tag) ? Array.from(new Set(data.tag.filter(Boolean))) : []

@@ -33,7 +33,12 @@ export abstract class FetchInfo {
   }
 
   public match(websiteId: string) {
-    return this.websiteIds.includes(websiteId)
+    const normalizedWebsiteId = String(websiteId ?? '').trim().toLowerCase()
+    return (
+      this.websiteIds.includes(websiteId) ||
+      normalizedWebsiteId === String(this.websiteName ?? '').trim().toLowerCase() ||
+      normalizedWebsiteId === String(this.websiteValue ?? '').trim().toLowerCase()
+    )
   }
 
   public async fetch(resourceId: string) {
@@ -81,7 +86,8 @@ export abstract class FetchInfo {
       { name: DictType.GAME_SITE_TYPE, description: '贩售网站' },
       { name: DictType.ASMR_SITE_TYPE, description: '音声网站' },
       { name: DictType.IMAGE_SITE_TYPE, description: '图片网站' },
-      { name: DictType.MANGA_SITE_TYPE, description: '漫画网站' }
+      { name: DictType.MANGA_SITE_TYPE, description: '漫画网站' },
+      { name: DictType.NOVEL_SITE_TYPE, description: '小说网站' }
     ]
 
     const prioritizedTypeDefinitions = this.websiteTypeName

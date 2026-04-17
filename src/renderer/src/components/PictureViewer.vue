@@ -691,8 +691,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 :global(.n-card.n-modal.picture-viewer) {
-  width: 80vw !important;
-  max-width: 80vw;
+  width: 94vw !important;
+  max-width: 1440px;
   border-radius: 15px;
 }
 
@@ -703,7 +703,7 @@ onBeforeUnmount(() => {
 
 .picture-viewer :deep(.n-card__content) {
   padding: 0;
-  width: 80vw;
+  width: 100%;
 }
 
 .picture-viewer__shell {

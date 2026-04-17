@@ -223,6 +223,10 @@ function registerService() {
     return ResourceService.analyzeAudioFilePath(basePath)
   })
 
+  ipcMain.handle('service:analyze-novel-file-path', async (_event, basePath: string) => {
+    return ResourceService.analyzeNovelFilePath(basePath)
+  })
+
   ipcMain.handle('service:fetch-audio-album-cover', async (_event, payload: any) => {
     ipcLogger.info('service:fetch-audio-album-cover', {
       title: String(payload?.title ?? '').trim(),
@@ -297,6 +301,14 @@ function registerService() {
 
   ipcMain.handle('service:update-multi-image-reading-progress', async (_event, resourceId: string, lastReadPage: number) => {
     return ResourceService.updateMultiImageReadingProgress(resourceId, lastReadPage)
+  })
+
+  ipcMain.handle('service:get-novel-reading-progress', async (_event, resourceId: string) => {
+    return ResourceService.getNovelReadingProgress(resourceId)
+  })
+
+  ipcMain.handle('service:update-novel-reading-progress', async (_event, resourceId: string, lastReadPercent: number) => {
+    return ResourceService.updateNovelReadingProgress(resourceId, lastReadPercent)
   })
 
   ipcMain.handle('service:update-asmr-playback-progress', async (_event, resourceId: string, lastPlayFile: string, lastPlayTime: number) => {

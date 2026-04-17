@@ -125,6 +125,7 @@ export const DictType = {
     ASMR_SITE_TYPE: 'asmrSiteType',
     IMAGE_SITE_TYPE: 'imageSiteType',
     MANGA_SITE_TYPE: 'mangaSiteType',
+    NOVEL_SITE_TYPE: 'novelSiteType',
 } as const;
 export const PanicMode = {
   OPEN_URL: 'openUrl',

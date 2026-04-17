@@ -114,8 +114,10 @@ export const audioMeta = sqliteTable('audio_meta', {
 export const novelMeta = sqliteTable('novel_meta', {
   resourceId: text('resource_id').primaryKey().references(() => resource.id),
   translator: text('translator'),
+  isbn: text('isbn'),
   publisher: text('publisher'),
-  year: integer('year').default(-1)
+  year: integer('year').default(-1),
+  lastReadPercent: real('last_read_percent').default(0)
 });
 
 export const websiteMeta = sqliteTable('website_meta', {
@@ -233,6 +235,7 @@ export const resourceRelations = relations(resource, ({one, many}) => ({
   videoMeta: one(videoMeta, {fields: [resource.id], references: [videoMeta.resourceId]}),
   asmrMeta: one(asmrMeta, {fields: [resource.id], references: [asmrMeta.resourceId]}),
   audioMeta: one(audioMeta, {fields: [resource.id], references: [audioMeta.resourceId]}),
+  novelMeta: one(novelMeta, {fields: [resource.id], references: [novelMeta.resourceId]}),
   // 列表关联
   actors: many(actor),
   authors: many(authorWork),

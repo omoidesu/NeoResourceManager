@@ -1364,8 +1364,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 :global(.n-card.n-modal.audio-player) {
-  width: 84vw !important;
-  max-width: 84vw;
+  width: 94vw !important;
+  max-width: 1440px;
   border-radius: 18px;
 }
 
@@ -1375,7 +1375,7 @@ onBeforeUnmount(() => {
 }
 
 .audio-player :deep(.n-card__content) {
-  width: 84vw;
+  width: 100%;
   padding: 0;
   color: rgba(255, 255, 255, 0.92);
 }
@@ -1778,12 +1778,12 @@ onBeforeUnmount(() => {
 
 @media (max-width: 960px) {
   :global(.n-card.n-modal.audio-player) {
-    width: calc(100vw - 20px) !important;
-    max-width: calc(100vw - 20px);
+    width: 94vw !important;
+    max-width: 94vw;
   }
 
   .audio-player :deep(.n-card__content) {
-    width: calc(100vw - 20px);
+    width: 100%;
   }
 
   .audio-player__shell {

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { Icon, addCollection } from '@iconify/vue'
+import materialSymbolsLightIcons from '@iconify-json/material-symbols-light/icons.json'
 import { NIcon } from 'naive-ui'
 import {
   CheckmarkCircleOutline,
@@ -12,10 +14,15 @@ import {
   AlertCircleOutline,
   CheckmarkDoneOutline,
   SquareOutline,
+  BookOutline,
+  DocumentTextOutline,
   Play,
+  ReaderOutline,
   Stop,
   TrashOutline
 } from '@vicons/ionicons5'
+
+addCollection(materialSymbolsLightIcons)
 
 const props = defineProps<{
   resource: any
@@ -201,9 +208,41 @@ const displayBaseName = computed(() => {
   return normalizedPath.split('/').pop() ?? normalizedPath
 })
 
+const fileExtension = computed(() => {
+  const fileName = displayBaseName.value
+  const matched = fileName.match(/\.([^.\\/]+)$/)
+  return String(matched?.[1] ?? '').trim().toLowerCase()
+})
+
+const isNovelCategory = computed(() => String(props.categoryName ?? '').trim() === '小说')
+
 const showFileTypeIcon = computed(() => {
   const normalizedCategoryName = String(props.categoryName ?? '').trim()
-  return normalizedCategoryName === '游戏' || normalizedCategoryName === '软件'
+  return normalizedCategoryName === '游戏' || normalizedCategoryName === '软件' || (isNovelCategory.value && Boolean(fileExtension.value))
+})
+
+const showNovelFileIcon = computed(() => isNovelCategory.value && Boolean(fileExtension.value))
+const showNovelMarkdownIcon = computed(() => ['md', 'markdown'].includes(fileExtension.value))
+const novelFileIcon = computed(() => {
+  if (fileExtension.value === 'txt') return ReaderOutline
+  if (fileExtension.value === 'pdf') return DocumentTextOutline
+  return BookOutline
+})
+const novelFileIconTitle = computed(() => `${fileExtension.value.toUpperCase()} 文件`)
+
+const novelPublishInfo = computed(() => {
+  if (!isNovelCategory.value) {
+    return ''
+  }
+
+  const rawYear = Number(props.resource?.novelMeta?.year ?? 0)
+  const year = Number.isFinite(rawYear) && rawYear >= 1000 ? String(Math.trunc(rawYear)) : ''
+  if (!year) {
+    return ''
+  }
+
+  const publisher = String(props.resource?.novelMeta?.publisher ?? '').trim()
+  return [year, publisher].filter(Boolean).join(' / ')
 })
 
 const fallbackExecutableIcon = computed(() => {
@@ -452,15 +491,15 @@ watch(
 )
 
 watch(
-  () => [props.resource?.basePath, props.resource?.fileName ?? props.resource?.filename ?? ''],
+  () => [props.resource?.basePath, props.resource?.fileName ?? props.resource?.filename ?? '', showNovelFileIcon.value],
   async ([basePath, fileName]) => {
-    if (!showFileTypeIcon.value || !basePath) {
+    if (!showFileTypeIcon.value || showNovelFileIcon.value || !basePath) {
       fileIconSrc.value = ''
       return
     }
 
     try {
-      fileIconSrc.value = (await window.api.dialog.getFileIconAsDataUrl(basePath, fileName)) ?? ''
+      fileIconSrc.value = (await window.api.dialog.getFileIconAsDataUrl(String(basePath), String(fileName ?? ''))) ?? ''
     } catch {
       fileIconSrc.value = ''
     }
@@ -560,8 +599,15 @@ onMounted(() => {
             <div class="resource-card__heading">
               <div class="resource-card__title-row">
                 <span v-if="showFileTypeIcon" class="resource-card__title-icon">
+                  <Icon
+                    v-if="showNovelMarkdownIcon"
+                    icon="material-symbols-light:markdown-outline-rounded"
+                    :title="novelFileIconTitle"
+                    class="resource-card__title-icon-svg"
+                  />
+                  <n-icon v-else-if="showNovelFileIcon" :component="novelFileIcon" :title="novelFileIconTitle" />
                   <img
-                    v-if="fileIconSrc"
+                    v-else-if="fileIconSrc"
                     :src="fileIconSrc"
                     :alt="displayBaseName || resource.title"
                     class="resource-card__title-icon-image"
@@ -631,6 +677,11 @@ onMounted(() => {
                   {{ author.name }}
                 </n-tag>
               </n-space>
+            </div>
+
+            <div v-if="novelPublishInfo" class="resource-card__meta-line">
+              <span class="resource-card__meta-label">出版</span>
+              <span class="resource-card__meta-text" :title="novelPublishInfo">{{ novelPublishInfo }}</span>
             </div>
 
             <div v-if="hideTypeLine && resourceActors.length" class="resource-card__meta-line">
@@ -905,6 +956,13 @@ onMounted(() => {
   width: 18px;
   height: 18px;
   object-fit: contain;
+  display: block;
+}
+
+.resource-card__title-icon-svg {
+  width: 18px;
+  height: 18px;
+  color: rgba(255, 255, 255, 0.72);
   display: block;
 }
 

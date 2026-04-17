@@ -71,6 +71,13 @@
       "when": 1775721600000,
       "tag": "0009_add_audio_meta_lyrics_path",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1776124800000,
+      "tag": "0010_add_novel_reading_progress",
+      "breakpoints": true
     }
   ]
 }

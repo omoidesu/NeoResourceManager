@@ -60,6 +60,14 @@ const RECONCILE_MIGRATION_RULES: ReconcileMigrationRule[] = [
     columns: [
       { name: 'lyrics_path', type: 'text' }
     ]
+  },
+  {
+    tag: '0010_add_novel_reading_progress',
+    table: 'novel_meta',
+    columns: [
+      { name: 'last_read_percent', type: 'real DEFAULT 0' },
+      { name: 'isbn', type: 'text' }
+    ]
   }
 ]
 

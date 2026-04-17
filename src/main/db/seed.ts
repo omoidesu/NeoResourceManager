@@ -270,6 +270,10 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
       id: generateId(),
       name: DictType.MANGA_SITE_TYPE,
       description: '漫画网站'
+    }, {
+      id: generateId(),
+      name: DictType.NOVEL_SITE_TYPE,
+      description: '小说网站'
     }
   ]
 
@@ -281,6 +285,7 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
     imageSite: dictTypes[4].id,
     asmrSite: dictTypes[5].id,
     mangaSite: dictTypes[6].id,
+    novelSite: dictTypes[7].id,
   }
 
   const categoryList = [
@@ -365,7 +370,7 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
       description: '小说',
       value: 'novel',
       typeId: dictTypeIds.resource,
-      extra: createCategoryExtra('novel_meta', 'file', '本', ['txt', 'epub', 'mobi', 'pdf'], '作者', '阅读')
+      extra: createCategoryExtra('novel_meta', 'file', '本', ['txt', 'epub', 'mobi', 'pdf', 'azw3', 'md'], '作者', '阅读')
     }, {
       id: generateId(),
       name: '音乐',
@@ -889,6 +894,22 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
     }
   ]
 
+  const novelSiteList = [
+    {
+      id: generateId(),
+      name: '国家图书馆',
+      description: '中国国家图书馆 ISBN 图书信息',
+      value: 'nlc-isbn',
+      typeId: dictTypeIds.novelSite,
+      extra: {
+        enableFetchInfo: true,
+        url: {
+          novel: 'http://opac.nlc.cn/F?func=find-b&find_code=ISB&request={}&local_base=NLC01'
+        }
+      }
+    }
+  ]
+
   const dictDataList = [
     ...categoryList,
     ...languageList,
@@ -897,6 +918,7 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
     ...imageSiteList,
     ...asmrSiteList,
     ...mangaSiteList,
+    ...novelSiteList,
   ]
 
   const categoryDefinitions = [

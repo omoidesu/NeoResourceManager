@@ -285,6 +285,7 @@ export class DatabaseService {
         singleImageMeta: true,
         asmrMeta: true,
         audioMeta: true,
+        novelMeta: true,
         actors: true,
         tags: {
           with: {
@@ -856,8 +857,36 @@ export class DatabaseService {
         target: novelMeta.resourceId,
         set: {
           translator: metaData.translator ?? null,
+          isbn: metaData.isbn ?? null,
           publisher: metaData.publisher ?? null,
           year: metaData.year ?? null,
+          lastReadPercent: metaData.lastReadPercent ?? undefined,
+        }
+      })
+      .run()
+  }
+
+  static async getNovelReadingProgress(resourceId: string, tx?: DbExecutor) {
+    const executor = tx ?? db
+    const item = await executor.query.novelMeta.findFirst({
+      where: eq(novelMeta.resourceId, resourceId)
+    })
+
+    return Number(item?.lastReadPercent ?? 0)
+  }
+
+  static upsertNovelReadingProgress(resourceId: string, lastReadPercent: number, tx?: DbExecutor) {
+    const executor = tx ?? db
+    executor
+      .insert(novelMeta)
+      .values({
+        resourceId,
+        lastReadPercent,
+      })
+      .onConflictDoUpdate({
+        target: novelMeta.resourceId,
+        set: {
+          lastReadPercent,
         }
       })
       .run()
@@ -1133,6 +1162,7 @@ export class DatabaseService {
           videoMeta: true,
           asmrMeta: true,
           audioMeta: true,
+          novelMeta: true,
           actors: true,
           stores: {
             with: {

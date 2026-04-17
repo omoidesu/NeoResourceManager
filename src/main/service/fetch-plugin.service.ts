@@ -76,6 +76,9 @@ export class FetchPluginService {
       requestJson: async <T = unknown>(url: string, options?: { timeoutMs?: number }) => {
         return this.requestJson<T>(url, options)
       },
+      requestText: async (url: string, options?: { timeoutMs?: number; headers?: Record<string, string> }) => {
+        return this.requestText(url, options)
+      },
       logger: {
         debug(message: string, payload?: unknown) {
           logger.debug(message, payload)
@@ -122,6 +125,42 @@ export class FetchPluginService {
       })
 
       return response.data
+    } catch (error) {
+      throw this.normalizeRequestError(error, timeoutMs)
+    }
+  }
+
+  private async requestText(url: string, options?: { timeoutMs?: number; headers?: Record<string, string> }) {
+    const timeoutMs = options?.timeoutMs ?? 20000
+    const proxy = await this.resolveProxyConfig()
+    this.logger.info('requestText start', {
+      url,
+      timeoutMs,
+      proxy: proxy ? `${proxy.protocol}://${proxy.host}:${proxy.port}` : null
+    })
+
+    try {
+      const response = await axios.get<ArrayBuffer>(url, {
+        timeout: timeoutMs,
+        responseType: 'arraybuffer',
+        headers: {
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.7',
+          'User-Agent': 'NeoResourceManager/1.0',
+          ...(options?.headers ?? {})
+        },
+        ...(proxy ? { proxy } : {})
+      })
+      const data = Buffer.from(response.data).toString('utf8')
+
+      this.logger.info('requestText success', {
+        url,
+        status: response.status,
+        contentType: response.headers['content-type'] ?? '',
+        length: data.length
+      })
+
+      return data
     } catch (error) {
       throw this.normalizeRequestError(error, timeoutMs)
     }

@@ -35,10 +35,14 @@ export class ResourceMeta {
   format!: string
   scenario: string = ''
   translator!: string
+  isbn?: string
+  publisher?: string
+  year?: number | null
   version!: string
   website!: string
   websiteType!: string
   lastReadPage: number = 0
+  lastReadPercent?: number = 0
 }
 
 export class ResourceStoreItem {
@@ -50,12 +54,16 @@ export class ResourceStoreItem {
 export class FetchResourceInfoResult {
   name!: string
   author!: string
+  description: string = ''
   cv: string = ''
   illust: string = ''
   scenario: string = ''
   lastPlayFile?: string
   lastPlayTime?: number
   translator: string = ''
+  isbn: string = ''
+  publisher: string = ''
+  year?: number | null
   cover: string = ''
   website: string = ''
   tag: string[] = []

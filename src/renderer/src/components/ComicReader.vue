@@ -870,7 +870,7 @@ onMounted(() => {
 <style scoped>
 :global(.n-card.n-modal.comic-reader) {
   width: 94vw !important;
-  max-width: 94vw;
+  max-width: 1440px;
   border-radius: 22px;
 }
 

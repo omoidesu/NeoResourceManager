@@ -30,12 +30,13 @@ import {
 } from '../utils/notification-center'
 import AudioPlayer from './AudioPlayer.vue'
 import { useAudioPlayerStore } from '../utils/audio-player-store'
+import packageJson from '../../../../package.json'
 
 const router = useRouter()
 const route = useRoute()
 const primaryColor = '#764ba2'
 const logger = createLogger('main-layout')
-const APP_VERSION = '0.3.0'
+const APP_VERSION = packageJson.version
 
 const props = defineProps<{isDark: boolean}>()
 const emit = defineEmits(['update:isDark'])

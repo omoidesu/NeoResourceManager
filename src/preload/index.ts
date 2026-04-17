@@ -71,6 +71,7 @@ const api = {
     checkResourceExistsByPath: (basePath: string) => ipcRenderer.invoke('service:check-resource-exists-by-path', basePath),
     analyzeGamePath: (basePath: string) => ipcRenderer.invoke('service:analyze-game-path', basePath),
     analyzeAudioFilePath: (basePath: string) => ipcRenderer.invoke('service:analyze-audio-file-path', basePath),
+    analyzeNovelFilePath: (basePath: string) => ipcRenderer.invoke('service:analyze-novel-file-path', basePath),
     fetchAudioAlbumCover: (payload: any) => ipcRenderer.invoke('service:fetch-audio-album-cover', payload),
     fetchAudioLyrics: (payload: any) => ipcRenderer.invoke('service:fetch-audio-lyrics', payload),
     detectGameEngine: (basePath: string, resourceId?: string | null) => ipcRenderer.invoke('service:detect-game-engine', basePath, resourceId),
@@ -99,6 +100,10 @@ const api = {
       ipcRenderer.invoke('service:get-multi-image-reading-progress', resourceId),
     updateMultiImageReadingProgress: (resourceId: string, lastReadPage: number) =>
       ipcRenderer.invoke('service:update-multi-image-reading-progress', resourceId, lastReadPage),
+    getNovelReadingProgress: (resourceId: string) =>
+      ipcRenderer.invoke('service:get-novel-reading-progress', resourceId),
+    updateNovelReadingProgress: (resourceId: string, lastReadPercent: number) =>
+      ipcRenderer.invoke('service:update-novel-reading-progress', resourceId, lastReadPercent),
       updateAsmrPlaybackProgress: (resourceId: string, lastPlayFile: string, lastPlayTime: number) =>
         ipcRenderer.invoke('service:update-asmr-playback-progress', resourceId, lastPlayFile, lastPlayTime),
       startAsmrPlayback: (resourceId: string) =>

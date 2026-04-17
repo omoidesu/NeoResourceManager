@@ -9,6 +9,10 @@ import { removeOngoingCenterItem, upsertOngoingCenterItem } from '../utils/notif
 import ResourceCard from '../components/card/ResourceCard.vue'
 import PictureViewer from '../components/PictureViewer.vue'
 import ComicReader from '../components/ComicReader.vue'
+import TextReader from '../components/TextReader.vue'
+import PdfReader from '../components/PdfReader.vue'
+import EpubReader from '../components/EpubReader.vue'
+import EbookReader from '../components/EbookReader.vue'
 import RichTextEditor from '../components/RichTextEditor.vue'
 import { createEmptyMetaByType } from '../components/meta/meta-factory'
 import { resolveMetaFormComponent } from '../components/meta/registry'
@@ -70,6 +74,10 @@ const detailDescriptionContentRef = ref<HTMLElement | null>(null)
 const detailDescriptionHeight = ref(400)
 const showPictureViewer = ref(false)
 const showComicReader = ref(false)
+const showTextReader = ref(false)
+const showPdfReader = ref(false)
+const showEpubReader = ref(false)
+const showEbookReader = ref(false)
 const pictureViewerScrollMode = ref(String(Settings.PICTURE_READ_SCROLL_MODE.default ?? 'zoom'))
 const pictureViewerImagePaths = ref<string[]>([])
 const pictureViewerInitialIndex = ref(0)
@@ -77,6 +85,22 @@ const pictureViewerAllowDelete = ref(true)
 const comicReaderImagePaths = ref<string[]>([])
 const comicReaderInitialIndex = ref(0)
 const currentComicReaderResourceId = ref('')
+const textReaderFilePath = ref('')
+const textReaderTitle = ref('')
+const textReaderInitialProgress = ref(0)
+const currentTextReaderResourceId = ref('')
+const pdfReaderFilePath = ref('')
+const pdfReaderTitle = ref('')
+const pdfReaderInitialProgress = ref(0)
+const currentPdfReaderResourceId = ref('')
+const epubReaderFilePath = ref('')
+const epubReaderTitle = ref('')
+const epubReaderInitialProgress = ref(0)
+const currentEpubReaderResourceId = ref('')
+const ebookReaderFilePath = ref('')
+const ebookReaderTitle = ref('')
+const ebookReaderInitialProgress = ref(0)
+const currentEbookReaderResourceId = ref('')
 const audioPlayerPlaylist = ref<Array<{ path: string; label: string; duration?: number | null; resourceId?: string; resourceTitle?: string; artist?: string; coverSrc?: string; hasSubtitle?: boolean; subtitlePath?: string }>>([])
 const audioPlayerDisplayMode = ref<'default' | 'music'>('default')
 const detailAudioContextMenuVisible = ref(false)
@@ -363,7 +387,7 @@ const mapResourceDetailToFormData = (resource: any) => {
     coverPath: resource?.coverPath ?? '',
     basePath: buildDisplayBasePath(resource),
     author: joinAudioAuthorNames(authorNames) || String(resource?.audioMeta?.artist ?? ''),
-    authors: authorNames,
+    authors: isAudioCategory.value ? authorNames : [],
     actors: Array.isArray(resource?.actors) ? resource.actors.map((item: any) => String(item?.name ?? '')).filter(Boolean) : [],
     tags: Array.isArray(resource?.tags) ? resource.tags.map((item: any) => String(item?.name ?? '')).filter(Boolean) : [],
     types: Array.isArray(resource?.types) ? resource.types.map((item: any) => String(item?.name ?? '')).filter(Boolean) : [],
@@ -376,6 +400,7 @@ const mapResourceDetailToFormData = (resource: any) => {
       ...(resource?.videoMeta ?? {}),
       ...(resource?.asmrMeta ?? {}),
       ...(resource?.audioMeta ?? {}),
+      ...(resource?.novelMeta ?? {}),
       pixivId: String(pixivStore?.workId ?? ''),
       websiteType: String(primaryStore?.storeId ?? ''),
       gameId: String(primaryStore?.workId ?? ''),
@@ -618,12 +643,13 @@ const authorInputPlaceholder = computed(() =>
 )
 
 const isSingleImageCategory = computed(() => categorySettings.value.extendTable === 'single_image_meta')
+const isNovelCategory = computed(() => categorySettings.value.extendTable === 'novel_meta')
 const startText = computed(() => {
   if (isSingleImageCategory.value) {
     return '查看'
   }
 
-  if (categorySettings.value.extendTable === 'multi_image_meta') {
+  if (categorySettings.value.extendTable === 'multi_image_meta' || isNovelCategory.value) {
     return '阅读'
   }
 
@@ -675,7 +701,7 @@ const visibleDetailLogs = computed(() => detailLogs.value.slice(0, visibleLogCou
 const hasMoreDetailLogs = computed(() => visibleLogCount.value < detailLogs.value.length)
 const noMore = computed(() => detailLogs.value.length > 5 && !hasMoreDetailLogs.value)
 const detailStats = computed(() => selectedDetailResource.value?.stats ?? null)
-const detailUsesBrowseTerms = computed(() => isSingleImageCategory.value || detailIsManga.value)
+const detailUsesBrowseTerms = computed(() => isSingleImageCategory.value || detailIsManga.value || detailIsNovel.value)
 const detailUsesPlayTerms = computed(() => detailIsAsmr.value || detailIsAudio.value)
 const detailStatsText = computed(() => ({
   firstAccess: detailUsesBrowseTerms.value ? '第一次浏览' : (detailUsesPlayTerms.value ? '第一次播放' : '第一次启动'),
@@ -686,6 +712,11 @@ const detailStatsText = computed(() => ({
 const detailPreviewSectionTitle = computed(() => detailIsManga.value ? '' : '游戏截图')
 const detailGallerySectionTitle = computed(() => detailIsManga.value ? '图片预览' : (detailIsAsmr.value ? '音声目录' : '启动日志'))
 const detailReadingProgressText = computed(() => {
+  if (detailIsNovel.value) {
+    const lastReadPercent = Math.max(0, Math.min(1, Number(selectedDetailResource.value?.novelMeta?.lastReadPercent ?? 0)))
+    return `${Math.round(lastReadPercent * 100)}%`
+  }
+
   if (!detailIsManga.value) {
     return ''
   }
@@ -1309,6 +1340,7 @@ const detailIsSoftware = computed(() => categorySettings.value.extendTable === '
 const detailIsManga = computed(() => categorySettings.value.extendTable === 'multi_image_meta')
 const detailIsAsmr = computed(() => categorySettings.value.extendTable === 'asmr_meta')
 const detailIsAudio = computed(() => categorySettings.value.extendTable === 'audio_meta')
+const detailIsNovel = computed(() => categorySettings.value.extendTable === 'novel_meta')
 const detailOpenFolderText = computed(() => `打开${categoryName.value || '资源'}文件夹`)
 const detailMetaItems = computed(() => {
   const resource = selectedDetailResource.value
@@ -1371,6 +1403,11 @@ const detailMetaItems = computed(() => {
     pushItem(items, '采样率', formatAudioSampleRate(resource.audioMeta?.sampleRate))
     pushItem(items, '歌词路径', resource.audioMeta?.lyricsPath)
     pushItem(items, '总时长', formatDuration(resource.audioMeta?.duration))
+  } else if (extendTable === 'novel_meta') {
+    pushItem(items, '译者', resource.novelMeta?.translator)
+    pushItem(items, 'ISBN', resource.novelMeta?.isbn)
+    pushItem(items, '发行年', Number(resource.novelMeta?.year) > 0 ? resource.novelMeta?.year : '')
+    pushItem(items, '出版社', resource.novelMeta?.publisher)
   }
 
   return items
@@ -1552,10 +1589,22 @@ const normalizedAllowedExtensions = computed(() =>
 )
 
 const splitManualValues = (input: string) => {
-  return input
+  const values = input
     .split(/[\s、,，]+/)
     .map((item) => item.trim())
     .filter(Boolean)
+
+  const mergedValues: string[] = []
+  for (const value of values) {
+    if (/^(?:\([^)]*\)|（[^）]*）|\[[^\]]*\]|【[^】]*】)$/.test(value) && mergedValues.length) {
+      mergedValues[mergedValues.length - 1] = `${mergedValues[mergedValues.length - 1]} ${value}`.trim()
+      continue
+    }
+
+    mergedValues.push(value)
+  }
+
+  return mergedValues
 }
 
 const normalizeCoverPreviewSource = (coverPath: string) => {
@@ -1898,6 +1947,87 @@ const handleComicReaderPageChange = (index: number) => {
   void writeComicProgress(currentComicReaderResourceId.value, currentScreenshotIndex.value)
 }
 
+const readNovelProgress = async (resourceId: string) => {
+  const result = await window.api.service.getNovelReadingProgress(resourceId)
+  return Math.max(0, Math.min(1, Number(result?.data?.lastReadPercent ?? 0)))
+}
+
+const writeNovelProgress = async (resourceId: string, progressPercent: number) => {
+  const normalizedResourceId = String(resourceId ?? '').trim()
+  if (!normalizedResourceId) {
+    return
+  }
+
+  await window.api.service.updateNovelReadingProgress(
+    normalizedResourceId,
+    Math.max(0, Math.min(1, Number(progressPercent ?? 0)))
+  )
+}
+
+const stopTextReadingSession = async () => {
+  const resourceId = String(currentTextReaderResourceId.value ?? '').trim()
+  if (!resourceId) {
+    return
+  }
+
+  currentTextReaderResourceId.value = ''
+  const result = await window.api.service.stopResource(resourceId)
+  if (result?.type === 'error') {
+    showNotifyByType('error', '结束阅读', result?.message ?? '结束阅读失败')
+    return
+  }
+
+  await fetchData()
+}
+
+const stopPdfReadingSession = async () => {
+  const resourceId = String(currentPdfReaderResourceId.value ?? '').trim()
+  if (!resourceId) {
+    return
+  }
+
+  currentPdfReaderResourceId.value = ''
+  const result = await window.api.service.stopResource(resourceId)
+  if (result?.type === 'error') {
+    showNotifyByType('error', '结束阅读', result?.message ?? '结束阅读失败')
+    return
+  }
+
+  await fetchData()
+}
+
+const stopEpubReadingSession = async () => {
+  const resourceId = String(currentEpubReaderResourceId.value ?? '').trim()
+  if (!resourceId) {
+    return
+  }
+
+  currentEpubReaderResourceId.value = ''
+  const result = await window.api.service.stopResource(resourceId)
+  if (result?.type === 'error') {
+    showNotifyByType('error', '结束阅读', result?.message ?? '结束阅读失败')
+    return
+  }
+
+  await fetchData()
+}
+
+const stopEbookReadingSession = async () => {
+  const resourceId = String(currentEbookReaderResourceId.value ?? '').trim()
+  if (!resourceId) {
+    return
+  }
+
+  currentEbookReaderResourceId.value = ''
+  const result = await window.api.service.stopResource(resourceId)
+  if (result?.type === 'error') {
+    showNotifyByType('error', '结束阅读', result?.message ?? '结束阅读失败')
+    return
+  }
+
+  await fetchData()
+}
+
 const getFileName = (basePath: string) => {
   const normalizedPath = String(basePath ?? '').replace(/\\/g, '/')
   return normalizedPath.split('/').pop() ?? ''
@@ -1911,6 +2041,241 @@ const detectPixivIdFromFilePath = (filePath: string) => {
 
 const getResourceFilePath = (resource: any) => {
   return String(buildDisplayBasePath(resource) ?? '').trim()
+}
+
+const startNovelReaderSession = async (resource: any, title: string) => {
+  const resourceId = String(resource?.id ?? '').trim()
+  if (!resourceId) {
+    showNotifyByType('warning', title, '当前小说资源无效')
+    return false
+  }
+
+  const result = await window.api.service.startReadingResource(resourceId)
+  const resultType = result?.type ?? 'info'
+  if (resultType === 'error' || resultType === 'warning') {
+    showNotifyByType(resultType, '开始阅读', result?.message ?? '开始阅读失败')
+    return false
+  }
+
+  return true
+}
+
+const openTextReader = async (resource: any) => {
+  const resourceId = String(resource?.id ?? '').trim()
+  const filePath = getResourceFilePath(resource)
+
+  if (!resourceId || !filePath) {
+    showNotifyByType('warning', 'TXT 阅读', '当前小说资源无效')
+    return
+  }
+
+  if (showTextReader.value && currentTextReaderResourceId.value && currentTextReaderResourceId.value !== resourceId) {
+    await stopTextReadingSession()
+  }
+  if (showPdfReader.value) {
+    await stopPdfReadingSession()
+  }
+  if (showEpubReader.value) {
+    await stopEpubReadingSession()
+  }
+  if (showEbookReader.value) {
+    await stopEbookReadingSession()
+  }
+  if (!(await startNovelReaderSession(resource, 'TXT 阅读'))) {
+    return
+  }
+
+  textReaderInitialProgress.value = await readNovelProgress(resourceId)
+  textReaderFilePath.value = filePath
+  textReaderTitle.value = String(resource?.title ?? getFileNameWithoutExtension(filePath) ?? categoryName.value)
+  currentTextReaderResourceId.value = resourceId
+  showPictureViewer.value = false
+  showComicReader.value = false
+  showPdfReader.value = false
+  showEpubReader.value = false
+  showTextReader.value = true
+  showEbookReader.value = false
+  await fetchData()
+}
+
+const openPdfReader = async (resource: any) => {
+  const resourceId = String(resource?.id ?? '').trim()
+  const filePath = getResourceFilePath(resource)
+
+  if (!resourceId || !filePath) {
+    showNotifyByType('warning', 'PDF 阅读', '当前小说资源无效')
+    return
+  }
+
+  if (showPdfReader.value && currentPdfReaderResourceId.value && currentPdfReaderResourceId.value !== resourceId) {
+    await stopPdfReadingSession()
+  }
+  if (showTextReader.value) {
+    await stopTextReadingSession()
+  }
+  if (showEpubReader.value) {
+    await stopEpubReadingSession()
+  }
+  if (showEbookReader.value) {
+    await stopEbookReadingSession()
+  }
+  if (!(await startNovelReaderSession(resource, 'PDF 阅读'))) {
+    return
+  }
+
+  pdfReaderInitialProgress.value = await readNovelProgress(resourceId)
+  pdfReaderFilePath.value = filePath
+  pdfReaderTitle.value = String(resource?.title ?? getFileNameWithoutExtension(filePath) ?? categoryName.value)
+  currentPdfReaderResourceId.value = resourceId
+  showPictureViewer.value = false
+  showComicReader.value = false
+  showTextReader.value = false
+  showEpubReader.value = false
+  showEbookReader.value = false
+  showPdfReader.value = true
+  await fetchData()
+}
+
+const openEpubReader = async (resource: any) => {
+  const resourceId = String(resource?.id ?? '').trim()
+  const filePath = getResourceFilePath(resource)
+
+  if (!resourceId || !filePath) {
+    showNotifyByType('warning', 'EPUB 阅读', '当前小说资源无效')
+    return
+  }
+
+  if (showEpubReader.value && currentEpubReaderResourceId.value && currentEpubReaderResourceId.value !== resourceId) {
+    await stopEpubReadingSession()
+  }
+  if (showTextReader.value) {
+    await stopTextReadingSession()
+  }
+  if (showPdfReader.value) {
+    await stopPdfReadingSession()
+  }
+  if (showEbookReader.value) {
+    await stopEbookReadingSession()
+  }
+  if (!(await startNovelReaderSession(resource, 'EPUB 阅读'))) {
+    return
+  }
+
+  epubReaderInitialProgress.value = await readNovelProgress(resourceId)
+  epubReaderFilePath.value = filePath
+  epubReaderTitle.value = String(resource?.title ?? getFileNameWithoutExtension(filePath) ?? categoryName.value)
+  currentEpubReaderResourceId.value = resourceId
+  showPictureViewer.value = false
+  showComicReader.value = false
+  showTextReader.value = false
+  showPdfReader.value = false
+  showEpubReader.value = true
+  showEbookReader.value = false
+  await fetchData()
+}
+
+const openEbookReader = async (resource: any) => {
+  const resourceId = String(resource?.id ?? '').trim()
+  const filePath = getResourceFilePath(resource)
+
+  if (!resourceId || !filePath) {
+    showNotifyByType('warning', '电子书阅读', '当前小说资源无效')
+    return
+  }
+
+  if (showEbookReader.value && currentEbookReaderResourceId.value && currentEbookReaderResourceId.value !== resourceId) {
+    await stopEbookReadingSession()
+  }
+  if (showTextReader.value) {
+    await stopTextReadingSession()
+  }
+  if (showPdfReader.value) {
+    await stopPdfReadingSession()
+  }
+  if (showEpubReader.value) {
+    await stopEpubReadingSession()
+  }
+  if (!(await startNovelReaderSession(resource, '电子书阅读'))) {
+    return
+  }
+
+  ebookReaderInitialProgress.value = await readNovelProgress(resourceId)
+  ebookReaderFilePath.value = filePath
+  ebookReaderTitle.value = String(resource?.title ?? getFileNameWithoutExtension(filePath) ?? categoryName.value)
+  currentEbookReaderResourceId.value = resourceId
+  showPictureViewer.value = false
+  showComicReader.value = false
+  showTextReader.value = false
+  showPdfReader.value = false
+  showEpubReader.value = false
+  showEbookReader.value = true
+  await fetchData()
+}
+
+const handleTextReaderProgressChange = (progressPercent: number) => {
+  const resourceId = String(currentTextReaderResourceId.value ?? '').trim()
+  textReaderInitialProgress.value = Math.max(0, Math.min(1, Number(progressPercent ?? 0)))
+  if (resourceId) {
+    void writeNovelProgress(resourceId, textReaderInitialProgress.value)
+  }
+}
+
+const handlePdfReaderProgressChange = (progressPercent: number) => {
+  const resourceId = String(currentPdfReaderResourceId.value ?? '').trim()
+  pdfReaderInitialProgress.value = Math.max(0, Math.min(1, Number(progressPercent ?? 0)))
+  if (resourceId) {
+    void writeNovelProgress(resourceId, pdfReaderInitialProgress.value)
+  }
+}
+
+const handleEpubReaderProgressChange = (progressPercent: number) => {
+  const resourceId = String(currentEpubReaderResourceId.value ?? '').trim()
+  epubReaderInitialProgress.value = Math.max(0, Math.min(1, Number(progressPercent ?? 0)))
+  if (resourceId) {
+    void writeNovelProgress(resourceId, epubReaderInitialProgress.value)
+  }
+}
+
+const handleEbookReaderProgressChange = (progressPercent: number) => {
+  const resourceId = String(currentEbookReaderResourceId.value ?? '').trim()
+  ebookReaderInitialProgress.value = Math.max(0, Math.min(1, Number(progressPercent ?? 0)))
+  if (resourceId) {
+    void writeNovelProgress(resourceId, ebookReaderInitialProgress.value)
+  }
+}
+
+const handleEbookReaderShowUpdate = (visible: boolean) => {
+  showEbookReader.value = visible
+  if (!visible && currentEbookReaderResourceId.value) {
+    void stopEbookReadingSession()
+  }
+}
+
+const openNovelReader = async (resource: any) => {
+  const filePath = getResourceFilePath(resource)
+  const extension = filePath.replace(/\\/g, '/').split('/').pop()?.split('.').pop()?.toLowerCase() ?? ''
+
+  if (['txt', 'md', 'markdown'].includes(extension)) {
+    await openTextReader(resource)
+    return
+  }
+
+  if (extension === 'pdf') {
+    await openPdfReader(resource)
+    return
+  }
+
+  if (extension === 'epub') {
+    await openEpubReader(resource)
+    return
+  }
+
+  if (['mobi', 'azw', 'azw3'].includes(extension)) {
+    await openEbookReader(resource)
+    return
+  }
+
+  showNotifyByType('warning', '阅读', '当前阅读器暂只支持 TXT、MD、PDF、EPUB、MOBI 和 AZW3 文件')
 }
 
 const normalizeSoftwareScript = (script: string) => {
@@ -1960,7 +2325,7 @@ const applyDefaultPathName = (basePath: string) => {
     return
   }
 
-  if (categorySettings.value.extendTable === 'software_meta') {
+  if (categorySettings.value.extendTable === 'software_meta' || categorySettings.value.extendTable === 'novel_meta') {
     const fileStem = getFileNameWithoutExtension(basePath)
     if (fileStem) {
       formData.value.name = fileStem
@@ -1983,6 +2348,30 @@ const applyDefaultPathName = (basePath: string) => {
   const resourceName = getResourceNameFromBasePath(basePath)
   if (resourceName) {
     formData.value.name = resourceName
+  }
+}
+
+const applyNovelFileAnalysis = async (basePath: string) => {
+  if (String(categorySettings.value.extendTable ?? '').trim() !== 'novel_meta') {
+    return
+  }
+
+  try {
+    const result = await window.api.service.analyzeNovelFilePath(basePath)
+    const analysis = result?.data ?? {}
+    const coverDataUrl = String(analysis?.coverDataUrl ?? '').trim()
+    const isbn = String(analysis?.isbn ?? '').trim()
+
+    if (coverDataUrl && !String(formData.value?.coverPath ?? '').trim()) {
+      formData.value.coverPath = coverDataUrl
+    }
+
+    formData.value.meta = {
+      ...(formData.value.meta ?? {}),
+      isbn
+    }
+  } catch {
+    // 小说元数据只是辅助信息，读取失败不阻断添加资源。
   }
 }
 
@@ -2392,6 +2781,15 @@ onBeforeUnmount(() => {
   if (showComicReader.value) {
     void stopComicReadingSession()
   }
+  if (showTextReader.value) {
+    void stopTextReadingSession()
+  }
+  if (showPdfReader.value) {
+    void stopPdfReadingSession()
+  }
+  if (showEpubReader.value) {
+    void stopEpubReadingSession()
+  }
   stopResourceStateListener?.()
   stopResourceStateListener = null
   stopBatchImportProgressListener?.()
@@ -2544,6 +2942,39 @@ watch(showComicReader, (visible, previousVisible) => {
   }
 
   void stopComicReadingSession()
+})
+
+watch(showTextReader, (visible, previousVisible) => {
+  if (visible || !previousVisible) {
+    return
+  }
+
+  textReaderFilePath.value = ''
+  textReaderTitle.value = ''
+  textReaderInitialProgress.value = 0
+  void stopTextReadingSession()
+})
+
+watch(showPdfReader, (visible, previousVisible) => {
+  if (visible || !previousVisible) {
+    return
+  }
+
+  pdfReaderFilePath.value = ''
+  pdfReaderTitle.value = ''
+  pdfReaderInitialProgress.value = 0
+  void stopPdfReadingSession()
+})
+
+watch(showEpubReader, (visible, previousVisible) => {
+  if (visible || !previousVisible) {
+    return
+  }
+
+  epubReaderFilePath.value = ''
+  epubReaderTitle.value = ''
+  epubReaderInitialProgress.value = 0
+  void stopEpubReadingSession()
 })
 
 watch(
@@ -3965,6 +4396,7 @@ const handleDropResourceFile = (event: DragEvent) => {
     await applyAudioPathAnalysis(droppedPath)
     await applyAudioCoverAnalysis()
     await applyGamePathAnalysis(droppedPath)
+    await applyNovelFileAnalysis(droppedPath)
     await applyMultiImageDirectoryAnalysis(droppedPath)
     showModal.value = true
     await nextTick()
@@ -4110,8 +4542,9 @@ const handleSelectBasePath = async () => {
       await basePathFormItemRef.value?.validate({ trigger: 'change' })
       applyDefaultPathName(resourcePath)
       await applyAudioPathAnalysis(resourcePath)
-        await applyAudioCoverAnalysis()
+      await applyAudioCoverAnalysis()
       await applyGamePathAnalysis(resourcePath)
+      await applyNovelFileAnalysis(resourcePath)
       await applyMultiImageDirectoryAnalysis(resourcePath)
     }
   } catch (error) {
@@ -4235,11 +4668,21 @@ const handleFetchGameInfo = async () => {
       websiteId = String(
         imageSiteOptions.find((item: any) => String(item?.label ?? '').trim().toLowerCase() === 'pixiv')?.value ?? ''
       ).trim()
+    } else if (extendTable === 'novel_meta') {
+      const novelSiteOptions = await window.api.db.getSelectDictData(DictType.NOVEL_SITE_TYPE)
+      websiteId = String(
+        novelSiteOptions.find((item: any) => String(item?.label ?? '').trim() === '国家图书馆')?.value ?? ''
+      ).trim()
+      if (!websiteId) {
+        websiteId = 'nlc-isbn'
+      }
     }
 
     const gameId = extendTable === 'single_image_meta'
       ? String(formData.value?.meta?.pixivId ?? '').trim()
-      : String(formData.value?.meta?.gameId ?? '').trim()
+      : extendTable === 'novel_meta'
+        ? String(formData.value?.meta?.isbn ?? '').trim()
+        : String(formData.value?.meta?.gameId ?? '').trim()
 
     const result = await window.api.service.fetchResourceInfo(websiteId, gameId)
     const resultType = result?.type ?? 'info'
@@ -4262,6 +4705,10 @@ const handleFetchGameInfo = async () => {
       formData.value.author = data.author
     }
 
+    if (data.description) {
+      formData.value.description = data.description
+    }
+
     if (extendTable === 'asmr_meta' && data.cv) {
       formData.value.actors = normalizeSelectedValues([
         ...(formData.value.actors ?? []),
@@ -4279,6 +4726,24 @@ const handleFetchGameInfo = async () => {
 
     if (extendTable === 'multi_image_meta' && data.translator) {
       formData.value.meta.translator = data.translator
+    }
+
+    if (extendTable === 'novel_meta') {
+      if (data.translator) {
+        formData.value.meta.translator = data.translator
+      }
+
+      if (data.isbn) {
+        formData.value.meta.isbn = data.isbn
+      }
+
+      if (data.publisher) {
+        formData.value.meta.publisher = data.publisher
+      }
+
+      if (Number.isFinite(Number(data.year))) {
+        formData.value.meta.year = Number(data.year)
+      }
     }
 
     if (data.cover && extendTable !== 'multi_image_meta') {
@@ -4356,6 +4821,11 @@ const handleLaunchResource = async (resource: any) => {
 
   if (detailIsAudio.value) {
     await openAudioPlaybackFromLaunch(resource)
+    return
+  }
+
+  if (detailIsNovel.value) {
+    await openNovelReader(resource)
     return
   }
 
@@ -4444,6 +4914,22 @@ const handleStopResource = async (resource: any) => {
         currentComicReaderResourceId.value = ''
         showComicReader.value = false
       }
+      if (String(resource?.id ?? '') === String(currentTextReaderResourceId.value ?? '')) {
+        currentTextReaderResourceId.value = ''
+        showTextReader.value = false
+      }
+      if (String(resource?.id ?? '') === String(currentPdfReaderResourceId.value ?? '')) {
+        currentPdfReaderResourceId.value = ''
+        showPdfReader.value = false
+      }
+      if (String(resource?.id ?? '') === String(currentEpubReaderResourceId.value ?? '')) {
+        currentEpubReaderResourceId.value = ''
+        showEpubReader.value = false
+      }
+      if (String(resource?.id ?? '') === String(currentEbookReaderResourceId.value ?? '')) {
+        currentEbookReaderResourceId.value = ''
+        showEbookReader.value = false
+      }
       await fetchData()
     }
   } catch (error) {
@@ -4515,6 +5001,10 @@ const handleShowResourceDetail = (resource: any) => {
     closeDetailAudioContextMenu()
     showPictureViewer.value = false
     showComicReader.value = false
+    showTextReader.value = false
+    showPdfReader.value = false
+    showEpubReader.value = false
+    showEbookReader.value = false
     visibleLogCount.value = 5
     currentScreenshotIndex.value = 0
 
@@ -6048,7 +6538,7 @@ const handleToggleCompleted = async (resource: any) => {
                   <span class="detail-drawer__label">添加日期</span>
                   <span class="detail-drawer__value">{{ formatDateTime(selectedDetailResource.createTime) }}</span>
                 </div>
-                  <div v-if="detailIsManga" class="detail-drawer__item">
+                  <div v-if="detailIsManga || detailIsNovel" class="detail-drawer__item">
                     <span class="detail-drawer__label">阅读进度</span>
                     <span class="detail-drawer__value">{{ detailReadingProgressText }}</span>
                   </div>
@@ -6586,6 +7076,13 @@ const handleToggleCompleted = async (resource: any) => {
                   </div>
                 </div>
               </n-form-item>
+              <n-form-item
+                v-if="categorySettings.authorText && isNovelCategory"
+                :label="categorySettings.authorText"
+                path="author"
+              >
+                <n-input v-model:value="formData.author" :placeholder="authorInputPlaceholder"/>
+              </n-form-item>
               <component
                 :is="modelComponent"
                 v-if="modelComponent"
@@ -6599,7 +7096,7 @@ const handleToggleCompleted = async (resource: any) => {
                 @check-engine="handleCheckGameEngine"
                 @fetch-game-info="handleFetchGameInfo"
               />
-              <n-form-item v-if="categorySettings.authorText" :label="categorySettings.authorText" path="author">
+              <n-form-item v-if="categorySettings.authorText && !isNovelCategory" :label="categorySettings.authorText" path="author">
                 <n-select
                   v-if="isAudioCategory"
                   :value="formData.authors"
@@ -6673,7 +7170,7 @@ const handleToggleCompleted = async (resource: any) => {
                       获取专辑封面
                     </n-button>
                     <n-button
-                      v-if="!['multi_image_meta', 'asmr_meta', 'audio_meta'].includes(categorySettings.extendTable)"
+                      v-if="!['multi_image_meta', 'asmr_meta', 'audio_meta', 'novel_meta'].includes(categorySettings.extendTable)"
                       size="small"
                       :disabled="!hasBasePath"
                       @click="handleUseScreenshotCover"
@@ -6764,6 +7261,35 @@ const handleToggleCompleted = async (resource: any) => {
       :initial-index="comicReaderInitialIndex"
       @page-change="handleComicReaderPageChange"
     />
+    <TextReader
+      v-model:show="showTextReader"
+      :file-path="textReaderFilePath"
+      :title="textReaderTitle"
+      :initial-progress="textReaderInitialProgress"
+      @progress-change="handleTextReaderProgressChange"
+    />
+    <PdfReader
+      v-model:show="showPdfReader"
+      :file-path="pdfReaderFilePath"
+      :title="pdfReaderTitle"
+      :initial-progress="pdfReaderInitialProgress"
+      @progress-change="handlePdfReaderProgressChange"
+    />
+    <EpubReader
+      v-model:show="showEpubReader"
+      :file-path="epubReaderFilePath"
+      :title="epubReaderTitle"
+      :initial-progress="epubReaderInitialProgress"
+      @progress-change="handleEpubReaderProgressChange"
+    />
+    <EbookReader
+      :show="showEbookReader"
+      :file-path="ebookReaderFilePath"
+      :title="ebookReaderTitle"
+      :initial-progress="ebookReaderInitialProgress"
+      @update:show="handleEbookReaderShowUpdate"
+      @progress-change="handleEbookReaderProgressChange"
+    />
     <div v-if="isDragOver && categorySettings.resourcePathType === 'file'" class="drag-overlay">
       <div class="drag-overlay__panel">
         <div class="drag-overlay__title">拖拽文件到这里添加{{ categoryName }}</div>
@@ -6803,6 +7329,13 @@ const handleToggleCompleted = async (resource: any) => {
               </div>
             </div>
           </n-form-item>
+          <n-form-item
+            v-if="categorySettings.authorText && isNovelCategory"
+            :label="categorySettings.authorText"
+            path="author"
+          >
+            <n-input v-model:value="formData.author" :placeholder="authorInputPlaceholder"/>
+          </n-form-item>
           <component
             :is="modelComponent"
             v-if="modelComponent"
@@ -6816,7 +7349,7 @@ const handleToggleCompleted = async (resource: any) => {
             @check-engine="handleCheckGameEngine"
             @fetch-game-info="handleFetchGameInfo"
           />
-          <n-form-item v-if="categorySettings.authorText" :label="categorySettings.authorText" path="author">
+          <n-form-item v-if="categorySettings.authorText && !isNovelCategory" :label="categorySettings.authorText" path="author">
             <n-select
               v-if="isAudioCategory"
               :value="formData.authors"
@@ -6890,7 +7423,7 @@ const handleToggleCompleted = async (resource: any) => {
                       获取专辑封面
                     </n-button>
                     <n-button
-                      v-if="!['multi_image_meta', 'asmr_meta', 'audio_meta'].includes(categorySettings.extendTable)"
+                      v-if="!['multi_image_meta', 'asmr_meta', 'audio_meta', 'novel_meta'].includes(categorySettings.extendTable)"
                       size="small"
                     :disabled="!hasBasePath"
                     @click="handleUseScreenshotCover"
