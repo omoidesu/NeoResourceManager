@@ -6,7 +6,7 @@ import mdiIcons from '@iconify-json/mdi/icons.json'
 
 addCollection(mdiIcons)
 
-const APP_VERSION = '0.3.0'
+const APP_VERSION = __APP_VERSION__
 const injectedIsDark = inject<ComputedRef<boolean>>('appIsDark', computed(() => true))
 const isDark = computed(() => injectedIsDark?.value ?? true)
 

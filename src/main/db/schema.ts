@@ -89,6 +89,8 @@ export const multiImageMeta = sqliteTable('multi_image_meta', {
 export const videoMeta = sqliteTable('video_meta', {
   resourceId: text('resource_id').primaryKey().references(() => resource.id),
   year: text('year'),
+  lastPlayFile: text('last_play_file'),
+  lastPlayTime: integer('last_play_time').default(0),
 });
 
 export const asmrMeta = sqliteTable('asmr_meta', {
@@ -212,6 +214,7 @@ export const dictData = sqliteTable('dict_data', {
     addFirst?: string;
     authorText?: string;
     startText?: string;
+    showCompletedFilter?: boolean;
     enableFetchInfo?: boolean;
     rule?: object;
     icon?: string;

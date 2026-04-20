@@ -93,7 +93,12 @@ const loadMainImage = async (filePath: string) => {
   }
 
   try {
-    const imageUrl = await window.api.dialog.readImageAsDataUrl(normalizedPath)
+    const imageUrl = await window.api.dialog.getImagePreviewUrl(normalizedPath, {
+      maxWidth: 4096,
+      maxHeight: 4096,
+      fit: 'inside',
+      quality: 90
+    })
     if (!imageUrl) {
       return
     }

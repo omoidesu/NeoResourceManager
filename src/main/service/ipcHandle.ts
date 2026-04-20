@@ -58,6 +58,10 @@ function registerResource() {
     return await DatabaseService.getAuthorByCategoryId(categoryId)
   })
 
+  ipcMain.handle('db:get-actor-by-category-id', async (_event, categoryId: string) => {
+    return await DatabaseService.getActorByCategoryId(categoryId)
+  })
+
   ipcMain.handle('db:get-album-by-category-id', async (_event, categoryId: string) => {
     return await DatabaseService.getAlbumByCategoryId(categoryId)
   })
@@ -145,8 +149,20 @@ function registerDialog() {
     return DialogService.getFileUrl(filePath);
   })
 
-  ipcMain.handle('dialog:read-text-file', async (_event, filePath: string) => {
-    return DialogService.readTextFile(filePath);
+  ipcMain.handle('dialog:get-audio-playback-url', async (_event, filePath: string) => {
+    return DialogService.getAudioPlaybackUrl(filePath);
+  })
+
+  ipcMain.handle('dialog:read-text-file', async (_event, filePath: string, encoding?: string) => {
+    return DialogService.readTextFile(filePath, encoding);
+  })
+
+  ipcMain.handle('dialog:get-text-file-info', async (_event, filePath: string) => {
+    return DialogService.getTextFileInfo(filePath);
+  })
+
+  ipcMain.handle('dialog:read-text-file-chunk', async (_event, filePath: string, options?: any) => {
+    return DialogService.readTextFileChunk(filePath, options);
   })
 
   ipcMain.handle('dialog:read-binary-file', async (_event, filePath: string) => {
@@ -179,6 +195,10 @@ function registerDialog() {
 
   ipcMain.handle('dialog:get-screenshot-images', async (_event, resourceId: string) => {
     return DialogService.getScreenshotImages(resourceId);
+  })
+
+  ipcMain.handle('dialog:save-video-frame-screenshot', async (_event, resourceId: string, dataUrl: string, currentTime?: number) => {
+    return DialogService.saveVideoFrameScreenshot(resourceId, dataUrl, currentTime);
   })
 
   ipcMain.handle('dialog:get-directory-images', async (_event, directoryPath: string) => {
@@ -287,6 +307,10 @@ function registerService() {
     return ResourceService.captureCoverScreenshot(basePath)
   })
 
+  ipcMain.handle('service:extract-video-cover-frames', async (_event, basePath: string) => {
+    return ResourceService.extractVideoCoverFrames(basePath)
+  })
+
   ipcMain.handle('service:launch-resource', async (_event, resourceId: string, basePath: string, fileName?: string | null) => {
     return ResourceService.launchResource(resourceId, basePath, fileName)
   })
@@ -315,12 +339,24 @@ function registerService() {
     return ResourceService.updateAsmrPlaybackProgress(resourceId, lastPlayFile, lastPlayTime)
   })
 
+  ipcMain.handle('service:update-video-playback-progress', async (_event, resourceId: string, lastPlayFile: string, lastPlayTime: number) => {
+    return ResourceService.updateVideoPlaybackProgress(resourceId, lastPlayFile, lastPlayTime)
+  })
+
   ipcMain.handle('service:start-asmr-playback', async (_event, resourceId: string) => {
     return ResourceService.startAsmrPlayback(resourceId)
   })
 
   ipcMain.handle('service:stop-asmr-playback', async (_event, resourceId: string) => {
     return ResourceService.stopAsmrPlayback(resourceId)
+  })
+
+  ipcMain.handle('service:start-video-playback', async (_event, resourceId: string) => {
+    return ResourceService.startVideoPlayback(resourceId)
+  })
+
+  ipcMain.handle('service:stop-video-playback', async (_event, resourceId: string) => {
+    return ResourceService.stopVideoPlayback(resourceId)
   })
 
   ipcMain.handle('service:launch-resource-as-admin', async (_event, resourceId: string, basePath: string, fileName?: string | null) => {

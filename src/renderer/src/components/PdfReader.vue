@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { ComputedRef } from 'vue'
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from 'pdfjs-dist'
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url'
@@ -68,6 +69,7 @@ let thumbObserver: IntersectionObserver | null = null
 const renderedThumbs = new Set<number>()
 const renderingThumbs = new Set<number>()
 
+const appIsDark = inject<ComputedRef<boolean>>('appIsDark', computed(() => true))
 const normalizedFilePath = computed(() => String(props.filePath ?? '').trim())
 const fileName = computed(() => normalizedFilePath.value.replace(/\\/g, '/').split('/').pop() ?? '')
 const displayTitle = computed(() => props.title || fileName.value || 'PDF 阅读')
@@ -76,6 +78,33 @@ const progressText = computed(
 )
 const pageCountText = computed(() => (pageCount.value > 0 ? `${pageCount.value} 页` : ''))
 const zoomText = computed(() => `${Math.round(zoom.value * 100)}%`)
+const readerThemeStyle = computed(() => {
+  if (appIsDark.value) {
+    return {
+      '--reader-shell-bg': 'rgb(24, 25, 28)',
+      '--reader-body-bg': '#202124',
+      '--reader-text-color': '#d8dde5',
+      '--reader-muted-color': 'rgba(216, 221, 229, 0.5)',
+      '--reader-border-color': 'rgba(255, 255, 255, 0.08)',
+      '--reader-border-subtle-color': 'rgba(255, 255, 255, 0.06)',
+      '--reader-surface-color': 'rgba(255, 255, 255, 0.03)',
+      '--reader-page-placeholder-bg': 'rgba(255, 255, 255, 0.06)',
+      '--reader-shadow-color': 'rgba(0, 0, 0, 0.18)'
+    }
+  }
+
+  return {
+    '--reader-shell-bg': '#f5f5f5',
+    '--reader-body-bg': '#eceff3',
+    '--reader-text-color': '#262626',
+    '--reader-muted-color': 'rgba(38, 38, 38, 0.54)',
+    '--reader-border-color': 'rgba(24, 24, 28, 0.12)',
+    '--reader-border-subtle-color': 'rgba(24, 24, 28, 0.1)',
+    '--reader-surface-color': 'rgba(255, 255, 255, 0.72)',
+    '--reader-page-placeholder-bg': 'rgba(255, 255, 255, 0.92)',
+    '--reader-shadow-color': 'rgba(24, 24, 28, 0.14)'
+  }
+})
 
 const setThumbRef = (element: unknown, pageNumber: number): void => {
   if (element instanceof HTMLElement) {
@@ -542,16 +571,33 @@ const loadPdf = async (): Promise<void> => {
   state.value = 'loading'
 
   try {
-    const binaryData = await window.api.dialog.readBinaryFile(normalizedFilePath.value)
+    const fileUrl = await window.api.dialog.getFileUrl(normalizedFilePath.value)
     if (requestId !== loadRequestId) {
       return
     }
 
-    if (!binaryData) {
-      throw new Error('无法读取 PDF 文件')
+    let document: PDFDocumentProxy | null = null
+    if (fileUrl) {
+      try {
+        document = await getDocument({ url: fileUrl }).promise
+      } catch {
+        document = null
+      }
     }
 
-    const document = await getDocument({ data: new Uint8Array(binaryData) }).promise
+    if (!document) {
+      const binaryData = await window.api.dialog.readBinaryFile(normalizedFilePath.value)
+      if (requestId !== loadRequestId) {
+        return
+      }
+
+      if (!binaryData) {
+        throw new Error('无法读取 PDF 文件')
+      }
+
+      document = await getDocument({ data: new Uint8Array(binaryData) }).promise
+    }
+
     if (requestId !== loadRequestId) {
       void document.destroy()
       return
@@ -737,7 +783,7 @@ onMounted(() => {
     :closable="false"
     @update:show="emit('update:show', $event)"
   >
-    <div class="pdf-reader__shell">
+    <div class="pdf-reader__shell" :style="readerThemeStyle">
       <div class="pdf-reader__toolbar">
         <div class="pdf-reader__title">
           <n-icon :component="BookOutline" />
@@ -845,7 +891,8 @@ onMounted(() => {
   height: min(90vh, 980px);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  background: rgb(24, 25, 28);
+  color: var(--reader-text-color);
+  background: var(--reader-shell-bg);
 }
 
 .pdf-reader__toolbar {
@@ -855,7 +902,7 @@ onMounted(() => {
   justify-content: space-between;
   gap: 16px;
   padding: 12px 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--reader-border-color);
   box-sizing: border-box;
 }
 
@@ -906,7 +953,7 @@ onMounted(() => {
 .pdf-reader__body {
   position: relative;
   min-height: 0;
-  background: #202124;
+  background: var(--reader-body-bg);
 }
 
 .pdf-reader__state {
@@ -931,7 +978,22 @@ onMounted(() => {
 
 .pdf-reader__sidebar {
   min-height: 0;
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  border-right: 1px solid var(--reader-border-subtle-color);
+}
+
+.pdf-reader__sidebar :deep(.n-scrollbar-rail) {
+  display: none;
+}
+
+.pdf-reader__sidebar :deep(.n-scrollbar-container) {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.pdf-reader__sidebar :deep(.n-scrollbar-container::-webkit-scrollbar) {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .pdf-reader__thumbs {
@@ -945,11 +1007,11 @@ onMounted(() => {
   position: relative;
   width: 100%;
   min-height: 128px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--reader-border-color);
   border-radius: 8px;
   overflow: hidden;
   padding: 0;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--reader-surface-color);
   cursor: pointer;
   transition:
     transform 0.2s ease,
@@ -975,7 +1037,7 @@ onMounted(() => {
   justify-content: center;
   padding: 8px;
   box-sizing: border-box;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--reader-muted-color);
   font-size: 12px;
 }
 
@@ -1003,6 +1065,14 @@ onMounted(() => {
   width: 100%;
   height: 100%;
   overflow: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.pdf-reader__viewport::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .pdf-reader__pages {
@@ -1021,10 +1091,10 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: rgba(255, 255, 255, 0.42);
+  color: var(--reader-muted-color);
   font-size: 12px;
-  background: rgba(255, 255, 255, 0.06);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  background: var(--reader-page-placeholder-bg);
+  box-shadow: 0 8px 24px var(--reader-shadow-color);
   overflow: hidden;
 }
 
@@ -1041,7 +1111,7 @@ onMounted(() => {
   align-items: center;
   gap: 14px;
   padding: 10px 18px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--reader-border-color);
   box-sizing: border-box;
 }
 
@@ -1085,7 +1155,7 @@ onMounted(() => {
 
   .pdf-reader__sidebar {
     border-right: none;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid var(--reader-border-subtle-color);
   }
 
   .pdf-reader__thumbs {

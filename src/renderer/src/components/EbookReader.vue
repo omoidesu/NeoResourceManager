@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import type { ComputedRef } from 'vue'
 import 'foliate-js/view.js'
 import {
   AddOutline,
@@ -50,11 +51,23 @@ const viewerRef = ref<HTMLDivElement | null>(null)
 const progress = ref(0)
 const fontSize = ref(18)
 const pageLabel = ref('')
+const selectedReaderBackground = ref('')
 let view: FoliateViewElement | null = null
 let loadRequestId = 0
 let progressTimer: number | null = null
 let wheelFlipTimer: number | null = null
 
+const appIsDark = inject<ComputedRef<boolean>>('appIsDark', computed(() => true))
+const readerBackgroundOptions = [
+  '#f6f5f7',
+  '#e9e4d0',
+  '#e6f1da',
+  '#d9e4ef',
+  '#0f0d0f',
+  '#1a191b',
+  '#272627'
+]
+const darkReaderBackgrounds = new Set(['#0f0d0f', '#1a191b', '#272627'])
 const normalizedFilePath = computed(() => String(props.filePath ?? '').trim())
 const fileName = computed(() => normalizedFilePath.value.replace(/\\/g, '/').split('/').pop() ?? '')
 const fileExtension = computed(() => String(fileName.value.match(/\.([^.]+)$/)?.[1] ?? '').toLowerCase())
@@ -62,6 +75,37 @@ const isKindleFormat = computed(() => ['mobi', 'azw', 'azw3'].includes(fileExten
 const displayTitle = computed(() => props.title || fileName.value || '电子书阅读')
 const progressText = computed(() => `${Math.round(Math.max(0, Math.min(1, progress.value)) * 100)}%`)
 const fontSizeText = computed(() => `${fontSize.value}px`)
+const readerBodyBackground = computed(
+  () => selectedReaderBackground.value || (appIsDark.value ? '#1a191b' : '#f6f5f7')
+)
+const isReaderBackgroundDark = computed(() =>
+  darkReaderBackgrounds.has(readerBodyBackground.value.toLowerCase())
+)
+const readerThemeColors = computed(() => {
+  if (appIsDark.value) {
+    return {
+      shellBg: 'rgb(24, 25, 28)',
+      bodyBg: readerBodyBackground.value,
+      textColor: isReaderBackgroundDark.value ? '#d8dde5' : '#262626',
+      borderColor: 'rgba(255, 255, 255, 0.08)',
+      linkColor: isReaderBackgroundDark.value ? '#7de8c4' : '#0f8f6f'
+    }
+  }
+
+  return {
+    shellBg: '#f5f5f5',
+    bodyBg: readerBodyBackground.value,
+    textColor: isReaderBackgroundDark.value ? '#d8dde5' : '#262626',
+    borderColor: 'rgba(24, 24, 28, 0.1)',
+    linkColor: isReaderBackgroundDark.value ? '#7de8c4' : '#0f8f6f'
+  }
+})
+const readerThemeStyle = computed(() => ({
+  '--reader-shell-bg': readerThemeColors.value.shellBg,
+  '--reader-body-bg': readerThemeColors.value.bodyBg,
+  '--reader-text-color': readerThemeColors.value.textColor,
+  '--reader-border-color': readerThemeColors.value.borderColor
+}))
 
 const getMimeType = () => {
   if (fileExtension.value === 'epub') return 'application/epub+zip'
@@ -83,11 +127,14 @@ const upsertContentStyle = (doc: Document): void => {
     head.append(style)
   }
 
+  const colors = readerThemeColors.value
   style.textContent = `
     html, body {
       overflow: hidden !important;
-      color: #d8dde5 !important;
-      background: #202124 !important;
+      scrollbar-width: none !important;
+      -ms-overflow-style: none !important;
+      color: ${colors.textColor} !important;
+      background: ${colors.bodyBg} !important;
       font-size: ${fontSize.value}px !important;
       line-height: 1.78 !important;
     }
@@ -106,7 +153,12 @@ const upsertContentStyle = (doc: Document): void => {
       max-width: 100% !important;
       height: auto !important;
     }
-    a { color: #7de8c4 !important; }
+    a { color: ${colors.linkColor} !important; }
+    ::-webkit-scrollbar {
+      display: none !important;
+      width: 0 !important;
+      height: 0 !important;
+    }
   `
 }
 
@@ -234,18 +286,11 @@ const loadEbook = async (): Promise<void> => {
       throw new Error('电子书阅读器尚未准备好')
     }
 
-    const binaryData = await window.api.dialog.readBinaryFile(normalizedFilePath.value)
+    const fileUrl = await window.api.dialog.getFileUrl(normalizedFilePath.value)
     if (requestId !== loadRequestId) {
       return
     }
 
-    if (!binaryData) {
-      throw new Error('无法读取电子书文件')
-    }
-
-    const bytes = new Uint8Array(binaryData)
-    const fileBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
-    const file = new File([fileBuffer], fileName.value || 'book', { type: getMimeType() })
     const nextView = document.createElement('foliate-view') as FoliateViewElement
     nextView.classList.add('ebook-reader__foliate-view')
     nextView.addEventListener('relocate', handleRelocate)
@@ -253,7 +298,31 @@ const loadEbook = async (): Promise<void> => {
     host.replaceChildren(nextView)
     view = nextView
 
-    await nextView.open(file)
+    if (fileUrl) {
+      try {
+        await nextView.open(fileUrl)
+      } catch {
+        const binaryData = await window.api.dialog.readBinaryFile(normalizedFilePath.value)
+        if (!binaryData) {
+          throw new Error('无法读取电子书文件')
+        }
+
+        const bytes = new Uint8Array(binaryData)
+        const fileBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+        const file = new File([fileBuffer], fileName.value || 'book', { type: getMimeType() })
+        await nextView.open(file)
+      }
+    } else {
+      const binaryData = await window.api.dialog.readBinaryFile(normalizedFilePath.value)
+      if (!binaryData) {
+        throw new Error('无法读取电子书文件')
+      }
+
+      const bytes = new Uint8Array(binaryData)
+      const fileBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+      const file = new File([fileBuffer], fileName.value || 'book', { type: getMimeType() })
+      await nextView.open(file)
+    }
     if (requestId !== loadRequestId) {
       nextView.close?.()
       nextView.remove()
@@ -301,6 +370,11 @@ const decreaseFontSize = (): void => {
 
 const increaseFontSize = (): void => {
   fontSize.value = Math.min(30, fontSize.value + 1)
+  applyFontSize()
+}
+
+const selectReaderBackground = (color: string): void => {
+  selectedReaderBackground.value = color
   applyFontSize()
 }
 
@@ -406,6 +480,11 @@ watch(
   { immediate: true }
 )
 
+watch(appIsDark, () => {
+  selectedReaderBackground.value = ''
+  applyFontSize()
+})
+
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
   emitProgress(progress.value)
@@ -425,7 +504,7 @@ onBeforeUnmount(() => {
     :closable="false"
     @update:show="emit('update:show', $event)"
   >
-    <div class="ebook-reader__shell">
+    <div class="ebook-reader__shell" :style="readerThemeStyle">
       <div class="ebook-reader__toolbar">
         <div class="ebook-reader__title">
           <n-icon :component="BookOutline" />
@@ -439,6 +518,26 @@ onBeforeUnmount(() => {
               <n-icon :component="ChevronBackOutline" />
             </template>
           </n-button>
+          <div class="ebook-reader__palette" aria-label="阅读背景">
+            <button
+              type="button"
+              class="ebook-reader__palette-auto"
+              :class="{ 'ebook-reader__palette-auto--active': !selectedReaderBackground }"
+              title="跟随主题"
+              @click="selectReaderBackground('')"
+            >
+              跟随主题
+            </button>
+            <button
+              v-for="color in readerBackgroundOptions"
+              :key="color"
+              type="button"
+              class="ebook-reader__palette-button"
+              :class="{ 'ebook-reader__palette-button--active': color === readerBodyBackground }"
+              :style="{ backgroundColor: color }"
+              @click="selectReaderBackground(color)"
+            />
+          </div>
           <div class="ebook-reader__font-tools">
             <n-button quaternary circle :disabled="fontSize <= 12" @click="decreaseFontSize">
               <template #icon>
@@ -515,7 +614,8 @@ onBeforeUnmount(() => {
   height: min(90vh, 980px);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  background: rgb(24, 25, 28);
+  color: var(--reader-text-color);
+  background: var(--reader-shell-bg);
 }
 
 .ebook-reader__toolbar {
@@ -525,7 +625,7 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 16px;
   padding: 12px 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--reader-border-color);
   box-sizing: border-box;
 }
 
@@ -559,6 +659,42 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.ebook-reader__palette {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 6px;
+}
+
+.ebook-reader__palette-button {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--reader-border-color);
+  border-radius: 6px;
+  padding: 0;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.ebook-reader__palette-auto {
+  height: 24px;
+  border: 1px solid var(--reader-border-color);
+  border-radius: 6px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  color: var(--reader-text-color);
+  background: transparent;
+  font-size: 12px;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.ebook-reader__palette-auto--active,
+.ebook-reader__palette-button--active {
+  border-color: rgba(99, 226, 183, 0.9);
+  box-shadow: 0 0 0 2px rgba(99, 226, 183, 0.35);
+}
+
 .ebook-reader__font-tools {
   display: flex;
   align-items: center;
@@ -576,7 +712,7 @@ onBeforeUnmount(() => {
 .ebook-reader__body {
   position: relative;
   min-height: 0;
-  background: #202124;
+  background: var(--reader-body-bg);
 }
 
 .ebook-reader__state {
@@ -603,8 +739,8 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   display: block;
-  color: #d8dde5;
-  background: #202124;
+  color: var(--reader-text-color);
+  background: var(--reader-body-bg);
 }
 
 .ebook-reader__viewer :deep(foliate-view) {
@@ -612,6 +748,25 @@ onBeforeUnmount(() => {
   height: 100%;
   display: block;
   overflow: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.ebook-reader__viewer :deep(foliate-view::part(container)) {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.ebook-reader__viewer :deep(foliate-view::-webkit-scrollbar) {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.ebook-reader__viewer :deep(foliate-view::part(container)::-webkit-scrollbar) {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .ebook-reader__viewer :deep(foliate-paginator) {
@@ -625,7 +780,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 14px;
   padding: 10px 18px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--reader-border-color);
   box-sizing: border-box;
 }
 

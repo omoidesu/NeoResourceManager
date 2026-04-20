@@ -69,6 +69,7 @@ const audioObjectUrlMap = ref<Record<string, string>>({})
 const subtitleCueList = ref<SubtitleCue[]>([])
 const subtitleLoadState = ref<'idle' | 'loading' | 'ready' | 'empty'>('idle')
 const lyricLineRefs = ref<Array<HTMLElement | null>>([])
+const MAX_SUBTITLE_FILE_BYTES = 2 * 1024 * 1024
 const currentCoverPreviewSrc = ref('')
 const isLyricScrollPreviewing = ref(false)
 const pendingAutoplay = ref(false)
@@ -365,13 +366,12 @@ const getAudioMimeType = (filePath: string) => {
   if (normalizedPath.endsWith('.mp3')) return 'audio/mpeg'
   if (normalizedPath.endsWith('.wav')) return 'audio/wav'
   if (normalizedPath.endsWith('.flac')) return 'audio/flac'
-  if (normalizedPath.endsWith('.m4a') || normalizedPath.endsWith('.m4b')) return 'audio/mp4'
+  if (normalizedPath.endsWith('.m4a')) return 'audio/mp4'
   if (normalizedPath.endsWith('.aac')) return 'audio/aac'
   if (normalizedPath.endsWith('.ogg')) return 'audio/ogg'
   if (normalizedPath.endsWith('.opus')) return 'audio/opus'
   if (normalizedPath.endsWith('.wma')) return 'audio/x-ms-wma'
   if (normalizedPath.endsWith('.ape')) return 'audio/ape'
-  if (normalizedPath.endsWith('.wv')) return 'audio/wavpack'
   return 'audio/mpeg'
 }
 
@@ -556,7 +556,7 @@ const ensureAudioUrl = async (filePath: string) => {
   const normalizedPath = String(filePath ?? '').trim()
   if (!normalizedPath || audioUrlMap.value[normalizedPath]) {
     if (normalizedPath) {
-      logger.info('reusing cached audio object url', {
+      logger.info('reusing cached audio url', {
         ...buildPlaybackLogContext(),
         filePath: normalizedPath
       })
@@ -564,13 +564,33 @@ const ensureAudioUrl = async (filePath: string) => {
     return
   }
 
-  logger.info('reading audio binary file', {
+  logger.info('resolving audio playback url', {
+    ...buildPlaybackLogContext(),
+    filePath: normalizedPath
+  })
+
+  const playbackUrl = await window.api.dialog.getAudioPlaybackUrl(normalizedPath)
+  if (playbackUrl?.url) {
+    logger.info('resolved audio playback url', {
+      ...buildPlaybackLogContext(),
+      filePath: normalizedPath,
+      playbackPath: playbackUrl.playbackPath,
+      transcoded: playbackUrl.transcoded
+    })
+    audioUrlMap.value = {
+      ...audioUrlMap.value,
+      [normalizedPath]: playbackUrl.url
+    }
+    return
+  }
+
+  logger.info('falling back to audio binary file', {
     ...buildPlaybackLogContext(),
     filePath: normalizedPath
   })
   const binaryData = await window.api.dialog.readBinaryFile(normalizedPath)
   if (!binaryData || !binaryData.length) {
-    logger.error('failed to read audio binary file', {
+    logger.error('failed to resolve audio playback url or read binary file', {
       ...buildPlaybackLogContext(),
       filePath: normalizedPath,
       byteLength: Number(binaryData?.length ?? 0)
@@ -713,7 +733,12 @@ const loadSubtitleForTrack = async (trackPath: string, explicitSubtitlePath?: st
   ].filter(Boolean)
 
   for (const subtitlePath of subtitleCandidates) {
-    const content = await window.api.dialog.readTextFile(subtitlePath)
+    const info = await window.api.dialog.getTextFileInfo(subtitlePath)
+    if (!info || info.size > MAX_SUBTITLE_FILE_BYTES) {
+      continue
+    }
+
+    const content = await window.api.dialog.readTextFile(subtitlePath, info.encoding)
     if (!content) {
       continue
     }

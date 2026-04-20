@@ -13,6 +13,7 @@ import TextReader from '../components/TextReader.vue'
 import PdfReader from '../components/PdfReader.vue'
 import EpubReader from '../components/EpubReader.vue'
 import EbookReader from '../components/EbookReader.vue'
+import VideoPlayer from '../components/VideoPlayer.vue'
 import RichTextEditor from '../components/RichTextEditor.vue'
 import { createEmptyMetaByType } from '../components/meta/meta-factory'
 import { resolveMetaFormComponent } from '../components/meta/registry'
@@ -27,6 +28,7 @@ const audioPlayerStore = useAudioPlayerStore()
 const categoryId = computed(() => route.params.id as string)
 const resourceList = ref<any[]>([]) // 资源列表数据
 const authorList = ref<any[]>([])
+const actorList = ref<any[]>([])
 const albumList = ref<any[]>([])
 const engineList = ref<any[]>([])
 const websiteTypeOptions = ref<any[]>([])
@@ -35,6 +37,7 @@ const typeList = ref<any[]>([])
 const loading = ref(true)
 const keyword = ref('')
 const authorSearch = ref<string>('')
+const actorSearch = ref<string>('')
 const albumSearch = ref<string>('')
 const tagSearch = ref<string>('')
 const typeSearch = ref<string>('')
@@ -44,7 +47,9 @@ const showBatchImportLoading = ref(false)
 const showBatchImportModal = ref(false)
 const showBatchLabelModal = ref(false)
 const showAudioCoverCandidateModal = ref(false)
+const showVideoCoverCandidateModal = ref(false)
 const fetchResourceInfoLoading = ref(false)
+const videoCoverFrameLoading = ref(false)
 const formData = ref<any>({ name: '', meta: {} })
 const editingResourceId = ref('')
 const editInitialFormData = ref<any | null>(null)
@@ -68,6 +73,13 @@ const audioCoverCandidates = ref<Array<{
   coverPath: string
   previewSrc: string
   queryText: string
+}>>([])
+const videoCoverCandidates = ref<Array<{
+  label: string
+  coverPath: string
+  previewSrc: string
+  time: number
+  group: 'fixed' | 'random'
 }>>([])
 const detailScreenshotPreviewSrc = ref('')
 const detailDescriptionContentRef = ref<HTMLElement | null>(null)
@@ -101,6 +113,11 @@ const ebookReaderFilePath = ref('')
 const ebookReaderTitle = ref('')
 const ebookReaderInitialProgress = ref(0)
 const currentEbookReaderResourceId = ref('')
+const showVideoPlayer = ref(false)
+const videoPlayerPlaylist = ref<Array<{ path: string; label: string; resourceId?: string; resourceTitle?: string; coverSrc?: string; subtitlePath?: string }>>([])
+const videoPlayerInitialPath = ref('')
+const videoPlayerInitialTime = ref(0)
+const videoPlayerTitle = ref('')
 const audioPlayerPlaylist = ref<Array<{ path: string; label: string; duration?: number | null; resourceId?: string; resourceTitle?: string; artist?: string; coverSrc?: string; hasSubtitle?: boolean; subtitlePath?: string }>>([])
 const audioPlayerDisplayMode = ref<'default' | 'music'>('default')
 const detailAudioContextMenuVisible = ref(false)
@@ -426,6 +443,7 @@ const favoriteResourceCount = ref(0)
 const completedResourceCount = ref(0)
 const runningResourceCount = ref(0)
 const selectedAuthorList = ref<string[]>([])
+const selectedActorList = ref<string[]>([])
 const selectedAlbumList = ref<string[]>([])
 const selectedEngineList = ref<string[]>([])
 const selectedTagList = ref<string[]>([])
@@ -448,8 +466,16 @@ const localeEmulatorPath = ref('')
 const mtoolPath = ref('')
 const suppressAutoFetch = ref(false)
 let fetchDataRequestId = 0
+let hasOpenedVideoPlayer = false
 
-const showBatchImportButton = computed(() => ['game_meta', 'single_image_meta', 'multi_image_meta', 'asmr_meta', 'audio_meta'].includes(String(categorySettings.value.extendTable ?? '')))
+const showBatchImportButton = computed(() => {
+  const extendTable = String(categorySettings.value.extendTable ?? '')
+  if (extendTable === 'video_meta') {
+    return String(categorySettings.value.resourcePathType ?? '') === 'file'
+  }
+
+  return ['game_meta', 'single_image_meta', 'multi_image_meta', 'asmr_meta', 'audio_meta', 'novel_meta'].includes(extendTable)
+})
 const getBatchImportOngoingId = (targetCategoryId: string) => `batch-import-analysis:${targetCategoryId}`
 const batchProgressRunning = computed(() => batchAnalyzeRunning.value || batchImportRunning.value)
 const batchProgressStage = computed(() => (batchImportRunning.value ? 'import' : 'analyze'))
@@ -460,6 +486,22 @@ const batchImportResourceLabel = computed(() => {
 
   if (detailIsAsmr.value) {
     return '音声'
+  }
+
+  if (isAudioCategory.value) {
+    return '音乐'
+  }
+
+  if (isNovelCategory.value) {
+    return '小说'
+  }
+
+  if (String(categorySettings.value.extendTable ?? '') === 'video_meta') {
+    return '电影'
+  }
+
+  if (isSingleImageCategory.value) {
+    return '图片'
   }
 
   return '游戏'
@@ -540,6 +582,19 @@ const normalizedAuthorList = computed(() =>
     .filter((author) => author.id && author.name)
 )
 
+const normalizedActorList = computed(() =>
+  actorList.value
+    .map((actor) => {
+      const name = String(actor?.name ?? actor?.actorName ?? '').trim()
+      return {
+        id: name,
+        name,
+        count: Number(actor?.count ?? 0)
+      }
+    })
+    .filter((actor) => actor.id && actor.name)
+)
+
 const normalizedEngineList = computed(() =>
   engineList.value
     .map((engine) => ({
@@ -572,6 +627,7 @@ const normalizedTypeList = computed(() =>
 )
 
 const normalizedAuthorSearch = computed(() => authorSearch.value.trim().toLowerCase())
+const normalizedActorSearch = computed(() => actorSearch.value.trim().toLowerCase())
 const normalizedAlbumSearch = computed(() => albumSearch.value.trim().toLowerCase())
 const normalizedTagSearch = computed(() => tagSearch.value.trim().toLowerCase())
 const normalizedTypeSearch = computed(() => typeSearch.value.trim().toLowerCase())
@@ -583,6 +639,16 @@ const filteredAuthorList = computed(() => {
 
   return normalizedAuthorList.value.filter((author) =>
     String(author.name).toLowerCase().includes(normalizedAuthorSearch.value)
+  )
+})
+
+const filteredActorList = computed(() => {
+  if (!normalizedActorSearch.value) {
+    return normalizedActorList.value
+  }
+
+  return normalizedActorList.value.filter((actor) =>
+    String(actor.name).toLowerCase().includes(normalizedActorSearch.value)
   )
 })
 
@@ -634,6 +700,7 @@ const descriptionLabel = computed(() =>
   categorySettings.value.extendTable === 'game_meta' ? '游戏简介' : `${categoryName.value}描述`
 )
 const isAudioCategory = computed(() => categorySettings.value.extendTable === 'audio_meta')
+const videoActorLabel = computed(() => '声优/演员')
 
 const descriptionPlaceholder = computed(() =>
   categorySettings.value.extendTable === 'game_meta' ? '请输入游戏简介' : `请输入${categoryName.value}描述`
@@ -661,7 +728,23 @@ const showAdminLaunch = computed(() => categorySettings.value.extendTable === 's
 const showMtoolLaunch = computed(() => categorySettings.value.extendTable === 'game_meta')
 const canMtoolLaunch = computed(() => Boolean(mtoolPath.value.trim()))
 const showScreenshotFolder = computed(() => categorySettings.value.extendTable === 'game_meta')
-const showCompletedToggle = computed(() => categorySettings.value.extendTable === 'game_meta')
+const completedExtendTable = computed(() => String(categorySettings.value.extendTable ?? '').trim())
+const isVideoCategory = computed(() => completedExtendTable.value === 'video_meta')
+const showCompletedToggle = computed(() => ['game_meta', 'novel_meta', 'video_meta'].includes(completedExtendTable.value))
+const completedActionLabel = computed(() => {
+  if (isNovelCategory.value) {
+    return '读完'
+  }
+
+  if (isVideoCategory.value) {
+    return '播完'
+  }
+
+  return '通关'
+})
+const completedStateLabel = computed(() => `已${completedActionLabel.value}`)
+const showCompletedFilter = computed(() => categorySettings.value.showCompletedFilter === true)
+const effectiveCompletedOnly = computed(() => showCompletedFilter.value && completedOnly.value)
 const showCardCover = computed(() => categorySettings.value.extendTable !== 'software_meta')
 const showDeleteFiles = computed(() => categorySettings.value.extendTable === 'game_meta')
 const showEngineFilter = computed(() => categorySettings.value.extendTable === 'game_meta')
@@ -676,6 +759,9 @@ const softwareScriptPlaceholder = computed(() =>
 )
 const filterSectionCount = computed(() => {
   let count = detailIsAsmr.value ? 2 : 3
+  if (isVideoCategory.value) {
+    count += 1
+  }
   if (isAudioCategory.value) {
     count += 1
   }
@@ -702,7 +788,7 @@ const hasMoreDetailLogs = computed(() => visibleLogCount.value < detailLogs.valu
 const noMore = computed(() => detailLogs.value.length > 5 && !hasMoreDetailLogs.value)
 const detailStats = computed(() => selectedDetailResource.value?.stats ?? null)
 const detailUsesBrowseTerms = computed(() => isSingleImageCategory.value || detailIsManga.value || detailIsNovel.value)
-const detailUsesPlayTerms = computed(() => detailIsAsmr.value || detailIsAudio.value)
+const detailUsesPlayTerms = computed(() => detailIsAsmr.value || detailIsAudio.value || isVideoCategory.value)
 const detailStatsText = computed(() => ({
   firstAccess: detailUsesBrowseTerms.value ? '第一次浏览' : (detailUsesPlayTerms.value ? '第一次播放' : '第一次启动'),
   lastAccess: detailUsesBrowseTerms.value ? '最后一次浏览' : (detailUsesPlayTerms.value ? '最后一次播放' : '最后一次启动'),
@@ -710,7 +796,30 @@ const detailStatsText = computed(() => ({
   totalRuntime: detailUsesBrowseTerms.value ? '浏览总时长' : (detailUsesPlayTerms.value ? '播放总时长' : '运行总时长'),
 }))
 const detailPreviewSectionTitle = computed(() => detailIsManga.value ? '' : '游戏截图')
-const detailGallerySectionTitle = computed(() => detailIsManga.value ? '图片预览' : (detailIsAsmr.value ? '音声目录' : '启动日志'))
+const detailGallerySectionTitle = computed(() => {
+  if (detailIsManga.value) return '图片预览'
+  if (detailIsAsmr.value) return '音声目录'
+  if (isVideoCategory.value) return '播放日志'
+  return '启动日志'
+})
+const detailEmptyLogDescription = computed(() => isVideoCategory.value ? '暂无播放日志' : '暂无启动日志')
+const detailLogModeLabel = computed(() => isVideoCategory.value ? '播放方式' : '启动方式')
+const detailLogDurationLabel = computed(() => isVideoCategory.value ? '播放时长' : '运行时长')
+const hasDetailDescription = computed(() => {
+  const rawDescription = String(selectedDetailResource.value?.description ?? '').trim()
+  if (!rawDescription) {
+    return false
+  }
+
+  const plainText = rawDescription
+    .replace(/<br\s*\/?>/gi, '')
+    .replace(/<\/?p[^>]*>/gi, '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .trim()
+
+  return Boolean(plainText)
+})
 const detailReadingProgressText = computed(() => {
   if (detailIsNovel.value) {
     const lastReadPercent = Math.max(0, Math.min(1, Number(selectedDetailResource.value?.novelMeta?.lastReadPercent ?? 0)))
@@ -733,6 +842,11 @@ const detailReadingProgressText = computed(() => {
 const detailPlaybackProgressText = computed(() => {
   if (detailIsAudio.value) {
     const lastPlayTime = Math.max(0, Number(selectedDetailResource.value?.audioMeta?.lastPlayTime ?? 0))
+    return lastPlayTime > 0 ? formatDuration(lastPlayTime) : '暂无'
+  }
+
+  if (isVideoCategory.value) {
+    const lastPlayTime = Math.max(0, Number(selectedDetailResource.value?.videoMeta?.lastPlayTime ?? 0))
     return lastPlayTime > 0 ? formatDuration(lastPlayTime) : '暂无'
   }
 
@@ -813,6 +927,38 @@ const collectAudioTreeTracks = (nodes: any[]): Array<{ path: string; label: stri
 
 const detailAudioPlaylist = computed(() => collectAudioTreeTracks(detailAudioTree.value))
 
+const collectAudioTreeVideoTracks = (nodes: any[]): Array<{ path: string; label: string; resourceTitle?: string; coverSrc?: string; subtitlePath?: string }> => {
+  const tracks: Array<{ path: string; label: string; resourceTitle?: string; coverSrc?: string; subtitlePath?: string }> = []
+  const resourceTitle = String(selectedDetailResource.value?.title ?? categoryName.value ?? '视频播放')
+  const coverSrc = detailCoverPreviewSrc.value
+
+  const visit = (items: any[]) => {
+    for (const item of items) {
+      if (!item) {
+        continue
+      }
+
+      if (item.kind === 'video' && item.path) {
+        tracks.push({
+          path: String(item.path),
+          label: String(item.label ?? getResourceNameFromBasePath(String(item.path)) ?? '当前视频'),
+          resourceTitle,
+          coverSrc
+        })
+      }
+
+      if (Array.isArray(item.children) && item.children.length) {
+        visit(item.children)
+      }
+    }
+  }
+
+  visit(nodes)
+  return tracks
+}
+
+const detailAudioVideoPlaylist = computed(() => collectAudioTreeVideoTracks(detailAudioTree.value))
+
 const normalizeAudioPath = (filePath: string | null | undefined) => String(filePath ?? '').replace(/\\/g, '/').trim().toLowerCase()
 const getAudioDirectoryPath = (filePath: string | null | undefined) => String(filePath ?? '').replace(/\\/g, '/').trim().split('/').slice(0, -1).join('/')
 
@@ -858,13 +1004,14 @@ const getAudioPlayerArtistText = (resource: any) => {
 const buildResourceQuery = (page: number, size: number) => ({
   keyword: keyword.value.trim(),
   authorIds: [...selectedAuthorList.value],
+  actorNames: [...selectedActorList.value],
   albumNames: [...selectedAlbumList.value],
   engineIds: [...selectedEngineList.value],
   tagIds: [...selectedTagList.value],
   typeIds: [...selectedTypeList.value],
   missingOnly: missingFile.value,
   favoriteOnly: favoriteOnly.value,
-  completedOnly: completedOnly.value,
+  completedOnly: effectiveCompletedOnly.value,
   runningOnly: runningOnly.value,
   page,
   pageSize: size,
@@ -992,6 +1139,79 @@ const openAudioPlaybackFromLaunch = async (resource: any) => {
     matchedTrack.path,
     Math.max(0, Number(resource?.audioMeta?.lastPlayTime ?? 0))
   )
+}
+
+const getVideoPlayerCoverPreview = async (resource: any) => {
+  const resourceId = String(resource?.id ?? '')
+  if (resourceId && resourceId === String(selectedDetailResource.value?.id ?? '')) {
+    return detailCoverPreviewSrc.value
+  }
+
+  const coverPath = normalizeCoverPreviewSource(String(resource?.coverPath ?? ''))
+  if (!coverPath) {
+    return ''
+  }
+
+  if (/^https?:\/\//i.test(coverPath) || /^data:/i.test(coverPath)) {
+    return coverPath
+  }
+
+  try {
+    return (await window.api.dialog.getImagePreviewUrl(String(resource?.coverPath ?? ''), {
+      maxWidth: 320,
+      maxHeight: 200,
+      fit: 'cover',
+      quality: 80
+    })) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+const buildVideoPlaylistTrack = async (resource: any) => {
+  const targetPath = getResourceFilePath(resource)
+  if (!targetPath || resource?.missingStatus) {
+    return null
+  }
+
+  return {
+    path: targetPath,
+    label: String(resource?.title ?? getResourceNameFromBasePath(targetPath) ?? '当前视频'),
+    resourceId: String(resource?.id ?? ''),
+    resourceTitle: String(resource?.title ?? getResourceNameFromBasePath(targetPath) ?? '当前视频'),
+    coverSrc: await getVideoPlayerCoverPreview(resource)
+  }
+}
+
+const openVideoPlaybackFromLaunch = async (resource: any) => {
+  const targetPath = getResourceFilePath(resource)
+  if (!targetPath) {
+    showNotifyByType('warning', '播放视频', '当前视频路径无效')
+    return
+  }
+
+  const allResources = await loadAllCategoryResources()
+  const playlist = (await Promise.all(allResources.map((item: any) => buildVideoPlaylistTrack(item))))
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+  const normalizedTargetPath = targetPath.replace(/\\/g, '/')
+  const matchedTrack = playlist.find((item) => item.path.replace(/\\/g, '/') === normalizedTargetPath)
+
+  if (!playlist.length || !matchedTrack) {
+    showNotifyByType('warning', '播放视频', '当前没有可播放的视频资源')
+    return
+  }
+
+  const lastPlayFile = String(resource?.videoMeta?.lastPlayFile ?? '').trim()
+  const normalizedLastPlayFile = lastPlayFile.replace(/\\/g, '/')
+  const resumeTrack = normalizedLastPlayFile
+    ? playlist.find((item) => item.path.replace(/\\/g, '/') === normalizedLastPlayFile)
+    : null
+
+  videoPlayerPlaylist.value = playlist
+  videoPlayerInitialPath.value = resumeTrack?.path ?? matchedTrack.path
+  videoPlayerInitialTime.value = resumeTrack ? Math.max(0, Number(resource?.videoMeta?.lastPlayTime ?? 0)) : 0
+  videoPlayerTitle.value = String(resource?.title ?? categoryName.value ?? '视频播放')
+  showVideoPlayer.value = true
 }
 
 const handleAddMusicToPlaylist = async (resource: any) => {
@@ -1175,13 +1395,38 @@ const openAudioPlayer = async (targetPath: string) => {
   await applyAudioPlayerSession(selectedDetailResource.value, playlist, normalizedPath, 0)
 }
 
-const handleAudioTreeActionPlaceholder = (option: any) => {
+const openAudioTreeVideoPlayer = (targetPath: string) => {
+  const normalizedPath = String(targetPath ?? '').trim()
+  if (!normalizedPath) {
+    return
+  }
+
+  const allTracks = detailAudioVideoPlaylist.value
+  if (!allTracks.length) {
+    showNotifyByType('warning', '播放视频', '当前没有可播放的视频文件')
+    return
+  }
+
+  const targetDirectory = getAudioDirectoryPath(normalizedPath)
+  const directoryTracks = allTracks.filter((track) => getAudioDirectoryPath(track.path) === targetDirectory)
+  const playlist = directoryTracks.length ? directoryTracks : allTracks
+  const normalizedTargetPath = normalizedPath.replace(/\\/g, '/')
+  const matchedTrack = playlist.find((track) => track.path.replace(/\\/g, '/') === normalizedTargetPath)
+
+  videoPlayerPlaylist.value = playlist
+  videoPlayerInitialPath.value = matchedTrack?.path ?? normalizedPath
+  videoPlayerInitialTime.value = 0
+  videoPlayerTitle.value = String(selectedDetailResource.value?.title ?? categoryName.value ?? '视频播放')
+  showVideoPlayer.value = true
+}
+
+const handleAudioTreePlay = (option: any) => {
   if (!option?.path) {
     return
   }
 
   if (option?.kind === 'video') {
-    showNotifyByType('info', '播放视频', '视频播放功能暂未实现')
+    openAudioTreeVideoPlayer(String(option.path))
     return
   }
 
@@ -1227,7 +1472,7 @@ const handleSelectDetailAudioContextMenu = (key: string) => {
   }
 
   if (key === 'play' && (option?.kind === 'audio' || option?.kind === 'video')) {
-    handleAudioTreeActionPlaceholder(option)
+    handleAudioTreePlay(option)
   }
 }
 
@@ -1308,10 +1553,10 @@ const renderAudioTreeSuffix = ({ option }: { option: any }) => {
     class: 'detail-audio-tree__action-button detail-audio-tree__action-button--play',
     role: 'button',
     tabindex: 0,
-    'aria-label': '播放音频',
+    'aria-label': option?.kind === 'video' ? '播放视频' : '播放音频',
     onClick: (event: MouseEvent) => {
       event.stopPropagation()
-      handleAudioTreeActionPlaceholder(option)
+      handleAudioTreePlay(option)
     },
     onContextmenu: (event: MouseEvent) => handleOpenAudioTreeContextMenu(event, option),
     onKeydown: (event: KeyboardEvent) => {
@@ -1321,7 +1566,7 @@ const renderAudioTreeSuffix = ({ option }: { option: any }) => {
 
       event.preventDefault()
       event.stopPropagation()
-      handleAudioTreeActionPlaceholder(option)
+      handleAudioTreePlay(option)
     }
   }, '▶')
 }
@@ -1341,6 +1586,7 @@ const detailIsManga = computed(() => categorySettings.value.extendTable === 'mul
 const detailIsAsmr = computed(() => categorySettings.value.extendTable === 'asmr_meta')
 const detailIsAudio = computed(() => categorySettings.value.extendTable === 'audio_meta')
 const detailIsNovel = computed(() => categorySettings.value.extendTable === 'novel_meta')
+const detailIsVideo = computed(() => categorySettings.value.extendTable === 'video_meta')
 const detailOpenFolderText = computed(() => `打开${categoryName.value || '资源'}文件夹`)
 const detailMetaItems = computed(() => {
   const resource = selectedDetailResource.value
@@ -1379,6 +1625,11 @@ const detailMetaItems = computed(() => {
     pushItem(items, '版本', resource.softwareMeta?.version)
     pushItem(items, '命令行参数', resource.softwareMeta?.commandLineArgs)
   } else if (extendTable === 'video_meta') {
+    pushItem(
+      items,
+      videoActorLabel.value,
+      Array.isArray(resource.actors) ? resource.actors.map((item: any) => String(item?.name ?? '')).filter(Boolean).join(' / ') : ''
+    )
     pushItem(items, '年份', resource.videoMeta?.year)
   } else if (extendTable === 'asmr_meta') {
     pushItem(items, '脚本', resource.asmrMeta?.scenario)
@@ -1660,6 +1911,31 @@ const handleUseAudioCoverCandidate = (coverPath: string) => {
   closeAudioCoverCandidateModal()
 }
 
+const closeVideoCoverCandidateModal = () => {
+  showVideoCoverCandidateModal.value = false
+  videoCoverCandidates.value = []
+}
+
+const handleUseVideoCoverCandidate = (coverPath: string) => {
+  formData.value.coverPath = String(coverPath ?? '').trim()
+  closeVideoCoverCandidateModal()
+}
+
+const formatVideoFrameTime = (seconds: number) => {
+  const normalizedSeconds = Math.max(0, Math.floor(Number(seconds ?? 0)))
+  const minutes = Math.floor(normalizedSeconds / 60)
+  const restSeconds = normalizedSeconds % 60
+  return `${minutes}:${String(restSeconds).padStart(2, '0')}`
+}
+
+const fixedVideoCoverCandidates = computed(() =>
+  videoCoverCandidates.value.filter((candidate) => candidate.group === 'fixed')
+)
+
+const randomVideoCoverCandidates = computed(() =>
+  videoCoverCandidates.value.filter((candidate) => candidate.group === 'random')
+)
+
 const formatDateTime = (value: string | number | Date | null | undefined) => {
   if (!value) {
     return '暂无'
@@ -1724,7 +2000,7 @@ const formatLogDuration = (logItem: { endTime?: string | number | Date | null; d
   return formatDuration(logItem?.duration)
 }
 
-const formatLaunchMode = (launchMode: string | null | undefined) => {
+const formatLaunchMode = (launchMode: string | null | undefined, usePlayTerms = false) => {
   switch (String(launchMode ?? '').trim()) {
     case ResourceLaunchMode.ADMIN:
       return '管理员启动'
@@ -1734,7 +2010,7 @@ const formatLaunchMode = (launchMode: string | null | undefined) => {
       return 'LE 转区启动'
     case ResourceLaunchMode.NORMAL:
     default:
-      return '普通启动'
+      return usePlayTerms ? '普通播放' : '普通启动'
   }
 }
 
@@ -1952,16 +2228,41 @@ const readNovelProgress = async (resourceId: string) => {
   return Math.max(0, Math.min(1, Number(result?.data?.lastReadPercent ?? 0)))
 }
 
+const markNovelCompletedIfNeeded = async (resourceId: string, progressPercent: number) => {
+  const normalizedResourceId = String(resourceId ?? '').trim()
+  const normalizedProgress = Math.max(0, Math.min(1, Number(progressPercent ?? 0)))
+  if (!normalizedResourceId || normalizedProgress < 0.995) {
+    return
+  }
+
+  const targetResource = resourceList.value.find((item) => String(item?.id ?? '') === normalizedResourceId)
+  if (targetResource?.isCompleted) {
+    return
+  }
+
+  const result = await window.api.service.updateResourceCompleted(normalizedResourceId, true)
+  if (result?.type === 'error') {
+    return
+  }
+
+  if (targetResource) {
+    targetResource.isCompleted = true
+  }
+  completedResourceCount.value = await window.api.db.getCompletedResourceCountByCategoryId(categoryId.value)
+}
+
 const writeNovelProgress = async (resourceId: string, progressPercent: number) => {
   const normalizedResourceId = String(resourceId ?? '').trim()
   if (!normalizedResourceId) {
     return
   }
 
+  const normalizedProgress = Math.max(0, Math.min(1, Number(progressPercent ?? 0)))
   await window.api.service.updateNovelReadingProgress(
     normalizedResourceId,
-    Math.max(0, Math.min(1, Number(progressPercent ?? 0)))
+    normalizedProgress
   )
+  await markNovelCompletedIfNeeded(normalizedResourceId, normalizedProgress)
 }
 
 const stopTextReadingSession = async () => {
@@ -2325,7 +2626,11 @@ const applyDefaultPathName = (basePath: string) => {
     return
   }
 
-  if (categorySettings.value.extendTable === 'software_meta' || categorySettings.value.extendTable === 'novel_meta') {
+  if (
+    categorySettings.value.extendTable === 'software_meta'
+    || categorySettings.value.extendTable === 'novel_meta'
+    || categorySettings.value.extendTable === 'video_meta'
+  ) {
     const fileStem = getFileNameWithoutExtension(basePath)
     if (fileStem) {
       formData.value.name = fileStem
@@ -2532,13 +2837,14 @@ const fetchData = async () => {
     const resourceQuery = {
       keyword: keyword.value.trim(),
       authorIds: [...selectedAuthorList.value],
+      actorNames: [...selectedActorList.value],
       albumNames: [...selectedAlbumList.value],
       engineIds: [...selectedEngineList.value],
       tagIds: [...selectedTagList.value],
       typeIds: [...selectedTypeList.value],
       missingOnly: missingFile.value,
       favoriteOnly: favoriteOnly.value,
-      completedOnly: completedOnly.value,
+      completedOnly: effectiveCompletedOnly.value,
       runningOnly: runningOnly.value,
       page: currentPage.value,
       pageSize: pageSize.value,
@@ -2582,8 +2888,11 @@ const fetchData = async () => {
           selectedDetailResource.value = matchedDetailResource
         }
       }
-      // 3. 获取作者列表
+    // 3. 获取作者列表
     authorList.value = await window.api.db.getAuthorByCategoryId(activeCategoryId)
+    actorList.value = isVideoCategory.value
+      ? await window.api.db.getActorByCategoryId(activeCategoryId)
+      : []
     albumList.value = isAudioCategory.value
       ? await window.api.db.getAlbumByCategoryId(activeCategoryId)
       : []
@@ -2591,6 +2900,7 @@ const fetchData = async () => {
       return
     }
     assignSanitizedSelectedFilterValues(selectedAuthorList, normalizedAuthorList.value, 'id')
+    assignSanitizedSelectedFilterValues(selectedActorList, normalizedActorList.value, 'id')
     assignSanitizedSelectedFilterValues(selectedAlbumList, normalizedAlbumList.value, 'name')
     // 4. 获取引擎列表
     engineList.value = showEngineFilter.value
@@ -2635,11 +2945,13 @@ const resetSelected = () => {
   completedOnly.value = false
   runningOnly.value = false
   selectedAuthorList.value = []
+  selectedActorList.value = []
   selectedAlbumList.value = []
   selectedEngineList.value = []
   selectedTagList.value = []
   selectedTypeList.value = []
   authorSearch.value = ''
+  actorSearch.value = ''
   albumSearch.value = ''
   tagSearch.value = ''
   typeSearch.value = ''
@@ -2670,6 +2982,7 @@ watch(categoryId, (nextCategoryId, previousCategoryId) => {
   resourceList.value = []
   totalResources.value = 0
   authorList.value = []
+  actorList.value = []
   albumList.value = []
   engineList.value = []
   tagList.value = []
@@ -2680,7 +2993,7 @@ watch(categoryId, (nextCategoryId, previousCategoryId) => {
 }, { immediate: true })
 
 watch(
-  [keyword, missingFile, favoriteOnly, completedOnly, runningOnly, selectedAuthorList, selectedAlbumList, selectedEngineList, selectedTagList, selectedTypeList, pageSize, sortBy],
+  [keyword, missingFile, favoriteOnly, completedOnly, runningOnly, selectedAuthorList, selectedActorList, selectedAlbumList, selectedEngineList, selectedTagList, selectedTypeList, pageSize, sortBy],
   () => {
     if (suppressAutoFetch.value) {
       return
@@ -2690,6 +3003,23 @@ watch(
   },
   { deep: true }
 )
+
+watch(showCompletedFilter, (visible) => {
+  if (!visible) {
+    completedOnly.value = false
+  }
+})
+
+watch(showVideoPlayer, (visible) => {
+  if (visible) {
+    hasOpenedVideoPlayer = true
+    return
+  }
+
+  if (hasOpenedVideoPlayer) {
+    void fetchData()
+  }
+})
 
 watch(currentPage, () => {
   if (suppressAutoFetch.value) {
@@ -3030,8 +3360,9 @@ const syncBatchImportOngoingCenter = (targetCategoryId = categoryId.value) => {
   const displayIndex = Math.min(total, current + 1)
   const progress = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0
   const title = state.importRunning ? '批量导入进行中' : '批量导入'
+  const resourceLabel = targetCategoryId === categoryId.value ? batchImportResourceLabel.value : '资源'
   const contentPrefix = state.importRunning
-    ? `正在导入第 ${displayIndex} / ${total} 个游戏`
+    ? `正在导入第 ${displayIndex} / ${total} 个${resourceLabel}`
     : `正在分析第 ${displayIndex} / ${total} 个目录`
   upsertOngoingCenterItem({
     id: getBatchImportOngoingId(targetCategoryId),
@@ -3074,6 +3405,16 @@ const handleBatchImportClick = () => {
 
     if (isAudioCategory.value) {
       await handleBatchImportAudioFiles()
+      return
+    }
+
+    if (isNovelCategory.value) {
+      await handleBatchImportNovelFiles()
+      return
+    }
+
+    if (isVideoCategory.value && String(categorySettings.value.resourcePathType ?? '') === 'file') {
+      await handleBatchImportVideoFiles()
       return
     }
 
@@ -3686,6 +4027,280 @@ const handleBatchImportImages = async () => {
     }
   } catch (error) {
     showNotifyByType('error', '批量导入图片', error instanceof Error ? error.message : '批量导入图片失败')
+  }
+}
+
+const buildBatchNovelResourcePayload = (filePath: string, analysis: any): ResourceForm => {
+  const fileStem = getFileNameWithoutExtension(filePath)
+  const novelMetaBase = createEmptyMetaByType('novel_meta') as unknown as ResourceMeta
+  const isbn = String(analysis?.isbn ?? '').trim()
+  const coverDataUrl = String(analysis?.coverDataUrl ?? '').trim()
+
+  return {
+    name: fileStem || getFileName(filePath),
+    description: '',
+    coverPath: coverDataUrl,
+    basePath: String(filePath ?? '').trim(),
+    author: '',
+    authors: [],
+    actors: [],
+    tags: [],
+    types: [],
+    categoryId: categoryInfo.value.id,
+    meta: {
+      ...novelMetaBase,
+      isbn,
+      lastReadPercent: 0
+    }
+  }
+}
+
+const handleBatchImportNovelFiles = async () => {
+  const targetCategoryId = categoryId.value
+  const currentState = ensureBatchImportState(targetCategoryId)
+
+  if (currentState.analyzeRunning || currentState.importRunning) {
+    patchBatchImportState(targetCategoryId, {
+      analyzeInBackground: false,
+      analyzeToastDismissed: false,
+      showLoading: true
+    })
+    syncBatchImportOngoingCenter(targetCategoryId)
+    return
+  }
+
+  try {
+    const extensions = [...(categorySettings.value.extensions ?? [])]
+    const filePaths = await window.api.dialog.selectFiles(extensions)
+
+    if (!Array.isArray(filePaths) || !filePaths.length) {
+      return
+    }
+
+    patchBatchImportState(targetCategoryId, {
+      items: [],
+      fetchInfoEnabled: false,
+      analyzeTotal: filePaths.length,
+      analyzeCurrent: 0,
+      analyzeMessage: '正在准备导入小说，请稍候...',
+      analyzeCancelled: false,
+      analyzeInBackground: false,
+      analyzeToastDismissed: false,
+      analyzeRunning: false,
+      importRunning: true,
+      showLoading: true,
+      showPreview: false
+    })
+    syncBatchImportOngoingCenter(targetCategoryId)
+
+    let successCount = 0
+    let skippedCount = 0
+    let failedCount = 0
+
+    for (const [index, rawFilePath] of filePaths.entries()) {
+      if (ensureBatchImportState(targetCategoryId).analyzeCancelled) {
+        break
+      }
+
+      const filePath = String(rawFilePath ?? '').trim()
+      const fileName = getFileName(filePath) || filePath || '未知文件'
+      patchBatchImportState(targetCategoryId, {
+        analyzeCurrent: index,
+        analyzeMessage: `正在导入第 ${index + 1} / ${filePaths.length} 个小说\n${fileName}`
+      })
+      syncBatchImportOngoingCenter(targetCategoryId)
+
+      if (!filePath || !validateBasePathExtension(filePath)) {
+        skippedCount += 1
+        continue
+      }
+
+      const existsResult = await window.api.service.checkResourceExistsByPath(filePath)
+      if (existsResult?.exists) {
+        skippedCount += 1
+        continue
+      }
+
+      if (existsResult?.type === 'error') {
+        failedCount += 1
+        continue
+      }
+
+      let analysis: any = {}
+      try {
+        const analysisResult = await window.api.service.analyzeNovelFilePath(filePath)
+        analysis = analysisResult?.data ?? {}
+      } catch {
+        analysis = {}
+      }
+
+      const payload = buildBatchNovelResourcePayload(filePath, analysis)
+      const result = await window.api.service.saveResource(payload)
+      if (result?.type === 'error') {
+        failedCount += 1
+      } else {
+        successCount += 1
+      }
+    }
+
+    patchBatchImportState(targetCategoryId, {
+      analyzeCurrent: filePaths.length,
+      analyzeMessage: '小说批量导入完成'
+    })
+
+    const stopped = ensureBatchImportState(targetCategoryId).analyzeCancelled
+    const notifyType = failedCount > 0 && successCount === 0 ? 'error' : stopped ? 'warning' : 'success'
+    showNotifyByType(
+      notifyType,
+      '批量导入小说',
+      `${stopped ? '已停止，' : ''}导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}`
+    )
+
+    if (successCount > 0) {
+      await fetchData()
+    }
+  } catch (error) {
+    showNotifyByType('error', '批量导入小说', error instanceof Error ? error.message : '批量导入小说失败')
+  } finally {
+    patchBatchImportState(targetCategoryId, {
+      importRunning: false,
+      showLoading: false,
+      analyzeInBackground: false,
+      analyzeToastDismissed: false
+    })
+    clearBatchImportOngoingCenter(targetCategoryId)
+  }
+}
+
+const buildBatchVideoResourcePayload = (filePath: string): ResourceForm => {
+  const fileStem = getFileNameWithoutExtension(filePath)
+  const videoMetaBase = createEmptyMetaByType('video_meta') as unknown as ResourceMeta
+
+  return {
+    name: fileStem || getFileName(filePath),
+    description: '',
+    coverPath: '',
+    basePath: String(filePath ?? '').trim(),
+    author: '',
+    authors: [],
+    actors: [],
+    tags: [],
+    types: [],
+    categoryId: categoryInfo.value.id,
+    meta: {
+      ...videoMetaBase,
+      year: null,
+      lastPlayFile: '',
+      lastPlayTime: 0
+    }
+  }
+}
+
+const handleBatchImportVideoFiles = async () => {
+  const targetCategoryId = categoryId.value
+  const currentState = ensureBatchImportState(targetCategoryId)
+
+  if (currentState.analyzeRunning || currentState.importRunning) {
+    patchBatchImportState(targetCategoryId, {
+      analyzeInBackground: false,
+      analyzeToastDismissed: false,
+      showLoading: true
+    })
+    syncBatchImportOngoingCenter(targetCategoryId)
+    return
+  }
+
+  try {
+    const extensions = [...(categorySettings.value.extensions ?? [])]
+    const filePaths = await window.api.dialog.selectFiles(extensions)
+
+    if (!Array.isArray(filePaths) || !filePaths.length) {
+      return
+    }
+
+    patchBatchImportState(targetCategoryId, {
+      items: [],
+      fetchInfoEnabled: false,
+      analyzeTotal: filePaths.length,
+      analyzeCurrent: 0,
+      analyzeMessage: '正在准备导入电影，请稍候...',
+      analyzeCancelled: false,
+      analyzeInBackground: false,
+      analyzeToastDismissed: false,
+      analyzeRunning: false,
+      importRunning: true,
+      showLoading: true,
+      showPreview: false
+    })
+    syncBatchImportOngoingCenter(targetCategoryId)
+
+    let successCount = 0
+    let skippedCount = 0
+    let failedCount = 0
+
+    for (const [index, rawFilePath] of filePaths.entries()) {
+      if (ensureBatchImportState(targetCategoryId).analyzeCancelled) {
+        break
+      }
+
+      const filePath = String(rawFilePath ?? '').trim()
+      const fileName = getFileName(filePath) || filePath || '未知文件'
+      patchBatchImportState(targetCategoryId, {
+        analyzeCurrent: index,
+        analyzeMessage: `正在导入第 ${index + 1} / ${filePaths.length} 个电影\n${fileName}`
+      })
+      syncBatchImportOngoingCenter(targetCategoryId)
+
+      if (!filePath || !validateBasePathExtension(filePath)) {
+        skippedCount += 1
+        continue
+      }
+
+      const existsResult = await window.api.service.checkResourceExistsByPath(filePath)
+      if (existsResult?.exists) {
+        skippedCount += 1
+        continue
+      }
+
+      if (existsResult?.type === 'error') {
+        failedCount += 1
+        continue
+      }
+
+      const result = await window.api.service.saveResource(buildBatchVideoResourcePayload(filePath))
+      if (result?.type === 'error') {
+        failedCount += 1
+      } else {
+        successCount += 1
+      }
+    }
+
+    patchBatchImportState(targetCategoryId, {
+      analyzeCurrent: filePaths.length,
+      analyzeMessage: '电影批量导入完成'
+    })
+
+    const stopped = ensureBatchImportState(targetCategoryId).analyzeCancelled
+    const notifyType = failedCount > 0 && successCount === 0 ? 'error' : stopped ? 'warning' : 'success'
+    showNotifyByType(
+      notifyType,
+      '批量导入电影',
+      `${stopped ? '已停止，' : ''}导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}`
+    )
+
+    if (successCount > 0) {
+      await fetchData()
+    }
+  } catch (error) {
+    showNotifyByType('error', '批量导入电影', error instanceof Error ? error.message : '批量导入电影失败')
+  } finally {
+    patchBatchImportState(targetCategoryId, {
+      importRunning: false,
+      showLoading: false,
+      analyzeInBackground: false,
+      analyzeToastDismissed: false
+    })
+    clearBatchImportOngoingCenter(targetCategoryId)
   }
 }
 
@@ -4462,6 +5077,51 @@ const handleUseScreenshotCover = async () => {
   }
 }
 
+const handleUseVideoRandomFrameCover = async () => {
+  const basePath = String(formData.value?.basePath ?? '').trim()
+  if (!basePath) {
+    showNotifyByType('warning', '随机帧封面', '请先选择视频文件')
+    return
+  }
+
+  videoCoverFrameLoading.value = true
+  try {
+    const result = await window.api.service.extractVideoCoverFrames(basePath)
+    const resultType = result?.type ?? 'info'
+    const resultMessage = result?.message ?? '随机帧生成完成'
+
+    if (resultType === 'error' || resultType === 'warning') {
+      showNotifyByType(resultType, '随机帧封面', resultMessage)
+      return
+    }
+
+    const rawCandidates = Array.isArray(result?.data?.coverCandidates) ? result.data.coverCandidates : []
+    const resolvedCandidates = await Promise.all(rawCandidates.map(async (candidate: any) => {
+      const coverPath = String(candidate?.coverPath ?? '').trim()
+      return {
+        label: String(candidate?.label ?? '').trim() || '随机帧',
+        coverPath,
+        previewSrc: await resolveCoverPreviewUrl(coverPath),
+        time: Math.max(0, Number(candidate?.time ?? 0)),
+        group: String(candidate?.group ?? '') === 'fixed' ? 'fixed' : 'random'
+      }
+    }))
+    const availableCandidates = resolvedCandidates.filter((candidate) => candidate.coverPath && candidate.previewSrc)
+
+    if (!availableCandidates.length) {
+      showNotifyByType('warning', '随机帧封面', '已生成随机帧，但预览加载失败')
+      return
+    }
+
+    videoCoverCandidates.value = availableCandidates
+    showVideoCoverCandidateModal.value = true
+  } catch (error) {
+    showNotifyByType('error', '随机帧封面', error instanceof Error ? error.message : '生成随机帧失败')
+  } finally {
+    videoCoverFrameLoading.value = false
+  }
+}
+
 const resolveEngineIcon = (icon: string) => {
   if (!icon) {
     return ''
@@ -4821,6 +5481,11 @@ const handleLaunchResource = async (resource: any) => {
 
   if (detailIsAudio.value) {
     await openAudioPlaybackFromLaunch(resource)
+    return
+  }
+
+  if (detailIsVideo.value) {
+    await openVideoPlaybackFromLaunch(resource)
     return
   }
 
@@ -6016,14 +6681,22 @@ const handleToggleCompleted = async (resource: any) => {
     const resultType = result?.type ?? 'info'
     const resultMessage = result?.message ?? '操作完成'
 
-    showNotifyByType(resultType, nextValue ? '标记通关' : '取消通关', resultMessage)
+    showNotifyByType(
+      resultType,
+      nextValue ? `标记${completedActionLabel.value}` : `取消${completedActionLabel.value}`,
+      resultMessage
+    )
 
     if (resultType !== 'error') {
       resource.isCompleted = nextValue
       await fetchData()
     }
   } catch (error) {
-    showNotifyByType('error', '标记通关', error instanceof Error ? error.message : '更新通关状态失败')
+    showNotifyByType(
+      'error',
+      `标记${completedActionLabel.value}`,
+      error instanceof Error ? error.message : `更新${completedActionLabel.value}状态失败`
+    )
   }
 }
 </script>
@@ -6059,8 +6732,8 @@ const handleToggleCompleted = async (resource: any) => {
                 <span class="filter-top-option__label">已收藏</span>
                 <n-tag type="success" :bordered="false" round size="small">{{ favoriteResourceCount }}</n-tag>
               </n-checkbox>
-              <n-checkbox v-model:checked="completedOnly" class="filter-top-option">
-                <span class="filter-top-option__label">已通关</span>
+              <n-checkbox v-if="showCompletedFilter" v-model:checked="completedOnly" class="filter-top-option">
+                <span class="filter-top-option__label">{{ completedStateLabel }}</span>
                 <n-tag type="info" :bordered="false" round size="small">{{ completedResourceCount }}</n-tag>
               </n-checkbox>
               <n-checkbox v-model:checked="runningOnly" class="filter-top-option">
@@ -6086,6 +6759,23 @@ const handleToggleCompleted = async (resource: any) => {
                   <n-checkbox v-for="author in filteredAuthorList" :key="author.id" :value="author.id">
                     {{ author.name }}
                     <n-tag type="primary" :bordered="false" round size="small">{{ author.count }}</n-tag>
+                  </n-checkbox>
+                </n-flex>
+              </n-checkbox-group>
+            </div>
+            <div v-if="isVideoCategory" class="filter-section">
+              <n-divider title-placement="left" style="margin-bottom: 5px;">{{ videoActorLabel }}筛选</n-divider>
+              <n-input
+                v-model:value="actorSearch"
+                :placeholder="`请输入${videoActorLabel}名称`"
+                class="actor-search"
+                clearable
+              />
+              <n-checkbox-group v-model:value="selectedActorList" class="filter-group">
+                <n-flex vertical class="filter-list">
+                  <n-checkbox v-for="actor in filteredActorList" :key="actor.id" :value="actor.id">
+                    {{ actor.name }}
+                    <n-tag type="success" :bordered="false" round size="small">{{ actor.count }}</n-tag>
                   </n-checkbox>
                 </n-flex>
               </n-checkbox-group>
@@ -6280,7 +6970,7 @@ const handleToggleCompleted = async (resource: any) => {
                 :stop-needs-confirm="categorySettings.extendTable === 'game_meta'"
                 :selected="selectedResourceIds.includes(String(resource?.id ?? ''))"
                 :selection-mode="resourceSelectionMode"
-                :show-default-app-play="isAudioCategory"
+                :show-default-app-play="isAudioCategory || isVideoCategory"
                 :show-add-to-playlist="isAudioCategory"
                 @launch="handleLaunchResource"
                 @admin-launch="handleAdminLaunchResource"
@@ -6500,7 +7190,7 @@ const handleToggleCompleted = async (resource: any) => {
               </div>
             </div>
 
-            <div v-if="selectedDetailResource.description" class="detail-drawer__section">
+            <div v-if="hasDetailDescription" class="detail-drawer__section">
               <div class="detail-drawer__section-title">描述</div>
               <div class="detail-drawer__item detail-drawer__item--full">
                 <div class="detail-drawer__description-box" :style="detailDescriptionBoxStyle">
@@ -6542,7 +7232,7 @@ const handleToggleCompleted = async (resource: any) => {
                     <span class="detail-drawer__label">阅读进度</span>
                     <span class="detail-drawer__value">{{ detailReadingProgressText }}</span>
                   </div>
-                  <div v-if="detailIsAsmr || detailIsAudio" class="detail-drawer__item">
+                  <div v-if="detailIsAsmr || detailIsAudio || isVideoCategory" class="detail-drawer__item">
                     <span class="detail-drawer__label">播放进度</span>
                     <span class="detail-drawer__value">{{ detailPlaybackProgressText }}</span>
                   </div>
@@ -6653,7 +7343,7 @@ const handleToggleCompleted = async (resource: any) => {
 
               <div v-else-if="!isSingleImageCategory && !detailIsManga && !detailIsAudio" class="detail-drawer__section">
                 <div class="detail-drawer__section-title">{{ detailGallerySectionTitle }}</div>
-                <n-empty v-if="!detailLogs.length" description="暂无启动日志" />
+                <n-empty v-if="!detailLogs.length" :description="detailEmptyLogDescription" />
                 <n-infinite-scroll
                   v-else
                   class="detail-drawer__logs-scroll"
@@ -6663,8 +7353,8 @@ const handleToggleCompleted = async (resource: any) => {
                   <div class="detail-drawer__logs">
                     <div v-for="(logItem, index) in visibleDetailLogs" :key="`${selectedDetailResource.id}-${index}-${logItem.startTime}`" class="detail-drawer__log">
                       <div class="detail-drawer__log-row">
-                        <span class="detail-drawer__log-label">启动方式</span>
-                        <span class="detail-drawer__log-value">{{ formatLaunchMode(logItem.launchMode) }}</span>
+                        <span class="detail-drawer__log-label">{{ detailLogModeLabel }}</span>
+                        <span class="detail-drawer__log-value">{{ formatLaunchMode(logItem.launchMode, isVideoCategory) }}</span>
                       </div>
                       <div class="detail-drawer__log-row">
                         <span class="detail-drawer__log-label">开始时间</span>
@@ -6675,7 +7365,7 @@ const handleToggleCompleted = async (resource: any) => {
                         <span class="detail-drawer__log-value">{{ formatLogEndTime(logItem.endTime) }}</span>
                       </div>
                       <div class="detail-drawer__log-row">
-                        <span class="detail-drawer__log-label">运行时长</span>
+                        <span class="detail-drawer__log-label">{{ detailLogDurationLabel }}</span>
                         <span class="detail-drawer__log-value">{{ formatLogDuration(logItem) }}</span>
                       </div>
                     </div>
@@ -7045,6 +7735,68 @@ const handleToggleCompleted = async (resource: any) => {
     </n-modal>
 
     <n-modal
+      v-model:show="showVideoCoverCandidateModal"
+      preset="card"
+      title="选择随机帧封面"
+      :style="{ width: '920px' }"
+      @after-leave="closeVideoCoverCandidateModal"
+    >
+      <n-space vertical :size="16">
+        <n-alert type="info" :show-icon="false">
+          已从视频中生成固定时间和随机时间的封面候选，请选择要使用的那一张。
+        </n-alert>
+        <div class="video-cover-candidate-section">
+          <div class="video-cover-candidate-section__title">固定时间</div>
+          <div v-if="fixedVideoCoverCandidates.length" class="audio-cover-candidate-list video-cover-candidate-list">
+            <button
+              v-for="candidate in fixedVideoCoverCandidates"
+              :key="`${candidate.label}-${candidate.coverPath}`"
+              type="button"
+              class="audio-cover-candidate"
+              @click="handleUseVideoCoverCandidate(candidate.coverPath)"
+            >
+              <div class="audio-cover-candidate__preview video-cover-candidate__preview">
+                <img :src="candidate.previewSrc" :alt="candidate.label" class="audio-cover-candidate__image" />
+              </div>
+              <div class="audio-cover-candidate__body">
+                <div class="audio-cover-candidate__title">{{ candidate.label }}</div>
+                <div class="audio-cover-candidate__query">时间点：{{ formatVideoFrameTime(candidate.time) }}</div>
+              </div>
+            </button>
+          </div>
+          <div v-else class="video-cover-candidate-section__empty">视频长度不足，暂无固定时间候选</div>
+        </div>
+        <div class="video-cover-candidate-section">
+          <div class="video-cover-candidate-section__title">随机时间</div>
+          <div class="audio-cover-candidate-list video-cover-candidate-list">
+            <button
+              v-for="candidate in randomVideoCoverCandidates"
+              :key="`${candidate.label}-${candidate.coverPath}`"
+              type="button"
+              class="audio-cover-candidate"
+              @click="handleUseVideoCoverCandidate(candidate.coverPath)"
+            >
+              <div class="audio-cover-candidate__preview video-cover-candidate__preview">
+                <img :src="candidate.previewSrc" :alt="candidate.label" class="audio-cover-candidate__image" />
+              </div>
+              <div class="audio-cover-candidate__body">
+                <div class="audio-cover-candidate__title">{{ candidate.label }}</div>
+                <div class="audio-cover-candidate__query">时间点：{{ formatVideoFrameTime(candidate.time) }}</div>
+              </div>
+            </button>
+          </div>
+        </div>
+        <div class="batch-label-modal__footer">
+          <n-space justify="end">
+            <n-button @click="closeVideoCoverCandidateModal">
+              取消
+            </n-button>
+          </n-space>
+        </div>
+      </n-space>
+    </n-modal>
+
+    <n-modal
       v-model:show="showEditModal"
       preset="card"
       :title="`修改${categoryName}`"
@@ -7092,6 +7844,7 @@ const handleToggleCompleted = async (resource: any) => {
                 :base-path="formData.basePath"
                 :title="formData.name"
                 :fetch-info-loading="fetchResourceInfoLoading"
+                :actor-label="videoActorLabel"
                 @update:actors="(value: string[]) => { formData.actors = value }"
                 @check-engine="handleCheckGameEngine"
                 @fetch-game-info="handleFetchGameInfo"
@@ -7170,7 +7923,16 @@ const handleToggleCompleted = async (resource: any) => {
                       获取专辑封面
                     </n-button>
                     <n-button
-                      v-if="!['multi_image_meta', 'asmr_meta', 'audio_meta', 'novel_meta'].includes(categorySettings.extendTable)"
+                      v-if="categorySettings.extendTable === 'video_meta'"
+                      size="small"
+                      :loading="videoCoverFrameLoading"
+                      :disabled="!hasBasePath || videoCoverFrameLoading"
+                      @click="handleUseVideoRandomFrameCover"
+                    >
+                      使用随机帧
+                    </n-button>
+                    <n-button
+                      v-if="!['multi_image_meta', 'asmr_meta', 'audio_meta', 'novel_meta', 'video_meta'].includes(categorySettings.extendTable)"
                       size="small"
                       :disabled="!hasBasePath"
                       @click="handleUseScreenshotCover"
@@ -7290,6 +8052,13 @@ const handleToggleCompleted = async (resource: any) => {
       @update:show="handleEbookReaderShowUpdate"
       @progress-change="handleEbookReaderProgressChange"
     />
+    <VideoPlayer
+      v-model:show="showVideoPlayer"
+      :playlist="videoPlayerPlaylist"
+      :initial-path="videoPlayerInitialPath"
+      :initial-time="videoPlayerInitialTime"
+      :title="videoPlayerTitle"
+    />
     <div v-if="isDragOver && categorySettings.resourcePathType === 'file'" class="drag-overlay">
       <div class="drag-overlay__panel">
         <div class="drag-overlay__title">拖拽文件到这里添加{{ categoryName }}</div>
@@ -7345,6 +8114,7 @@ const handleToggleCompleted = async (resource: any) => {
             :base-path="formData.basePath"
             :title="formData.name"
             :fetch-info-loading="fetchResourceInfoLoading"
+            :actor-label="videoActorLabel"
             @update:actors="(value: string[]) => { formData.actors = value }"
             @check-engine="handleCheckGameEngine"
             @fetch-game-info="handleFetchGameInfo"
@@ -7422,11 +8192,20 @@ const handleToggleCompleted = async (resource: any) => {
                     >
                       获取专辑封面
                     </n-button>
-                    <n-button
-                      v-if="!['multi_image_meta', 'asmr_meta', 'audio_meta', 'novel_meta'].includes(categorySettings.extendTable)"
-                      size="small"
-                    :disabled="!hasBasePath"
-                    @click="handleUseScreenshotCover"
+                <n-button
+                  v-if="categorySettings.extendTable === 'video_meta'"
+                  size="small"
+                  :loading="videoCoverFrameLoading"
+                  :disabled="!hasBasePath || videoCoverFrameLoading"
+                  @click="handleUseVideoRandomFrameCover"
+                >
+                  使用随机帧
+                </n-button>
+                <n-button
+                  v-if="!['multi_image_meta', 'asmr_meta', 'audio_meta', 'novel_meta', 'video_meta'].includes(categorySettings.extendTable)"
+                  size="small"
+                  :disabled="!hasBasePath"
+                  @click="handleUseScreenshotCover"
                 >
                   使用截图作为封面
                 </n-button>
@@ -7664,6 +8443,30 @@ const handleToggleCompleted = async (resource: any) => {
   gap: 14px;
 }
 
+.video-cover-candidate-list {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.video-cover-candidate-section {
+  display: grid;
+  gap: 10px;
+}
+
+.video-cover-candidate-section__title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.video-cover-candidate-section__empty {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  opacity: 0.68;
+}
+
 .audio-cover-candidate {
   padding: 0;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -7685,6 +8488,10 @@ const handleToggleCompleted = async (resource: any) => {
 .audio-cover-candidate__preview {
   aspect-ratio: 1;
   background: rgba(255, 255, 255, 0.04);
+}
+
+.video-cover-candidate__preview {
+  aspect-ratio: 16 / 9;
 }
 
 .audio-cover-candidate__image {

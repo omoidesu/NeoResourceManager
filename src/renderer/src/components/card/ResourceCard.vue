@@ -82,6 +82,26 @@ let stopClickTimer: ReturnType<typeof setTimeout> | null = null
 let coverPreviewObserver: IntersectionObserver | null = null
 let coverPreviewTaskId = 0
 
+const isNovelCategory = computed(() => String(props.categoryName ?? '').trim() === '小说')
+const isMovieCategory = computed(() => String(props.categoryName ?? '').trim() === '电影')
+const isAnimeCategory = computed(() => String(props.categoryName ?? '').trim() === '番剧')
+const isVideoLikeCategory = computed(() => isMovieCategory.value || isAnimeCategory.value)
+const completedLabel = computed(() => {
+  if (isNovelCategory.value) {
+    return '读完'
+  }
+
+  if (isMovieCategory.value) {
+    return '播完'
+  }
+
+  return '通关'
+})
+const completedStateLabel = computed(() => `已${completedLabel.value}`)
+const inactiveStatusIconColor = 'currentColor'
+const favoriteIconColor = computed(() => (props.resource?.ifFavorite ? '#f0a020' : inactiveStatusIconColor))
+const completedIconColor = computed(() => (props.resource?.isCompleted ? '#2080f0' : inactiveStatusIconColor))
+
 const normalizeCoverPreviewSource = (coverPath: string) => {
   if (!coverPath) {
     return ''
@@ -160,7 +180,7 @@ const contextMenuOptions = computed(() => ([
     icon: renderMenuIcon(props.resource?.ifFavorite ? HeartDislikeOutline : HeartOutline)
   },
   ...(props.showCompletedToggle ? [{
-    label: props.resource?.isCompleted ? '取消已通关' : '已通关',
+    label: props.resource?.isCompleted ? `取消${completedStateLabel.value}` : completedStateLabel.value,
     key: 'toggle-completed',
     icon: renderMenuIcon(CheckmarkCircleOutline)
   }] : []),
@@ -214,8 +234,6 @@ const fileExtension = computed(() => {
   return String(matched?.[1] ?? '').trim().toLowerCase()
 })
 
-const isNovelCategory = computed(() => String(props.categoryName ?? '').trim() === '小说')
-
 const showFileTypeIcon = computed(() => {
   const normalizedCategoryName = String(props.categoryName ?? '').trim()
   return normalizedCategoryName === '游戏' || normalizedCategoryName === '软件' || (isNovelCategory.value && Boolean(fileExtension.value))
@@ -244,6 +262,17 @@ const novelPublishInfo = computed(() => {
   const publisher = String(props.resource?.novelMeta?.publisher ?? '').trim()
   return [year, publisher].filter(Boolean).join(' / ')
 })
+
+const videoYearInfo = computed(() => {
+  if (!isVideoLikeCategory.value) {
+    return ''
+  }
+
+  const rawYear = Number(props.resource?.videoMeta?.year ?? 0)
+  return Number.isFinite(rawYear) && rawYear >= 1000 ? String(Math.trunc(rawYear)) : ''
+})
+const showActorLine = computed(() => (props.hideTypeLine || isVideoLikeCategory.value) && resourceActors.value.length)
+const actorLineLabel = computed(() => (isVideoLikeCategory.value ? '声优/演员' : '声优'))
 
 const fallbackExecutableIcon = computed(() => {
   const fileName = displayBaseName.value.toLowerCase()
@@ -589,6 +618,7 @@ onMounted(() => {
               :src="coverPreviewSrc"
               :alt="resource.title"
               class="resource-card__cover-image"
+              draggable="false"
             />
             <div v-else class="resource-card__cover-placeholder">
               {{ categoryName || '资源' }}
@@ -611,6 +641,7 @@ onMounted(() => {
                     :src="fileIconSrc"
                     :alt="displayBaseName || resource.title"
                     class="resource-card__title-icon-image"
+                    draggable="false"
                   />
                   <span v-else>{{ fallbackExecutableIcon }}</span>
                 </span>
@@ -638,7 +669,7 @@ onMounted(() => {
                   <n-icon
                     size="18"
                     class="resource-card__status-icon resource-card__status-icon--interactive"
-                    :color="resource.ifFavorite ? '#f0a020' : 'rgba(255, 255, 255, 0.28)'"
+                    :color="favoriteIconColor"
                     @click.stop="emit('toggle-favorite', resource)"
                   >
                     <HeartOutline />
@@ -651,13 +682,13 @@ onMounted(() => {
                   <n-icon
                     size="18"
                     class="resource-card__status-icon resource-card__status-icon--interactive"
-                    :color="resource.isCompleted ? '#2080f0' : 'rgba(255, 255, 255, 0.28)'"
+                    :color="completedIconColor"
                     @click.stop="emit('toggle-completed', resource)"
                   >
                     <CheckmarkCircleOutline />
                   </n-icon>
                 </template>
-                {{ resource.isCompleted ? '取消通关' : '标记通关' }}
+                {{ resource.isCompleted ? `取消${completedLabel}` : `标记${completedLabel}` }}
               </n-popover>
             </div>
           </div>
@@ -684,8 +715,8 @@ onMounted(() => {
               <span class="resource-card__meta-text" :title="novelPublishInfo">{{ novelPublishInfo }}</span>
             </div>
 
-            <div v-if="hideTypeLine && resourceActors.length" class="resource-card__meta-line">
-              <span class="resource-card__meta-label">声优</span>
+            <div v-if="showActorLine" class="resource-card__meta-line resource-card__meta-line--single">
+              <span class="resource-card__meta-label">{{ actorLineLabel }}</span>
               <n-space size="small">
                 <n-tag
                   v-for="actor in resourceActors"
@@ -698,6 +729,11 @@ onMounted(() => {
                   {{ actor.name }}
                 </n-tag>
               </n-space>
+            </div>
+
+            <div v-if="videoYearInfo" class="resource-card__meta-line">
+              <span class="resource-card__meta-label">年份</span>
+              <span class="resource-card__meta-text" :title="videoYearInfo">{{ videoYearInfo }}</span>
             </div>
 
             <div v-if="showAlbumLine" class="resource-card__meta-line">
@@ -715,7 +751,7 @@ onMounted(() => {
               </n-space>
             </div>
 
-            <div v-if="!hideTypeLine && resourceTypes.length" class="resource-card__meta-line">
+            <div v-if="!hideTypeLine && resourceTypes.length" class="resource-card__meta-line resource-card__meta-line--single">
               <span class="resource-card__meta-label">分类</span>
               <n-space size="small">
                 <n-tag
@@ -731,7 +767,7 @@ onMounted(() => {
               </n-space>
             </div>
 
-            <div v-if="resourceTags.length" class="resource-card__meta-line">
+            <div v-if="resourceTags.length" class="resource-card__meta-line resource-card__meta-line--single">
               <span class="resource-card__meta-label">标签</span>
               <n-space size="small">
                 <n-tag
@@ -889,6 +925,8 @@ onMounted(() => {
   height: 100%;
   object-fit: cover;
   display: block;
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 .resource-card__cover-placeholder {
@@ -957,12 +995,15 @@ onMounted(() => {
   height: 18px;
   object-fit: contain;
   display: block;
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 .resource-card__title-icon-svg {
   width: 18px;
   height: 18px;
-  color: rgba(255, 255, 255, 0.72);
+  color: currentColor;
+  opacity: 0.72;
   display: block;
 }
 
@@ -1023,7 +1064,8 @@ onMounted(() => {
   align-self: center;
   font-size: 12px;
   line-height: 1.5;
-  color: rgba(255, 255, 255, 0.82);
+  color: currentColor;
+  opacity: 0.82;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1034,6 +1076,15 @@ onMounted(() => {
   min-width: 0;
   max-height: 54px;
   overflow: hidden;
+}
+
+.resource-card__meta-line--single :deep(.n-space) {
+  flex-wrap: nowrap;
+  max-height: 24px;
+}
+
+.resource-card__meta-line--single :deep(.n-tag) {
+  flex: 0 0 auto;
 }
 
 .resource-card__bottom-overlay {

@@ -17,9 +17,21 @@ import { detectGameEngineProfile } from '../util/game-engine-detector'
 import { detectGameLaunchFile } from '../util/game-launch-file-detector'
 import { analyzeNovelFile } from '../util/novel-file-analyzer'
 import { parseFile } from 'music-metadata'
+import { execFile } from 'child_process'
 
 const fs = require('fs-extra')
 const hidefile = require('hidefile')
+const ffmpegPath = require('ffmpeg-static') as string | null
+const ffprobeStatic = require('ffprobe-static') as { path?: string }
+const VIDEO_COVER_FRAME_COUNT = 5
+const MAX_COVER_PROCESS_PIXELS = 100_000_000
+const VIDEO_FIXED_COVER_FRAME_TIMES = [
+  { label: '1 分钟', time: 60 },
+  { label: '5 分钟', time: 5 * 60 },
+  { label: '10 分钟', time: 10 * 60 },
+  { label: '20 分钟', time: 20 * 60 },
+  { label: '30 分钟', time: 30 * 60 },
+]
 
 export class ResourceService {
   static readonly logger = createLogger('ResourceService')
@@ -949,10 +961,21 @@ export class ResourceService {
       }
     }
 
+    const normalizedProgress = Math.max(0, Math.min(1, Number(lastReadPercent ?? 0)))
     DatabaseService.upsertNovelReadingProgress(
       normalizedResourceId,
-      Math.max(0, Math.min(1, Number(lastReadPercent ?? 0)))
+      normalizedProgress
     )
+
+    if (normalizedProgress >= 0.995) {
+      const existingResource = await DatabaseService.getResourceById(normalizedResourceId)
+      if (existingResource && !existingResource.isCompleted) {
+        await DatabaseService.updateResource({
+          id: normalizedResourceId,
+          isCompleted: true,
+        })
+      }
+    }
 
     return {
       type: 'success',
@@ -1082,6 +1105,14 @@ export class ResourceService {
       type: 'success',
       message: '已结束播放',
     }
+  }
+
+  static async startVideoPlayback(resourceId: string) {
+    return this.startAsmrPlayback(resourceId)
+  }
+
+  static async stopVideoPlayback(resourceId: string) {
+    return this.stopAsmrPlayback(resourceId)
   }
 
   static async launchResourceAsAdmin(resourceId: string, basePath: string, fileName?: string | null) {
@@ -2053,6 +2084,81 @@ export class ResourceService {
     }
   }
 
+  static async updateVideoPlaybackProgress(resourceId: string, lastPlayFile: string, lastPlayTime: number) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    const normalizedLastPlayFile = String(lastPlayFile ?? '').trim()
+    const normalizedLastPlayTime = Math.max(0, Math.floor(Number(lastPlayTime ?? 0)))
+
+    if (!normalizedResourceId || !normalizedLastPlayFile) {
+      return {
+        type: 'warning',
+        message: '播放进度参数无效'
+      }
+    }
+
+    DatabaseService.updateVideoPlaybackProgress(
+      normalizedResourceId,
+      normalizedLastPlayFile,
+      normalizedLastPlayTime
+    )
+
+    return {
+      type: 'success',
+      message: '播放进度已保存'
+    }
+  }
+
+  static async extractVideoCoverFrames(basePath: string) {
+    const normalizedBasePath = path.normalize(String(basePath ?? '').trim())
+
+    if (!normalizedBasePath) {
+      return {
+        type: 'warning',
+        message: '请先选择视频文件',
+      }
+    }
+
+    try {
+      const exists = await fs.pathExists(normalizedBasePath)
+      if (!exists) {
+        return {
+          type: 'warning',
+          message: '视频文件不存在',
+        }
+      }
+
+      const stat = await fs.stat(normalizedBasePath)
+      if (!stat.isFile()) {
+        return {
+          type: 'warning',
+          message: '请选择视频文件',
+        }
+      }
+
+      const coverCandidates = await extractVideoCoverFrameCandidates(normalizedBasePath)
+      if (!coverCandidates.length) {
+        return {
+          type: 'warning',
+          message: '未能从视频中生成封面候选',
+        }
+      }
+
+      return {
+        type: 'success',
+        message: `已生成 ${coverCandidates.length} 张封面候选`,
+        data: {
+          coverCandidates,
+        }
+      }
+    } catch (error) {
+      ResourceService.logger.error('extractVideoCoverFrames', error)
+      return {
+        type: 'error',
+        message: error instanceof Error ? error.message : '生成随机帧失败',
+      }
+    }
+  }
+
   static async deleteResource(resourceId: string) {
     const normalizedResourceId = String(resourceId ?? '').trim()
 
@@ -2458,9 +2564,19 @@ export class ResourceService {
       isCompleted: completed,
     })
 
+    const categoryInfo = await DatabaseService.getCategoryById(String(existingResource.categoryId ?? '').trim())
+    const extendTableName = getExtendTableName(categoryInfo)
+    const completedLabel = extendTableName === 'novel_meta'
+      ? '读完'
+      : extendTableName === 'video_meta'
+        ? '播完'
+        : '通关'
+
     return {
       type: 'success',
-      message: completed ? '已标记为通关' : '已取消通关标记',
+      message: completed
+        ? `已标记为${completedLabel}`
+        : `已取消${completedLabel}标记`,
     }
   }
 
@@ -3170,6 +3286,17 @@ function isHighConfidenceGameIdCandidate(entryName: string) {
  * @param coverPath 前端传入的封面图片路径
  * @param resourceId 资源id
  */
+async function isImageTooLargeForCover(input: string | Buffer) {
+  try {
+    const metadata = await sharp(input, { limitInputPixels: false, animated: false }).metadata()
+    const width = Number(metadata.width ?? 0)
+    const height = Number(metadata.height ?? 0)
+    return width > 0 && height > 0 && width * height > MAX_COVER_PROCESS_PIXELS
+  } catch {
+    return false
+  }
+}
+
 async function dealCover(coverPath: string, resourceId: string): Promise<string> {
   if (!coverPath) return ''
 
@@ -3190,7 +3317,12 @@ async function dealCover(coverPath: string, resourceId: string): Promise<string>
   const dataUrlMatch = normalizedCoverPath.match(/^data:([^;,]+)?;base64,(.+)$/i)
   if (dataUrlMatch) {
     try {
-      await sharp(Buffer.from(dataUrlMatch[2], 'base64'))
+      const imageBuffer = Buffer.from(dataUrlMatch[2], 'base64')
+      if (await isImageTooLargeForCover(imageBuffer)) {
+        return ''
+      }
+
+      await sharp(imageBuffer, { limitInputPixels: MAX_COVER_PROCESS_PIXELS, animated: false })
         .resize({width: 560, fit: 'contain', background: {r: 0, g: 0, b: 0, alpha: 0}})
         .webp()
         .toFile(targetPath)
@@ -3219,7 +3351,12 @@ async function dealCover(coverPath: string, resourceId: string): Promise<string>
       ...(await getAxiosProxyConfig()),
     })
 
-    await sharp(Buffer.from(response.data))
+    const imageBuffer = Buffer.from(response.data)
+    if (await isImageTooLargeForCover(imageBuffer)) {
+      return ''
+    }
+
+    await sharp(imageBuffer, { limitInputPixels: MAX_COVER_PROCESS_PIXELS, animated: false })
       .resize({width: 560, fit: 'contain', background: {r: 0, g: 0, b: 0, alpha: 0}})
       .webp()
       .toFile(targetPath)
@@ -3232,7 +3369,11 @@ async function dealCover(coverPath: string, resourceId: string): Promise<string>
     throw new Error('封面图片不存在')
   }
 
-  await sharp(normalizedCoverPath)
+  if (await isImageTooLargeForCover(normalizedCoverPath)) {
+    return ''
+  }
+
+  await sharp(normalizedCoverPath, { limitInputPixels: MAX_COVER_PROCESS_PIXELS, animated: false })
     .resize({width: 560, fit: 'contain', background: {r: 0, g: 0, b: 0, alpha: 0}})
     .webp()
     .toFile(targetPath)
@@ -3786,6 +3927,139 @@ function isRemoteCoverPath(coverPath: string) {
   return /^https?:\/\//i.test(coverPath)
 }
 
+async function extractVideoCoverFrameCandidates(videoPath: string) {
+  const resolvedFfmpegPath = String(ffmpegPath ?? '').trim()
+  const resolvedFfprobePath = String(ffprobeStatic?.path ?? '').trim()
+
+  if (!resolvedFfmpegPath || !(await fs.pathExists(resolvedFfmpegPath))) {
+    throw new Error('未找到内置 ffmpeg，请重新安装依赖')
+  }
+
+  if (!resolvedFfprobePath || !(await fs.pathExists(resolvedFfprobePath))) {
+    throw new Error('未找到内置 ffprobe，请重新安装依赖')
+  }
+
+  const cacheSetting = await DatabaseService.getSetting(Settings.CACHE_PATH)
+  if (!cacheSetting) {
+    throw new Error('未配置缓存目录')
+  }
+
+  const duration = await readVideoDuration(resolvedFfprobePath, videoPath)
+  const fixedFrameTimes = buildVideoFixedFrameTimes(duration)
+  const randomFrameTimes = buildVideoFrameTimes(duration, VIDEO_COVER_FRAME_COUNT)
+  const candidateDir = path.join(cacheSetting.value, 'video-cover-frames', generateId())
+  await fs.ensureDir(candidateDir)
+
+  const candidates: Array<{ label: string; coverPath: string; time: number; group: 'fixed' | 'random' }> = []
+
+  for (let index = 0; index < fixedFrameTimes.length + randomFrameTimes.length; index += 1) {
+    const isFixedFrame = index < fixedFrameTimes.length
+    const frameIndex = isFixedFrame ? index : index - fixedFrameTimes.length
+    const frame = isFixedFrame
+      ? fixedFrameTimes[frameIndex]
+      : { label: `随机帧 ${frameIndex + 1}`, time: randomFrameTimes[frameIndex], group: 'random' as const }
+    const coverPath = path.join(candidateDir, `${frame.group}-frame-${String(frameIndex + 1).padStart(2, '0')}.jpg`)
+
+    await execFileChecked(
+      resolvedFfmpegPath,
+      [
+        '-y',
+        '-ss',
+        formatSecondsForFfmpeg(frame.time),
+        '-i',
+        videoPath,
+        '-frames:v',
+        '1',
+        '-vf',
+        'scale=960:-1:force_original_aspect_ratio=decrease',
+        '-q:v',
+        '3',
+        coverPath
+      ],
+      45000
+    )
+
+    if (await fs.pathExists(coverPath)) {
+      candidates.push({
+        label: frame.label,
+        coverPath,
+        time: frame.time,
+        group: frame.group,
+      })
+    }
+  }
+
+  return candidates
+}
+
+async function readVideoDuration(ffprobePath: string, videoPath: string) {
+  try {
+    const output = await execFileChecked(
+      ffprobePath,
+      ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', videoPath],
+      15000
+    )
+    const duration = Number(String(output ?? '').trim())
+    return Number.isFinite(duration) && duration > 0 ? duration : 0
+  } catch {
+    return 0
+  }
+}
+
+function buildVideoFrameTimes(duration: number, count: number) {
+  const normalizedCount = Math.max(1, Math.floor(count))
+  if (!Number.isFinite(duration) || duration <= 0) {
+    return Array.from({ length: normalizedCount }, (_item, index) => 2 + index * 5)
+  }
+
+  const safeStart = duration > 20 ? Math.min(5, duration * 0.08) : Math.max(0.2, duration * 0.08)
+  const safeEnd = duration > 20 ? Math.max(safeStart + 1, duration - Math.min(5, duration * 0.08)) : Math.max(safeStart + 0.2, duration * 0.92)
+  const range = Math.max(0.2, safeEnd - safeStart)
+  const times = new Set<number>()
+
+  while (times.size < normalizedCount) {
+    const value = safeStart + Math.random() * range
+    times.add(Number(value.toFixed(3)))
+  }
+
+  return Array.from(times).sort((left, right) => left - right)
+}
+
+function buildVideoFixedFrameTimes(duration: number) {
+  if (!Number.isFinite(duration) || duration <= 0) {
+    return []
+  }
+
+  return VIDEO_FIXED_COVER_FRAME_TIMES
+    .filter((item) => item.time < duration - 1)
+    .map((item) => ({
+      ...item,
+      group: 'fixed' as const,
+    }))
+}
+
+function formatSecondsForFfmpeg(seconds: number) {
+  return Math.max(0, Number(seconds ?? 0)).toFixed(3)
+}
+
+function execFileChecked(command: string, args: string[], timeout: number) {
+  return new Promise<string>((resolve, reject) => {
+    execFile(command, args, {
+      windowsHide: true,
+      timeout,
+      maxBuffer: 1024 * 1024 * 8
+    }, (error, stdout, stderr) => {
+      if (error) {
+        const detail = String(stderr ?? '').trim() || error.message
+        reject(new Error(detail))
+        return
+      }
+
+      resolve(String(stdout ?? ''))
+    })
+  })
+}
+
 async function getDirectoryImageFiles(directoryPath: string) {
   const entries = await fs.readdir(directoryPath, { withFileTypes: true })
   const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'])
@@ -3808,9 +4082,7 @@ async function getDirectoryAudioFiles(directoryPath: string) {
     '.opus',
     '.wma',
     '.mp4',
-    '.m4b',
-    '.ape',
-    '.wv'
+    '.ape'
   ])
 
   const collected: string[] = []
@@ -3958,6 +4230,9 @@ function syncMeta(tx: any, categoryInfo: any, resourceId: string, meta: Resource
     case 'video_meta':
       DatabaseService.upsertVideoMeta({
         resourceId,
+        year: String(meta.year ?? '').trim() || null,
+        lastPlayFile: String(meta.lastPlayFile ?? '').trim() || null,
+        lastPlayTime: Number.isFinite(Number(meta.lastPlayTime)) ? Math.max(0, Math.floor(Number(meta.lastPlayTime))) : 0,
       }, tx)
       return
     case 'asmr_meta':

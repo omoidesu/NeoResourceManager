@@ -22,6 +22,7 @@ type DbExecutor = typeof db | DbTransaction
 type ResourceQueryParams = {
   keyword?: string
   authorIds?: string[]
+  actorNames?: string[]
   albumNames?: string[]
   tagIds?: string[]
   typeIds?: string[]
@@ -42,6 +43,7 @@ export class DatabaseService {
   ) {
     const keyword = String(query.keyword ?? '').trim()
     const authorIds = (query.authorIds ?? []).filter(Boolean)
+    const actorNames = (query.actorNames ?? []).map((item) => String(item ?? '').trim()).filter(Boolean)
     const albumNames = (query.albumNames ?? []).map((item) => String(item ?? '').trim()).filter(Boolean)
     const tagIds = (query.tagIds ?? []).filter(Boolean)
     const typeIds = (query.typeIds ?? []).filter(Boolean)
@@ -85,6 +87,16 @@ export class DatabaseService {
         where ${authorWork.resourceId} = ${resource.id}
           and ${inArray(authorWork.authorId, authorIds)}
           and coalesce(${authorWork.isDeleted}, 0) = 0
+      )`)
+    }
+
+    if (actorNames.length) {
+      conditions.push(sql`exists (
+        select 1
+        from ${actor}
+        where ${actor.resourceId} = ${resource.id}
+          and ${inArray(actor.name, actorNames)}
+          and coalesce(${actor.isDeleted}, 0) = 0
       )`)
     }
 
@@ -283,6 +295,7 @@ export class DatabaseService {
         logs: true,
         gameMeta: true,
         singleImageMeta: true,
+        videoMeta: true,
         asmrMeta: true,
         audioMeta: true,
         novelMeta: true,
@@ -389,6 +402,27 @@ export class DatabaseService {
       ))
       .groupBy(author.id, author.name)
       .orderBy(desc(authorCount))
+  }
+
+  static async getActorByCategoryId(categoryId: string) {
+    const actorCount = count(actor.id)
+
+    return db
+      .select({
+        actorName: actor.name,
+        count: actorCount,
+      })
+      .from(resource)
+      .leftJoin(actor, eq(resource.id, actor.resourceId))
+      .where(and(
+        eq(resource.categoryId, categoryId),
+        eq(resource.isDeleted, false),
+        eq(actor.isDeleted, false),
+        sql`${actor.name} is not null`,
+        sql`trim(${actor.name}) <> ''`
+      ))
+      .groupBy(actor.name)
+      .orderBy(desc(actorCount), asc(actor.name))
   }
 
   static async getAlbumByCategoryId(categoryId: string) {
@@ -737,6 +771,27 @@ export class DatabaseService {
         target: videoMeta.resourceId,
         set: {
           year: metaData.year ?? null,
+          lastPlayFile: metaData.lastPlayFile ?? null,
+          lastPlayTime: metaData.lastPlayTime ?? null,
+        }
+      })
+      .run()
+  }
+
+  static updateVideoPlaybackProgress(resourceId: string, lastPlayFile: string, lastPlayTime: number, tx?: DbExecutor) {
+    const executor = tx ?? db
+    executor
+      .insert(videoMeta)
+      .values({
+        resourceId,
+        lastPlayFile,
+        lastPlayTime,
+      })
+      .onConflictDoUpdate({
+        target: videoMeta.resourceId,
+        set: {
+          lastPlayFile,
+          lastPlayTime,
         }
       })
       .run()

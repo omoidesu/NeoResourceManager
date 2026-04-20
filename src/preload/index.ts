@@ -18,6 +18,7 @@ const api = {
     // resource
     getResourceByCategoryId: (categoryId: string, query?: any) => ipcRenderer.invoke('db:get-resource-by-category-id', categoryId, query),
     getAuthorByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-author-by-category-id', categoryId),
+    getActorByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-actor-by-category-id', categoryId),
     getAlbumByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-album-by-category-id', categoryId),
     getEngineByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-engine-by-category-id', categoryId),
     getMissingResourceCountByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-missing-resource-count-by-category-id', categoryId),
@@ -48,7 +49,11 @@ const api = {
     ) => ipcRenderer.invoke('dialog:get-image-preview-url', filePath, options),
     getImageFileUrl: (filePath: string) => ipcRenderer.invoke('dialog:get-image-file-url', filePath),
     getFileUrl: (filePath: string) => ipcRenderer.invoke('dialog:get-file-url', filePath),
-    readTextFile: (filePath: string) => ipcRenderer.invoke('dialog:read-text-file', filePath),
+    getAudioPlaybackUrl: (filePath: string) => ipcRenderer.invoke('dialog:get-audio-playback-url', filePath),
+    readTextFile: (filePath: string, encoding?: string) => ipcRenderer.invoke('dialog:read-text-file', filePath, encoding),
+    getTextFileInfo: (filePath: string) => ipcRenderer.invoke('dialog:get-text-file-info', filePath),
+    readTextFileChunk: (filePath: string, options?: { offset?: number; length?: number; encoding?: string }) =>
+      ipcRenderer.invoke('dialog:read-text-file-chunk', filePath, options),
     readBinaryFile: (filePath: string) => ipcRenderer.invoke('dialog:read-binary-file', filePath),
     getFileIconAsDataUrl: (filePath: string, fileName?: string) => ipcRenderer.invoke('dialog:get-file-icon-as-data-url', filePath, fileName),
     getAvailableScriptRuntimes: () => ipcRenderer.invoke('dialog:get-available-script-runtimes'),
@@ -57,6 +62,8 @@ const api = {
     copyImageToClipboard: (filePath: string) => ipcRenderer.invoke('dialog:copy-image-to-clipboard', filePath),
     openScreenshotFolder: (resourceId: string) => ipcRenderer.invoke('dialog:open-screenshot-folder', resourceId),
     getScreenshotImages: (resourceId: string) => ipcRenderer.invoke('dialog:get-screenshot-images', resourceId),
+    saveVideoFrameScreenshot: (resourceId: string, dataUrl: string, currentTime?: number) =>
+      ipcRenderer.invoke('dialog:save-video-frame-screenshot', resourceId, dataUrl, currentTime),
     getDirectoryImages: (directoryPath: string) => ipcRenderer.invoke('dialog:get-directory-images', directoryPath),
     getDirectoryAudioTree: (directoryPath: string) => ipcRenderer.invoke('dialog:get-directory-audio-tree', directoryPath),
     selectScreenshotImage: (resourceId: string) => ipcRenderer.invoke('dialog:select-screenshot-image', resourceId),
@@ -92,6 +99,8 @@ const api = {
       ipcRenderer.invoke('service:fetch-resource-info', websiteId, resourceId),
     captureCoverScreenshot: (basePath: string) =>
       ipcRenderer.invoke('service:capture-cover-screenshot', basePath),
+    extractVideoCoverFrames: (basePath: string) =>
+      ipcRenderer.invoke('service:extract-video-cover-frames', basePath),
     launchResource: (resourceId: string, basePath: string, fileName?: string | null) =>
       ipcRenderer.invoke('service:launch-resource', resourceId, basePath, fileName),
     startReadingResource: (resourceId: string) =>
@@ -106,10 +115,16 @@ const api = {
       ipcRenderer.invoke('service:update-novel-reading-progress', resourceId, lastReadPercent),
       updateAsmrPlaybackProgress: (resourceId: string, lastPlayFile: string, lastPlayTime: number) =>
         ipcRenderer.invoke('service:update-asmr-playback-progress', resourceId, lastPlayFile, lastPlayTime),
+      updateVideoPlaybackProgress: (resourceId: string, lastPlayFile: string, lastPlayTime: number) =>
+        ipcRenderer.invoke('service:update-video-playback-progress', resourceId, lastPlayFile, lastPlayTime),
       startAsmrPlayback: (resourceId: string) =>
         ipcRenderer.invoke('service:start-asmr-playback', resourceId),
       stopAsmrPlayback: (resourceId: string) =>
         ipcRenderer.invoke('service:stop-asmr-playback', resourceId),
+      startVideoPlayback: (resourceId: string) =>
+        ipcRenderer.invoke('service:start-video-playback', resourceId),
+      stopVideoPlayback: (resourceId: string) =>
+        ipcRenderer.invoke('service:stop-video-playback', resourceId),
       launchResourceAsAdmin: (resourceId: string, basePath: string, fileName?: string | null) =>
         ipcRenderer.invoke('service:launch-resource-as-admin', resourceId, basePath, fileName),
     launchResourceWithMtool: (resourceId: string, basePath: string, fileName?: string | null) =>
@@ -149,6 +164,17 @@ const api = {
 
       return () => {
         ipcRenderer.removeListener('service:resource-state-changed', wrappedListener)
+      }
+    },
+    onVideoFrameCaptureShortcut: (listener: () => void) => {
+      const wrappedListener = () => {
+        listener()
+      }
+
+      ipcRenderer.on('service:video-frame-capture-shortcut', wrappedListener)
+
+      return () => {
+        ipcRenderer.removeListener('service:video-frame-capture-shortcut', wrappedListener)
       }
     },
     onBatchImportProgress: (listener: (message: BatchImportProgressMessage) => void) => {

@@ -1,8 +1,8 @@
-import { app, shell, BrowserWindow, dialog, ipcMain, screen } from 'electron'
+import { app, shell, BrowserWindow, dialog, ipcMain, screen, protocol } from 'electron'
 import type { MessageBoxOptions } from 'electron'
-import { join } from 'path'
+import { join, normalize } from 'path'
 import fs from 'fs'
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import { electronApp, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import registerIpcHandlers from "./service/ipcHandle";
@@ -20,6 +20,132 @@ let isShuttingDown = false
 let isQuitApproved = false
 let isQuitCheckInProgress = false
 const logger = createLogger('main')
+const LOCAL_FILE_PROTOCOL = 'neo-resource-file'
+const AUDIO_TRANSCODE_PROTOCOL = 'neo-resource-audio'
+const ffmpegPath = require('ffmpeg-static') as string | null
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: LOCAL_FILE_PROTOCOL,
+    privileges: {
+      standard: true,
+      secure: true,
+      bypassCSP: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    }
+  },
+  {
+    scheme: AUDIO_TRANSCODE_PROTOCOL,
+    privileges: {
+      standard: true,
+      secure: true,
+      bypassCSP: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    }
+  }
+])
+
+function decodeBase64Url(input: string) {
+  const normalized = String(input ?? '').replace(/-/g, '+').replace(/_/g, '/')
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')
+  return Buffer.from(padded, 'base64').toString('utf8')
+}
+
+function registerLocalFileProtocol() {
+  const registered = protocol.registerFileProtocol(LOCAL_FILE_PROTOCOL, (request, callback) => {
+    try {
+      const requestUrl = new URL(request.url)
+      const encodedPath = requestUrl.pathname.replace(/^\/+/, '')
+      const filePath = normalize(decodeBase64Url(encodedPath))
+
+      if (!filePath || !fs.existsSync(filePath)) {
+        callback({ error: -6 })
+        return
+      }
+
+      callback({ path: filePath })
+    } catch (error) {
+      logger.error('failed to resolve local file protocol request', error)
+      callback({ error: -2 })
+    }
+  })
+
+  if (!registered) {
+    logger.error('failed to register local file protocol')
+  }
+}
+
+function registerAudioTranscodeProtocol() {
+  const registered = protocol.registerStreamProtocol(AUDIO_TRANSCODE_PROTOCOL, (request, callback) => {
+    try {
+      const requestUrl = new URL(request.url)
+      const encodedPath = requestUrl.pathname.replace(/^\/+/, '')
+      const filePath = normalize(decodeBase64Url(encodedPath))
+      const resolvedFfmpegPath = String(ffmpegPath ?? '').trim()
+
+      if (!filePath || !fs.existsSync(filePath) || !resolvedFfmpegPath || !fs.existsSync(resolvedFfmpegPath)) {
+        callback({ error: -6 })
+        return
+      }
+
+      const child = spawn(
+        resolvedFfmpegPath,
+        [
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-i',
+          filePath,
+          '-vn',
+          '-map_metadata',
+          '0',
+          '-codec:a',
+          'libmp3lame',
+          '-b:a',
+          '192k',
+          '-f',
+          'mp3',
+          'pipe:1'
+        ],
+        {
+          detached: false,
+          stdio: ['ignore', 'pipe', 'ignore'],
+          windowsHide: true
+        }
+      )
+
+      child.stdout.on('close', () => {
+        if (!child.killed) {
+          child.kill('SIGTERM')
+        }
+      })
+
+      child.on('error', (error) => {
+        logger.error('failed to start audio transcode stream', error)
+      })
+
+      callback({
+        statusCode: 200,
+        headers: {
+          'Content-Type': 'audio/mpeg',
+          'Cache-Control': 'no-store'
+        },
+        data: child.stdout
+      })
+    } catch (error) {
+      logger.error('failed to resolve audio transcode protocol request', error)
+      callback({ error: -2 })
+    }
+  })
+
+  if (!registered) {
+    logger.error('failed to register audio transcode protocol')
+  }
+}
 
 function prepareChromiumStoragePaths() {
   const userDataPath = app.getPath('userData')
@@ -353,6 +479,8 @@ function createWindow(): void {
 app.whenReady().then(async () => {
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
+  registerLocalFileProtocol()
+  registerAudioTranscodeProtocol()
 
   app.on('browser-window-created', (_, window) => {
     window.webContents.on('before-input-event', (event, input) => {

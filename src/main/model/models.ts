@@ -23,6 +23,7 @@ export class ResourceMeta {
   gameId!: string
   illust: string = ''
   language!: string
+  lastPlayFile?: string
   lastPlayTime?: number
   lyricsPath?: string
   nameEn!: string

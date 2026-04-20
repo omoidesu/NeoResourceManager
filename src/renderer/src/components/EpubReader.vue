@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import type { ComputedRef } from 'vue'
 import ePub, { type Book, type Contents, type Rendition } from 'epubjs'
 import {
   AddOutline,
@@ -50,6 +51,7 @@ const progress = ref(0)
 const fontSize = ref(18)
 const pageLabel = ref('')
 const locationsReady = ref(false)
+const selectedReaderBackground = ref('')
 let book: Book | null = null
 let rendition: Rendition | null = null
 let loadRequestId = 0
@@ -57,6 +59,17 @@ let progressTimer: number | null = null
 let pageTurnInProgress = false
 let pageTurnCooldownTimer: number | null = null
 
+const appIsDark = inject<ComputedRef<boolean>>('appIsDark', computed(() => true))
+const readerBackgroundOptions = [
+  '#f6f5f7',
+  '#e9e4d0',
+  '#e6f1da',
+  '#d9e4ef',
+  '#0f0d0f',
+  '#1a191b',
+  '#272627'
+]
+const darkReaderBackgrounds = new Set(['#0f0d0f', '#1a191b', '#272627'])
 const normalizedFilePath = computed(() => String(props.filePath ?? '').trim())
 const fileName = computed(() => normalizedFilePath.value.replace(/\\/g, '/').split('/').pop() ?? '')
 const displayTitle = computed(() => props.title || fileName.value || 'EPUB 阅读')
@@ -65,6 +78,37 @@ const progressText = computed(
 )
 const progressLabel = computed(() => (locationsReady.value ? progressText.value : '进度索引生成中'))
 const fontSizeText = computed(() => `${fontSize.value}px`)
+const readerBodyBackground = computed(
+  () => selectedReaderBackground.value || (appIsDark.value ? '#1a191b' : '#f6f5f7')
+)
+const isReaderBackgroundDark = computed(() =>
+  darkReaderBackgrounds.has(readerBodyBackground.value.toLowerCase())
+)
+const readerThemeColors = computed(() => {
+  if (appIsDark.value) {
+    return {
+      shellBg: 'rgb(24, 25, 28)',
+      bodyBg: readerBodyBackground.value,
+      textColor: isReaderBackgroundDark.value ? '#d8dde5' : '#262626',
+      borderColor: 'rgba(255, 255, 255, 0.08)',
+      linkColor: isReaderBackgroundDark.value ? '#7de8c4' : '#0f8f6f'
+    }
+  }
+
+  return {
+    shellBg: '#f5f5f5',
+    bodyBg: readerBodyBackground.value,
+    textColor: isReaderBackgroundDark.value ? '#d8dde5' : '#262626',
+    borderColor: 'rgba(24, 24, 28, 0.1)',
+    linkColor: isReaderBackgroundDark.value ? '#7de8c4' : '#0f8f6f'
+  }
+})
+const readerThemeStyle = computed(() => ({
+  '--reader-shell-bg': readerThemeColors.value.shellBg,
+  '--reader-body-bg': readerThemeColors.value.bodyBg,
+  '--reader-text-color': readerThemeColors.value.textColor,
+  '--reader-border-color': readerThemeColors.value.borderColor
+}))
 
 const getLocationStart = (location: EpubLocationLike | EpubLocationPoint): EpubLocationPoint => {
   return 'start' in location && location.start ? location.start : location
@@ -132,15 +176,16 @@ const applyReaderTheme = (): void => {
     return
   }
 
+  const colors = readerThemeColors.value
   rendition.themes.default({
     body: {
-      color: '#d8dde5',
-      background: '#202124',
+      color: colors.textColor,
+      background: colors.bodyBg,
       'line-height': '1.78',
       'font-size': `${fontSize.value}px`
     },
     a: {
-      color: '#7de8c4'
+      color: colors.linkColor
     },
     img: {
       'max-width': '100% !important',
@@ -322,17 +367,36 @@ const loadEpub = async (): Promise<void> => {
       throw new Error('EPUB 阅读器尚未准备好')
     }
 
-    const binaryData = await window.api.dialog.readBinaryFile(normalizedFilePath.value)
+    const fileUrl = await window.api.dialog.getFileUrl(normalizedFilePath.value)
     if (requestId !== loadRequestId) {
       return
     }
 
-    if (!binaryData) {
-      throw new Error('无法读取 EPUB 文件')
+    let nextBook: Book | null = null
+    if (fileUrl) {
+      try {
+        nextBook = ePub(fileUrl)
+        await nextBook.ready
+      } catch {
+        nextBook?.destroy()
+        nextBook = null
+      }
     }
 
-    const nextBook = ePub(new Uint8Array(binaryData).buffer)
-    await nextBook.ready
+    if (!nextBook) {
+      const binaryData = await window.api.dialog.readBinaryFile(normalizedFilePath.value)
+      if (requestId !== loadRequestId) {
+        return
+      }
+
+      if (!binaryData) {
+        throw new Error('无法读取 EPUB 文件')
+      }
+
+      nextBook = ePub(new Uint8Array(binaryData).buffer)
+      await nextBook.ready
+    }
+
     if (requestId !== loadRequestId) {
       nextBook.destroy()
       return
@@ -413,6 +477,11 @@ const decreaseFontSize = (): void => {
 
 const increaseFontSize = (): void => {
   fontSize.value = Math.min(30, fontSize.value + 1)
+  applyReaderTheme()
+}
+
+const selectReaderBackground = (color: string): void => {
+  selectedReaderBackground.value = color
   applyReaderTheme()
 }
 
@@ -515,6 +584,11 @@ watch(
   { immediate: true }
 )
 
+watch(appIsDark, () => {
+  selectedReaderBackground.value = ''
+  applyReaderTheme()
+})
+
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
   window.removeEventListener('resize', handleResize)
@@ -535,7 +609,7 @@ onBeforeUnmount(() => {
     :closable="false"
     @update:show="emit('update:show', $event)"
   >
-    <div class="epub-reader__shell">
+    <div class="epub-reader__shell" :style="readerThemeStyle">
       <div class="epub-reader__toolbar">
         <div class="epub-reader__title">
           <n-icon :component="BookOutline" />
@@ -549,6 +623,26 @@ onBeforeUnmount(() => {
               <n-icon :component="ChevronBackOutline" />
             </template>
           </n-button>
+          <div class="epub-reader__palette" aria-label="阅读背景">
+            <button
+              type="button"
+              class="epub-reader__palette-auto"
+              :class="{ 'epub-reader__palette-auto--active': !selectedReaderBackground }"
+              title="跟随主题"
+              @click="selectReaderBackground('')"
+            >
+              跟随主题
+            </button>
+            <button
+              v-for="color in readerBackgroundOptions"
+              :key="color"
+              type="button"
+              class="epub-reader__palette-button"
+              :class="{ 'epub-reader__palette-button--active': color === readerBodyBackground }"
+              :style="{ backgroundColor: color }"
+              @click="selectReaderBackground(color)"
+            />
+          </div>
           <div class="epub-reader__font-tools">
             <n-button quaternary circle :disabled="fontSize <= 12" @click="decreaseFontSize">
               <template #icon>
@@ -624,7 +718,8 @@ onBeforeUnmount(() => {
   height: min(90vh, 980px);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  background: rgb(24, 25, 28);
+  color: var(--reader-text-color);
+  background: var(--reader-shell-bg);
 }
 
 .epub-reader__toolbar {
@@ -634,7 +729,7 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 16px;
   padding: 12px 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--reader-border-color);
   box-sizing: border-box;
 }
 
@@ -668,6 +763,42 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.epub-reader__palette {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 6px;
+}
+
+.epub-reader__palette-button {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--reader-border-color);
+  border-radius: 6px;
+  padding: 0;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.epub-reader__palette-auto {
+  height: 24px;
+  border: 1px solid var(--reader-border-color);
+  border-radius: 6px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  color: var(--reader-text-color);
+  background: transparent;
+  font-size: 12px;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.epub-reader__palette-auto--active,
+.epub-reader__palette-button--active {
+  border-color: rgba(99, 226, 183, 0.9);
+  box-shadow: 0 0 0 2px rgba(99, 226, 183, 0.35);
+}
+
 .epub-reader__font-tools {
   display: flex;
   align-items: center;
@@ -685,7 +816,7 @@ onBeforeUnmount(() => {
 .epub-reader__body {
   position: relative;
   min-height: 0;
-  background: #202124;
+  background: var(--reader-body-bg);
   overflow: hidden;
   contain: layout paint;
 }
@@ -698,7 +829,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #202124;
+  background: var(--reader-body-bg);
   font-size: 14px;
   opacity: 0.72;
 }
@@ -735,7 +866,7 @@ onBeforeUnmount(() => {
 .epub-reader__viewer :deep(iframe) {
   display: block;
   height: 100% !important;
-  background: #202124;
+  background: var(--reader-body-bg);
   overflow: hidden !important;
   border: 0;
 }
@@ -755,7 +886,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 14px;
   padding: 10px 18px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--reader-border-color);
   box-sizing: border-box;
 }
 

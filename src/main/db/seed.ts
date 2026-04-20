@@ -215,7 +215,8 @@ function createCategoryExtra(
   extensions?: string[],
   authorText?: string,
   startText?: string,
-  enableFetchInfo: boolean = false
+  enableFetchInfo: boolean = false,
+  showCompletedFilter: boolean = false
 ) {
   return {
     extendTable,
@@ -224,6 +225,7 @@ function createCategoryExtra(
     addFirst,
     authorText,
     startText,
+    ...(showCompletedFilter ? { showCompletedFilter } : {}),
     enableFetchInfo
   }
 }
@@ -295,7 +297,7 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
       description: '游戏',
       value: 'games',
       typeId: dictTypeIds.resource,
-      extra: createCategoryExtra('game_meta', 'file', '个', ['exe', 'swf', 'html', 'bat'], '开发商/社团', '启动'),
+      extra: createCategoryExtra('game_meta', 'file', '个', ['exe', 'swf', 'html', 'bat'], '开发商/社团', '启动', false, true),
     }, {
       id: generateId(),
       name: '软件',
@@ -340,7 +342,7 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
         'flv',
         'webm',
         'm4v'
-      ], '发行商/制作者', '播放')
+      ], '发行商/制作者', '播放', false, true)
     }, {
       id: generateId(),
       name: '番剧',
@@ -361,8 +363,7 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
         'aac',
         'ogg',
         'm4a',
-        'wma',
-        'opus'
+        'wma'
       ], '制作社团', '播放')
     }, {
       id: generateId(),
@@ -370,14 +371,14 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
       description: '小说',
       value: 'novel',
       typeId: dictTypeIds.resource,
-      extra: createCategoryExtra('novel_meta', 'file', '本', ['txt', 'epub', 'mobi', 'pdf', 'azw3', 'md'], '作者', '阅读')
+      extra: createCategoryExtra('novel_meta', 'file', '本', ['txt', 'epub', 'mobi', 'pdf', 'azw3', 'md'], '作者', '阅读', false, true)
     }, {
       id: generateId(),
       name: '音乐',
       description: '音乐',
       value: 'music',
       typeId: dictTypeIds.resource,
-      extra: createCategoryExtra('audio_meta', 'file', '个', ['mp3', 'wav', 'aac', 'ogg', 'flac', 'ape', 'ogg'], '艺术家', '播放')
+      extra: createCategoryExtra('audio_meta', 'file', '个', ['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'wma', 'opus', 'ape'], '艺术家', '播放')
     }, {
       id: generateId(),
       name: '网站',

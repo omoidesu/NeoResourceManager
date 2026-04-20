@@ -1,4 +1,4 @@
-import { globalShortcut } from 'electron'
+import { BrowserWindow, globalShortcut } from 'electron'
 import { spawn } from 'child_process'
 import path from 'path'
 import fs from 'fs-extra'
@@ -71,6 +71,12 @@ export class WindowScreenshotService {
     this.dispose()
 
     const registered = globalShortcut.register(accelerator, () => {
+      const focusedWindow = BrowserWindow.getFocusedWindow()
+      if (focusedWindow && !focusedWindow.isDestroyed()) {
+        focusedWindow.webContents.send('service:video-frame-capture-shortcut')
+        return
+      }
+
       void this.captureFocusedResourceWindowToFolder().catch((error) => {
         this.logger.error('failed to capture focused resource screenshot', error)
         NotificationQueueService.getInstance().enqueue(

@@ -62,6 +62,12 @@ export const createEmptyMetaByType = (extendTable: string): Record<string, unkno
         publisher: '',
         lastReadPercent: 0
       }
+    case 'video_meta':
+      return {
+        year: '',
+        lastPlayFile: '',
+        lastPlayTime: 0
+      }
     default:
       return {}
   }

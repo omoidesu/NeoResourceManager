@@ -10,6 +10,57 @@ import { parseFile } from 'music-metadata'
 import { DatabaseService } from './database.service'
 import { Settings } from '../../common/constants'
 
+const LOCAL_FILE_PROTOCOL = 'neo-resource-file'
+const AUDIO_TRANSCODE_PROTOCOL = 'neo-resource-audio'
+const TEXT_ENCODING_SAMPLE_BYTES = 256 * 1024
+const TEXT_FILE_CHUNK_BYTES = 512 * 1024
+const MAX_IMAGE_DATA_URL_BYTES = 64 * 1024 * 1024
+const MAX_IMAGE_PREVIEW_PIXELS = 100_000_000
+const MAX_IMAGE_THUMBNAIL_PIXELS = 2_000_000_000
+
+function encodeBase64Url(input: string) {
+  return Buffer.from(input, 'utf8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '')
+}
+
+function toLocalFileProtocolUrl(filePath: string) {
+  return `${LOCAL_FILE_PROTOCOL}://local/${encodeBase64Url(filePath)}`
+}
+
+function toAudioTranscodeProtocolUrl(filePath: string) {
+  return `${AUDIO_TRANSCODE_PROTOCOL}://transcode/${encodeBase64Url(filePath)}`
+}
+
+async function readImageProbe(filePath: string) {
+  const [fileStat, metadata] = await Promise.all([
+    fs.promises.stat(filePath),
+    sharp(filePath, { limitInputPixels: false, animated: false }).metadata()
+  ])
+  const width = Number(metadata.width ?? 0)
+  const height = Number(metadata.height ?? 0)
+  const pixels = width > 0 && height > 0 ? width * height : 0
+
+  return {
+    fileSize: Number.isFinite(fileStat.size) ? fileStat.size : 0,
+    width,
+    height,
+    pixels,
+    format: String(metadata.format ?? path.extname(filePath).replace('.', '')).trim().toLowerCase(),
+    pages: Number(metadata.pages ?? 1)
+  }
+}
+
+function isHugeImageProbe(probe: Awaited<ReturnType<typeof readImageProbe>>) {
+  return probe.pixels > MAX_IMAGE_PREVIEW_PIXELS
+}
+
+function canAttemptHugeImageThumbnail(probe: Awaited<ReturnType<typeof readImageProbe>>) {
+  return probe.pixels > 0 && probe.pixels <= MAX_IMAGE_THUMBNAIL_PIXELS
+}
+
 function scoreDecodedTextCandidate(input: string) {
   const normalizedInput = String(input ?? '').replace(/^\uFEFF/, '').trim()
   if (!normalizedInput) {
@@ -17,21 +68,35 @@ function scoreDecodedTextCandidate(input: string) {
   }
 
   let score = 0
+  const cjkCount = normalizedInput.match(/[\u3400-\u9fff]/g)?.length ?? 0
+  const kanaCount = normalizedInput.match(/[\u3040-\u30ff]/g)?.length ?? 0
+  const hangulCount = normalizedInput.match(/[\uac00-\ud7af]/g)?.length ?? 0
+  const latinCount = normalizedInput.match(/[A-Za-z0-9]/g)?.length ?? 0
+  const replacementCount = normalizedInput.match(/\uFFFD/g)?.length ?? 0
 
-  if (/[\u3400-\u9fff]/.test(normalizedInput)) {
+  if (cjkCount > 0) {
     score += 12
+    score += Math.min(cjkCount, 80) * 0.2
   }
 
-  if (/[A-Za-z0-9]/.test(normalizedInput)) {
+  if (latinCount > 0) {
     score += 2
+    score += Math.min(latinCount, 40) * 0.05
   }
 
-  if (/[\u3040-\u30ff]/.test(normalizedInput)) {
-    score += 3
+  if (kanaCount > 0) {
+    score += 18
+    score += Math.min(kanaCount, 120) * 1.2
   }
 
-  if (/\uFFFD/.test(normalizedInput)) {
+  if (hangulCount > 0) {
+    score += 18
+    score += Math.min(hangulCount, 120) * 1.2
+  }
+
+  if (replacementCount > 0) {
     score -= 12
+    score -= Math.min(replacementCount, 120) * 1.5
   }
 
   if (/[À-ÿ]/.test(normalizedInput)) {
@@ -49,26 +114,125 @@ function scoreDecodedTextCandidate(input: string) {
   return score
 }
 
-function decodeTextBuffer(buffer: Buffer) {
-  const decoderCandidates = ['utf-8', 'gb18030', 'utf-16le'] as const
+function isValidUtf8Buffer(buffer: Buffer) {
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(buffer)
+    return true
+  } catch {
+    return false
+  }
+}
+
+type TextEncoding =
+  | 'utf-8'
+  | 'utf-16le'
+  | 'gb18030'
+  | 'big5'
+  | 'shift_jis'
+  | 'euc-kr'
+  | 'windows-1252'
+  | 'windows-1250'
+type TextFileInfo = {
+  size: number
+  encoding: TextEncoding
+  recommendedChunkSize: number
+}
+type TextFileChunkOptions = {
+  offset?: number
+  length?: number
+  encoding?: string
+}
+type TextFileChunkResult = {
+  text: string
+  offset: number
+  nextOffset: number
+  fileSize: number
+  encoding: string
+  hasPrevious: boolean
+  hasNext: boolean
+}
+type AudioPlaybackUrlResult = {
+  url: string
+  transcoded: boolean
+  sourcePath: string
+  playbackPath: string
+}
+
+function detectTextBufferEncoding(buffer: Buffer): TextEncoding {
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return 'utf-16le'
+  }
+
+  if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
+    return 'utf-8'
+  }
+
+  if (isValidUtf8Buffer(buffer)) {
+    return 'utf-8'
+  }
+
+  const sampleLength = Math.min(buffer.length, TEXT_ENCODING_SAMPLE_BYTES)
+  let zeroByteCount = 0
+  for (let index = 0; index < sampleLength; index += 1) {
+    if (buffer[index] === 0) {
+      zeroByteCount += 1
+    }
+  }
+
+  const shouldTryUtf16 = sampleLength > 0 && zeroByteCount / sampleLength > 0.05
+  const decoderCandidates = shouldTryUtf16
+    ? ([
+        'utf-8',
+        'utf-16le',
+        'gb18030',
+        'big5',
+        'shift_jis',
+        'euc-kr',
+        'windows-1252',
+        'windows-1250'
+      ] as const)
+    : ([
+        'utf-8',
+        'gb18030',
+        'big5',
+        'shift_jis',
+        'euc-kr',
+        'windows-1252',
+        'windows-1250'
+      ] as const)
   const decodedCandidates = decoderCandidates
     .map((encoding) => {
       try {
-        return new TextDecoder(encoding).decode(buffer).replace(/^\uFEFF/, '').trim()
+        return {
+          encoding,
+          value: new TextDecoder(encoding).decode(buffer).replace(/^\uFEFF/, '').trim()
+        }
       } catch {
-        return ''
+        return null
       }
     })
-    .filter(Boolean)
+    .filter((item): item is { encoding: TextEncoding; value: string } => Boolean(item?.value))
 
   const bestCandidate = decodedCandidates
     .map((candidate) => ({
-      value: candidate,
-      score: scoreDecodedTextCandidate(candidate)
+      encoding: candidate.encoding,
+      score: scoreDecodedTextCandidate(candidate.value)
     }))
     .sort((left, right) => right.score - left.score)[0]
 
-  return bestCandidate?.value ?? buffer.toString('utf8').replace(/^\uFEFF/, '')
+  return bestCandidate?.encoding ?? 'utf-8'
+}
+
+function decodeTextBuffer(buffer: Buffer, encoding?: string): string {
+  const detectedEncoding = encoding || detectTextBufferEncoding(
+    buffer.length > TEXT_ENCODING_SAMPLE_BYTES ? buffer.subarray(0, TEXT_ENCODING_SAMPLE_BYTES) : buffer
+  )
+
+  try {
+    return new TextDecoder(detectedEncoding).decode(buffer).replace(/^\uFEFF/, '').trim()
+  } catch {
+    return buffer.toString('utf8').replace(/^\uFEFF/, '').trim()
+  }
 }
 
 export class DialogService {
@@ -90,9 +254,11 @@ export class DialogService {
     '.ogg',
     '.opus',
     '.wma',
-    '.m4b',
+    '.ape'
+  ])
+  private static readonly AUDIO_TRANSCODE_EXTENSIONS = new Set([
     '.ape',
-    '.wv'
+    '.wma'
   ])
   private static readonly VIDEO_EXTENSIONS = new Set([
     '.mp4',
@@ -233,7 +399,17 @@ export class DialogService {
   }
 
   static async readImageAsDataUrl(filePath: string) {
-    const extension = path.extname(filePath).toLowerCase()
+    const normalizedPath = path.normalize(String(filePath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return null
+    }
+
+    const probe = await readImageProbe(normalizedPath)
+    if (probe.fileSize > MAX_IMAGE_DATA_URL_BYTES || isHugeImageProbe(probe)) {
+      return null
+    }
+
+    const extension = path.extname(normalizedPath).toLowerCase()
     const mimeTypeMap: Record<string, string> = {
       '.png': 'image/png',
       '.jpg': 'image/jpeg',
@@ -249,7 +425,7 @@ export class DialogService {
       return null
     }
 
-    const buffer = await readFile(filePath)
+    const buffer = await readFile(normalizedPath)
     return `data:${mimeType};base64,${buffer.toString('base64')}`
   }
 
@@ -268,10 +444,10 @@ export class DialogService {
       return null
     }
 
-    return pathToFileURL(normalizedPath).href
+    return toLocalFileProtocolUrl(normalizedPath)
   }
 
-  static async readTextFile(filePath: string) {
+  static async readTextFile(filePath: string, encoding?: string) {
     const normalizedPath = path.normalize(String(filePath ?? '').trim())
     if (!normalizedPath || !fs.existsSync(normalizedPath)) {
       return null
@@ -279,7 +455,74 @@ export class DialogService {
 
     try {
       const buffer = await readFile(normalizedPath)
-      return decodeTextBuffer(buffer)
+      return decodeTextBuffer(buffer, encoding)
+    } catch {
+      return null
+    }
+  }
+
+  static async getTextFileInfo(filePath: string): Promise<TextFileInfo | null> {
+    const normalizedPath = path.normalize(String(filePath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return null
+    }
+
+    try {
+      const stat = await fs.promises.stat(normalizedPath)
+      const sampleLength = Math.min(TEXT_ENCODING_SAMPLE_BYTES, stat.size)
+      const fileHandle = await fs.promises.open(normalizedPath, 'r')
+
+      try {
+        const sampleBuffer = Buffer.alloc(sampleLength)
+        const { bytesRead } = await fileHandle.read(sampleBuffer, 0, sampleLength, 0)
+        return {
+          size: stat.size,
+          encoding: detectTextBufferEncoding(sampleBuffer.subarray(0, bytesRead)),
+          recommendedChunkSize: TEXT_FILE_CHUNK_BYTES
+        }
+      } finally {
+        await fileHandle.close()
+      }
+    } catch {
+      return null
+    }
+  }
+
+  static async readTextFileChunk(
+    filePath: string,
+    options?: TextFileChunkOptions
+  ): Promise<TextFileChunkResult | null> {
+    const normalizedPath = path.normalize(String(filePath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return null
+    }
+
+    try {
+      const stat = await fs.promises.stat(normalizedPath)
+      const fileSize = stat.size
+      const offset = Math.max(0, Math.min(fileSize, Math.floor(Number(options?.offset ?? 0) || 0)))
+      const length = Math.max(1, Math.min(2 * 1024 * 1024, Math.floor(Number(options?.length ?? TEXT_FILE_CHUNK_BYTES) || TEXT_FILE_CHUNK_BYTES)))
+      const readLength = Math.min(length, Math.max(0, fileSize - offset))
+      const fileHandle = await fs.promises.open(normalizedPath, 'r')
+
+      try {
+        const buffer = Buffer.alloc(readLength)
+        const { bytesRead } = await fileHandle.read(buffer, 0, readLength, offset)
+        const chunkBuffer = buffer.subarray(0, bytesRead)
+        const encoding = options?.encoding || detectTextBufferEncoding(chunkBuffer)
+
+        return {
+          text: decodeTextBuffer(chunkBuffer, encoding),
+          offset,
+          nextOffset: Math.min(fileSize, offset + bytesRead),
+          fileSize,
+          encoding,
+          hasPrevious: offset > 0,
+          hasNext: offset + bytesRead < fileSize
+        }
+      } finally {
+        await fileHandle.close()
+      }
     } catch {
       return null
     }
@@ -296,6 +539,40 @@ export class DialogService {
       return Uint8Array.from(buffer)
     } catch {
       return null
+    }
+  }
+
+  static async getAudioPlaybackUrl(filePath: string): Promise<AudioPlaybackUrlResult | null> {
+    const normalizedPath = path.normalize(String(filePath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return null
+    }
+
+    const extension = path.extname(normalizedPath).toLowerCase()
+    if (!this.AUDIO_TRANSCODE_EXTENSIONS.has(extension)) {
+      return {
+        url: toLocalFileProtocolUrl(normalizedPath),
+        transcoded: false,
+        sourcePath: normalizedPath,
+        playbackPath: normalizedPath
+      }
+    }
+
+    const cachedPlaybackPath = await this.getAudioTranscodeCachePath(normalizedPath)
+    if (cachedPlaybackPath && fs.existsSync(cachedPlaybackPath)) {
+      return {
+        url: toLocalFileProtocolUrl(cachedPlaybackPath),
+        transcoded: true,
+        sourcePath: normalizedPath,
+        playbackPath: cachedPlaybackPath
+      }
+    }
+
+    return {
+      url: toAudioTranscodeProtocolUrl(normalizedPath),
+      transcoded: true,
+      sourcePath: normalizedPath,
+      playbackPath: normalizedPath
     }
   }
 
@@ -317,6 +594,10 @@ export class DialogService {
     const maxHeight = Math.max(1, Number(options?.maxHeight ?? 0) || 320)
     const fit = options?.fit === 'cover' ? 'cover' : 'inside'
     const quality = Math.min(100, Math.max(40, Number(options?.quality ?? 82) || 82))
+    const imageProbe = await readImageProbe(normalizedPath)
+    if (isHugeImageProbe(imageProbe) && !canAttemptHugeImageThumbnail(imageProbe)) {
+      return null
+    }
 
     const cacheFilePath = await this.ensureImagePreviewCache(normalizedPath, {
       maxWidth,
@@ -407,6 +688,46 @@ export class DialogService {
     }
 
     return this.listImageFiles(screenshotFolder)
+  }
+
+  static async saveVideoFrameScreenshot(resourceId: string, dataUrl: string, currentTime?: number) {
+    const screenshotFolder = await this.ensureScreenshotFolder(String(resourceId ?? '').trim())
+    if (!screenshotFolder) {
+      return {
+        type: 'warning',
+        message: '未配置截图缓存目录',
+      }
+    }
+
+    const matched = String(dataUrl ?? '').match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i)
+    if (!matched) {
+      return {
+        type: 'warning',
+        message: '截图数据无效',
+      }
+    }
+
+    const extension = matched[1].toLowerCase() === 'jpeg' ? 'jpg' : matched[1].toLowerCase()
+    const buffer = Buffer.from(matched[2], 'base64')
+    const timestamp = new Date()
+      .toISOString()
+      .replace(/[:.]/g, '-')
+      .replace('T', '_')
+      .replace('Z', '')
+    const secondText = Number.isFinite(Number(currentTime))
+      ? `_${Math.max(0, Math.floor(Number(currentTime)))}s`
+      : ''
+    const outputPath = path.join(screenshotFolder, `video-frame_${timestamp}${secondText}.${extension}`)
+
+    fs.writeFileSync(outputPath, buffer)
+
+    return {
+      type: 'success',
+      message: '截图已保存',
+      data: {
+        filePath: outputPath,
+      },
+    }
   }
 
   static async getDirectoryImages(directoryPath: string) {
@@ -510,7 +831,13 @@ export class DialogService {
               withoutEnlargement: true,
             }
 
-      await sharp(filePath)
+      await sharp(filePath, {
+        limitInputPixels: MAX_IMAGE_THUMBNAIL_PIXELS,
+        animated: false,
+        pages: 1,
+        sequentialRead: true,
+        failOn: 'none'
+      })
         .rotate()
         .resize(resizeOptions)
         .webp({ quality: options.quality })
@@ -518,6 +845,21 @@ export class DialogService {
     }
 
     return targetPath
+  }
+
+  private static async getAudioTranscodeCachePath(filePath: string): Promise<string | null> {
+    const fileStat = await fs.promises.stat(filePath)
+    const cacheRoot = await this.getAudioTranscodeCacheRoot()
+
+    const cacheKey = createHash('sha1')
+      .update(JSON.stringify({
+        filePath: path.normalize(filePath).toLowerCase(),
+        size: fileStat.size,
+        mtimeMs: Math.trunc(fileStat.mtimeMs),
+        format: 'mp3-192k'
+      }))
+      .digest('hex')
+    return path.join(cacheRoot, `${cacheKey}.mp3`)
   }
 
   private static listImageFiles(directoryPath: string) {
@@ -678,13 +1020,19 @@ export class DialogService {
   }
 
   private static async getPreviewCacheRoot() {
+    return path.join(await this.getCacheRoot(), 'image-previews')
+  }
+
+  private static async getAudioTranscodeCacheRoot() {
+    return path.join(await this.getCacheRoot(), 'audio-transcodes')
+  }
+
+  private static async getCacheRoot() {
     const cacheSetting = await DatabaseService.getSetting(Settings.CACHE_PATH)
     const configuredRoot = String(cacheSetting?.value ?? '').trim()
-    const baseRoot = configuredRoot
+    return configuredRoot
       ? path.resolve(configuredRoot)
       : path.resolve(app.getPath('userData'), 'cache')
-
-    return path.join(baseRoot, 'image-previews')
   }
 
   static async launchPath(filePath: string, fileName?: string, options?: { args?: string[] }) {
