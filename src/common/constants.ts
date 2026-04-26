@@ -4,6 +4,14 @@ export interface SettingDetail {
   readonly default: string;
 }
 
+export const WEBSITE_DIRECT_DOWNLOAD_EXTENSIONS = Object.freeze([
+  '.7z', '.apk', '.appimage', '.avi', '.bin', '.bz2', '.csv', '.dmg', '.doc', '.docx',
+  '.epub', '.exe', '.flac', '.gif', '.gz', '.img', '.ipa', '.iso', '.jpeg', '.jpg',
+  '.m4a', '.mkv', '.mov', '.mp3', '.mp4', '.msi', '.ogg', '.pdf', '.png', '.ppt',
+  '.pptx', '.rar', '.srt', '.svg', '.tar', '.torrent', '.txt', '.wav', '.webm',
+  '.webp', '.xls', '.xlsx', '.zip'
+])
+
 export const Settings = {
   INIT_STATUS: {
     name: 'initStatus',
@@ -109,6 +117,16 @@ export const Settings = {
     name: 'themeColor',
     description: '主题颜色',
     default: ''
+  },
+  AUDIO_PLAYBACK_RESUME_RESTART_THRESHOLD: {
+    name: 'audioPlaybackResumeRestartThreshold',
+    description: '音乐续播完成阈值（百分比）',
+    default: '95'
+  },
+  VIDEO_PLAYBACK_RESUME_RESTART_THRESHOLD: {
+    name: 'videoPlaybackResumeRestartThreshold',
+    description: '电影续播完成阈值（百分比）',
+    default: '95'
   },
   VERSION: {
     name: 'version',

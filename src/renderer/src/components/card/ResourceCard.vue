@@ -3,6 +3,7 @@ import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Icon, addCollection } from '@iconify/vue'
 import materialSymbolsLightIcons from '@iconify-json/material-symbols-light/icons.json'
 import { NIcon } from 'naive-ui'
+import { getWebsitePlaceholderEmoji } from '../../utils/website-placeholder-emoji'
 import {
   CheckmarkCircleOutline,
   CreateOutline,
@@ -39,10 +40,12 @@ const props = defineProps<{
   showScreenshotFolder?: boolean
   showCompletedToggle?: boolean
   showDeleteFiles?: boolean
+  showModifyOrder?: boolean
   stopNeedsConfirm?: boolean
   selected?: boolean
   selectionMode?: boolean
   showDefaultAppPlay?: boolean
+  defaultAppActionText?: string
   showAddToPlaylist?: boolean
 }>()
 const emit = defineEmits<{
@@ -62,6 +65,7 @@ const emit = defineEmits<{
   (event: 'toggle-select', resource: any): void
   (event: 'delete', resource: any): void
   (event: 'delete-files', resource: any): void
+  (event: 'modify-order', resource: any): void
 }>()
 
 const resourceTags = computed(() => props.resource?.tags ?? [])
@@ -72,6 +76,7 @@ const resourceAlbum = computed(() => String(props.resource?.audioMeta?.album ?? 
 const showAlbumLine = computed(() => String(props.categoryName ?? '').trim() === '音乐' && Boolean(resourceAlbum.value))
 const coverPreviewSrc = ref('')
 const fileIconSrc = ref('')
+const websiteFaviconSrc = ref('')
 const showContextMenu = ref(false)
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
@@ -85,6 +90,7 @@ let coverPreviewTaskId = 0
 const isNovelCategory = computed(() => String(props.categoryName ?? '').trim() === '小说')
 const isMovieCategory = computed(() => String(props.categoryName ?? '').trim() === '电影')
 const isAnimeCategory = computed(() => String(props.categoryName ?? '').trim() === '番剧')
+const isWebsiteCategory = computed(() => String(props.categoryName ?? '').trim() === '网站')
 const isVideoLikeCategory = computed(() => isMovieCategory.value || isAnimeCategory.value)
 const completedLabel = computed(() => {
   if (isNovelCategory.value) {
@@ -114,6 +120,19 @@ const normalizeCoverPreviewSource = (coverPath: string) => {
   return coverPath
 }
 
+const normalizeWebsiteIconSource = (iconPath: string) => {
+  const normalizedPath = String(iconPath ?? '').trim()
+  if (!normalizedPath) {
+    return ''
+  }
+
+  if (normalizedPath.startsWith('//')) {
+    return `https:${normalizedPath}`
+  }
+
+  return normalizedPath
+}
+
 const renderMenuIcon = (icon: any) => () => h(NIcon, null, { default: () => h(icon) })
 const renderDangerLabel = (label: string) => () => h('span', {
   style: {
@@ -130,7 +149,7 @@ const contextMenuOptions = computed(() => ([
     icon: renderMenuIcon(Play)
   },
   ...(props.showDefaultAppPlay ? [{
-    label: '使用默认应用播放',
+    label: props.defaultAppActionText || '使用默认应用打开',
     key: 'default-app-play',
     disabled: !Boolean(props.resource?.basePath) || Boolean(props.resource?.missingStatus),
     icon: renderMenuIcon(Play)
@@ -169,6 +188,12 @@ const contextMenuOptions = computed(() => ([
     key: 'edit',
     icon: renderMenuIcon(CreateOutline)
   },
+  ...(props.showModifyOrder ? [{
+    label: '修改顺序',
+    key: 'modify-order',
+    disabled: !Boolean(props.resource?.basePath) || Boolean(props.resource?.missingStatus),
+    icon: renderMenuIcon(CreateOutline)
+  }] : []),
   {
     label: props.selected ? '取消多选' : '多选',
     key: 'toggle-select',
@@ -177,19 +202,21 @@ const contextMenuOptions = computed(() => ([
   {
     label: props.resource?.ifFavorite ? '取消收藏' : '收藏',
     key: 'toggle-favorite',
+    disabled: !canToggleFavorite.value,
     icon: renderMenuIcon(props.resource?.ifFavorite ? HeartDislikeOutline : HeartOutline)
   },
   ...(props.showCompletedToggle ? [{
     label: props.resource?.isCompleted ? `取消${completedStateLabel.value}` : completedStateLabel.value,
     key: 'toggle-completed',
+    disabled: !canToggleCompleted.value,
     icon: renderMenuIcon(CheckmarkCircleOutline)
   }] : []),
-  {
+  ...(!isWebsiteCategory.value ? [{
     label: '打开文件夹',
     key: 'open-folder',
     disabled: !Boolean(props.resource?.basePath) || Boolean(props.resource?.missingStatus),
     icon: renderMenuIcon(FolderOpenOutline)
-  },
+  }] : []),
   ...(props.showScreenshotFolder ? [{
     label: '打开截图文件夹',
     key: 'open-screenshot-folder',
@@ -205,12 +232,12 @@ const contextMenuOptions = computed(() => ([
     key: 'delete',
     icon: renderMenuIcon(TrashOutline)
   },
-  {
+  ...(!isWebsiteCategory.value ? [{
     label: renderDangerLabel('删除本地文件'),
     key: 'delete-files',
     disabled: Boolean(props.resource?.missingStatus) || !Boolean(props.resource?.basePath),
     icon: renderMenuIcon(TrashOutline)
-  }
+  }] : [])
 ]))
 
 const displayBaseName = computed(() => {
@@ -227,6 +254,29 @@ const displayBaseName = computed(() => {
   const normalizedPath = basePath.replace(/\\/g, '/')
   return normalizedPath.split('/').pop() ?? normalizedPath
 })
+const websiteUrl = computed(() =>
+  String(
+    props.resource?.websiteMeta?.url
+    ?? props.resource?.websiteMeta?.website
+    ?? props.resource?.meta?.website
+    ?? props.resource?.website
+    ?? ''
+  ).trim()
+)
+const websiteIsDownloadLink = computed(() => Boolean(
+  props.resource?.websiteMeta?.isDownloadLink
+  ?? props.resource?.meta?.isDownloadLink
+))
+const cardSubtitle = computed(() => isWebsiteCategory.value ? websiteUrl.value : displayBaseName.value)
+const websitePlaceholderEmoji = computed(() =>
+  getWebsitePlaceholderEmoji(props.resource?.id, websiteUrl.value, websiteIsDownloadLink.value)
+)
+const showWebsiteCoverPlaceholder = computed(() =>
+  isWebsiteCategory.value && !coverPreviewSrc.value && Boolean(websiteFaviconSrc.value)
+)
+const showWebsiteEmojiCoverPlaceholder = computed(() =>
+  isWebsiteCategory.value && !coverPreviewSrc.value && !websiteFaviconSrc.value
+)
 
 const fileExtension = computed(() => {
   const fileName = displayBaseName.value
@@ -271,6 +321,86 @@ const videoYearInfo = computed(() => {
   const rawYear = Number(props.resource?.videoMeta?.year ?? 0)
   return Number.isFinite(rawYear) && rawYear >= 1000 ? String(Math.trunc(rawYear)) : ''
 })
+const normalizeResourcePath = (value: string | null | undefined) => String(value ?? '').trim().replace(/\\/g, '/').toLowerCase()
+const getFileNameFromPath = (value: string | null | undefined) => {
+  const normalizedValue = String(value ?? '').trim().replace(/\\/g, '/')
+  return normalizedValue.split('/').pop() ?? normalizedValue
+}
+const formatPlaybackTime = (value: number | null | undefined) => {
+  const totalSeconds = Math.max(0, Math.floor(Number(value ?? 0)))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  const minuteSegment = String(minutes).padStart(hours > 0 ? 2 : 1, '0')
+  const secondSegment = String(seconds).padStart(2, '0')
+  return hours > 0
+    ? `${String(hours).padStart(2, '0')}:${minuteSegment}:${secondSegment}`
+    : `${minuteSegment}:${secondSegment}`
+}
+const inferEpisodeOrderFromName = (fileName: string) => {
+  const normalizedName = String(fileName ?? '').trim()
+  if (!normalizedName) {
+    return null
+  }
+
+  const patterns = [
+    /(?:^|[^a-z])ep(?:isode)?\s*0*([0-9]{1,3})(?:[^0-9]|$)/i,
+    /第\s*0*([0-9]{1,3})\s*[话話集回]/,
+    /(?:^|[^0-9])0*([0-9]{1,3})(?:v[0-9]+)?(?:[^0-9]|$)/
+  ]
+
+  for (const pattern of patterns) {
+    const matched = normalizedName.match(pattern)
+    if (!matched) {
+      continue
+    }
+
+    const order = Number(matched[1])
+    if (Number.isFinite(order) && order > 0) {
+      return order
+    }
+  }
+
+  return null
+}
+const animePlaybackProgressText = computed(() => {
+  if (!isAnimeCategory.value) {
+    return ''
+  }
+
+  const lastPlayFile = String(props.resource?.videoMeta?.lastPlayFile ?? '').trim()
+  const lastPlayTime = Math.max(0, Number(props.resource?.videoMeta?.lastPlayTime ?? 0))
+  if (!lastPlayFile || lastPlayTime <= 0) {
+    return ''
+  }
+
+  const normalizedLastPlayFile = normalizeResourcePath(lastPlayFile)
+  const fileName = getFileNameFromPath(lastPlayFile)
+  const videoSubs = Array.isArray(props.resource?.videoSubs) ? props.resource.videoSubs : []
+  const matchedVideoSub = videoSubs.find((item: any) => {
+    const relativePath = normalizeResourcePath(String(item?.relativePath ?? ''))
+    const subFileName = normalizeResourcePath(String(item?.fileName ?? ''))
+    return relativePath === normalizedLastPlayFile || subFileName === normalizeResourcePath(fileName)
+  })
+  const matchedOrder = Number(matchedVideoSub?.sortOrder ?? -1)
+  const episodeOrder = Number.isFinite(matchedOrder) && matchedOrder >= 0
+    ? matchedOrder + 1
+    : inferEpisodeOrderFromName(fileName)
+  const episodeLabel = episodeOrder
+    ? `第${String(episodeOrder).padStart(2, '0')}集`
+    : fileName
+
+  return `${episodeLabel} / ${formatPlaybackTime(lastPlayTime)}`
+})
+const moviePlaybackProgressText = computed(() => {
+  if (!isMovieCategory.value) {
+    return ''
+  }
+
+  const lastPlayTime = Math.max(0, Number(props.resource?.videoMeta?.lastPlayTime ?? 0))
+  return lastPlayTime > 0 ? formatPlaybackTime(lastPlayTime) : ''
+})
+const videoCoverProgressText = computed(() => animePlaybackProgressText.value || moviePlaybackProgressText.value)
 const showActorLine = computed(() => (props.hideTypeLine || isVideoLikeCategory.value) && resourceActors.value.length)
 const actorLineLabel = computed(() => (isVideoLikeCategory.value ? '声优/演员' : '声优'))
 
@@ -313,13 +443,23 @@ const launchButtonStyle = computed(() => {
 })
 
 const canLaunch = computed(() => {
+  if (props.selectionMode) {
+    return false
+  }
+
+  if (isWebsiteCategory.value) {
+    return Boolean(props.resource?.websiteMeta?.url || props.resource?.websiteMeta?.website || props.resource?.meta?.website || props.resource?.website)
+  }
+
   return Boolean(props.resource?.basePath) && !props.resource?.missingStatus && !isRunning.value
 })
 
 const canStop = computed(() => {
-  return Boolean(props.resource?.isRunning)
+  return !props.selectionMode && Boolean(props.resource?.isRunning)
 })
 const stopNeedsConfirm = computed(() => Boolean(props.stopNeedsConfirm))
+const canToggleFavorite = computed(() => !props.selectionMode)
+const canToggleCompleted = computed(() => !props.selectionMode)
 
 const handleLaunch = () => {
   if (!canLaunch.value) {
@@ -374,6 +514,22 @@ const handleStopButtonDoubleClick = () => {
 const handleConfirmStop = () => {
   showStopConfirm.value = false
   handleStop()
+}
+
+const handleToggleFavorite = () => {
+  if (!canToggleFavorite.value) {
+    return
+  }
+
+  emit('toggle-favorite', props.resource)
+}
+
+const handleToggleCompleted = () => {
+  if (!canToggleCompleted.value) {
+    return
+  }
+
+  emit('toggle-completed', props.resource)
 }
 
 const handleShowDetail = () => {
@@ -433,6 +589,11 @@ const handleSelectMenu = (key: string) => {
     return
   }
 
+  if (key === 'modify-order') {
+    emit('modify-order', props.resource)
+    return
+  }
+
   if (key === 'default-app-play') {
     emit('default-app-play', props.resource)
     return
@@ -449,7 +610,7 @@ const handleSelectMenu = (key: string) => {
   }
 
   if (key === 'toggle-favorite') {
-    emit('toggle-favorite', props.resource)
+    handleToggleFavorite()
     return
   }
 
@@ -459,7 +620,7 @@ const handleSelectMenu = (key: string) => {
   }
 
   if (key === 'toggle-completed') {
-    emit('toggle-completed', props.resource)
+    handleToggleCompleted()
     return
   }
 
@@ -531,6 +692,39 @@ watch(
       fileIconSrc.value = (await window.api.dialog.getFileIconAsDataUrl(String(basePath), String(fileName ?? ''))) ?? ''
     } catch {
       fileIconSrc.value = ''
+    }
+  },
+  { immediate: true }
+)
+
+watch(
+  () => [isWebsiteCategory.value, props.resource?.websiteMeta?.favicon] as const,
+  async ([isWebsite, favicon]) => {
+    if (!isWebsite || !favicon) {
+      websiteFaviconSrc.value = ''
+      return
+    }
+
+    const normalizedFavicon = normalizeWebsiteIconSource(String(favicon))
+    if (!normalizedFavicon) {
+      websiteFaviconSrc.value = ''
+      return
+    }
+
+    if (/^https?:\/\//i.test(normalizedFavicon) || /^data:/i.test(normalizedFavicon)) {
+      websiteFaviconSrc.value = normalizedFavicon
+      return
+    }
+
+    try {
+      websiteFaviconSrc.value = (await window.api.dialog.getImagePreviewUrl(normalizedFavicon, {
+        maxWidth: 64,
+        maxHeight: 64,
+        fit: 'cover',
+        quality: 80
+      })) ?? ''
+    } catch {
+      websiteFaviconSrc.value = ''
     }
   },
   { immediate: true }
@@ -611,19 +805,45 @@ onMounted(() => {
         }"
         embedded
       >
-        <div class="resource-card__content" :class="{ 'resource-card__content--no-cover': showCover === false }">
-          <div v-if="showCover !== false" class="resource-card__cover">
-            <img
-              v-if="coverPreviewSrc"
-              :src="coverPreviewSrc"
+          <div class="resource-card__content" :class="{ 'resource-card__content--no-cover': showCover === false }">
+            <div v-if="showCover !== false" class="resource-card__cover">
+              <img
+                v-if="coverPreviewSrc"
+                :src="coverPreviewSrc"
               :alt="resource.title"
               class="resource-card__cover-image"
               draggable="false"
-            />
-            <div v-else class="resource-card__cover-placeholder">
-              {{ categoryName || '资源' }}
+              />
+              <div
+                v-else
+                class="resource-card__cover-placeholder"
+                :class="{ 'resource-card__cover-placeholder--website': showWebsiteCoverPlaceholder || showWebsiteEmojiCoverPlaceholder }"
+              >
+                <div v-if="showWebsiteCoverPlaceholder" class="resource-card__website-cover">
+                  <div class="resource-card__website-cover-glow" />
+                  <div class="resource-card__website-cover-badge">
+                    <img
+                      :src="websiteFaviconSrc"
+                      :alt="resource.title"
+                      class="resource-card__website-cover-icon"
+                      draggable="false"
+                    />
+                  </div>
+                </div>
+                <div v-else-if="showWebsiteEmojiCoverPlaceholder" class="resource-card__website-cover">
+                  <div class="resource-card__website-cover-glow" />
+                  <div class="resource-card__website-cover-badge resource-card__website-cover-badge--emoji">
+                    <span class="resource-card__website-cover-emoji">{{ websitePlaceholderEmoji }}</span>
+                  </div>
+                </div>
+                <template v-else>
+                {{ categoryName || '资源' }}
+                </template>
+              </div>
+              <div v-if="videoCoverProgressText" class="resource-card__cover-progress">
+                {{ videoCoverProgressText }}
+              </div>
             </div>
-          </div>
 
           <div class="resource-card__header">
             <div class="resource-card__heading">
@@ -645,10 +865,32 @@ onMounted(() => {
                   />
                   <span v-else>{{ fallbackExecutableIcon }}</span>
                 </span>
-                <div class="resource-card__title">{{ resource.title }}</div>
+                <span v-else-if="isWebsiteCategory && websiteFaviconSrc" class="resource-card__title-icon">
+                  <img
+                    :src="websiteFaviconSrc"
+                    :alt="resource.title"
+                    class="resource-card__title-icon-image resource-card__title-icon-image--favicon"
+                    draggable="false"
+                  />
+                </span>
+                <span v-else-if="isWebsiteCategory" class="resource-card__title-icon resource-card__title-icon--emoji">
+                  {{ websitePlaceholderEmoji }}
+                </span>
+                <div class="resource-card__title" :class="{ 'resource-card__title--website': isWebsiteCategory }">{{ resource.title }}</div>
+                <span
+                  v-if="isWebsiteCategory && websiteIsDownloadLink"
+                  class="resource-card__download-badge"
+                  title="下载链接"
+                >
+                  下载
+                </span>
               </div>
-              <div v-if="displayBaseName" class="resource-card__subtitle resource-card__subtitle--file" :title="resource.basePath">
-                {{ displayBaseName }}
+              <div
+                v-if="cardSubtitle"
+                class="resource-card__subtitle resource-card__subtitle--file"
+                :title="isWebsiteCategory ? cardSubtitle : resource.basePath"
+              >
+                {{ cardSubtitle }}
               </div>
             </div>
             <div class="resource-card__status">
@@ -668,9 +910,13 @@ onMounted(() => {
                 <template #trigger>
                   <n-icon
                     size="18"
-                    class="resource-card__status-icon resource-card__status-icon--interactive"
+                    :class="[
+                      'resource-card__status-icon',
+                      'resource-card__status-icon--interactive',
+                      { 'resource-card__status-icon--disabled': !canToggleFavorite }
+                    ]"
                     :color="favoriteIconColor"
-                    @click.stop="emit('toggle-favorite', resource)"
+                    @click.stop="handleToggleFavorite"
                   >
                     <HeartOutline />
                   </n-icon>
@@ -681,9 +927,13 @@ onMounted(() => {
                 <template #trigger>
                   <n-icon
                     size="18"
-                    class="resource-card__status-icon resource-card__status-icon--interactive"
+                    :class="[
+                      'resource-card__status-icon',
+                      'resource-card__status-icon--interactive',
+                      { 'resource-card__status-icon--disabled': !canToggleCompleted }
+                    ]"
                     :color="completedIconColor"
-                    @click.stop="emit('toggle-completed', resource)"
+                    @click.stop="handleToggleCompleted"
                   >
                     <CheckmarkCircleOutline />
                   </n-icon>
@@ -913,6 +1163,7 @@ onMounted(() => {
 }
 
 .resource-card__cover {
+  position: relative;
   width: 100%;
   height: 176px;
   border-radius: 12px;
@@ -940,6 +1191,93 @@ onMounted(() => {
   letter-spacing: 0.04em;
 }
 
+.resource-card__cover-placeholder--website {
+  opacity: 1;
+  color: inherit;
+  background:
+    radial-gradient(circle at 24% 22%, color-mix(in srgb, currentColor 10%, transparent), transparent 36%),
+    radial-gradient(circle at 78% 18%, color-mix(in srgb, currentColor 8%, transparent), transparent 32%),
+    linear-gradient(135deg,
+      color-mix(in srgb, currentColor 5%, transparent),
+      color-mix(in srgb, currentColor 2%, transparent)
+    );
+}
+
+.resource-card__website-cover {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.resource-card__website-cover-glow {
+  position: absolute;
+  width: 120px;
+  height: 120px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  filter: blur(30px);
+  opacity: 0.9;
+}
+
+.resource-card__website-cover-badge {
+  position: relative;
+  z-index: 1;
+  width: 72px;
+  height: 72px;
+  border-radius: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, currentColor 6%, rgba(255, 255, 255, 0.82));
+  border: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+  box-shadow:
+    0 18px 44px color-mix(in srgb, currentColor 14%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.resource-card__website-cover-badge--emoji {
+  background: color-mix(in srgb, currentColor 8%, rgba(255, 255, 255, 0.76));
+}
+
+.resource-card__website-cover-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  object-fit: cover;
+  display: block;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+.resource-card__website-cover-emoji {
+  font-size: 34px;
+  line-height: 1;
+}
+
+.resource-card__cover-progress {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  max-width: calc(100% - 20px);
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.72);
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 11px;
+  line-height: 1.4;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .resource-card__header {
   display: flex;
   align-items: flex-start;
@@ -963,6 +1301,11 @@ onMounted(() => {
 
 .resource-card__status-icon {
   transition: transform 0.16s ease, opacity 0.16s ease;
+}
+
+.resource-card__status-icon--disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
 }
 
 .resource-card__status-icon--interactive {
@@ -990,6 +1333,10 @@ onMounted(() => {
   line-height: 1;
 }
 
+.resource-card__title-icon--emoji {
+  font-size: 17px;
+}
+
 .resource-card__title-icon-image {
   width: 18px;
   height: 18px;
@@ -997,6 +1344,10 @@ onMounted(() => {
   display: block;
   -webkit-user-drag: none;
   user-select: none;
+}
+
+.resource-card__title-icon-image--favicon {
+  border-radius: 4px;
 }
 
 .resource-card__title-icon-svg {
@@ -1016,6 +1367,25 @@ onMounted(() => {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.resource-card__title--website {
+  min-height: calc(1.35em * 2);
+}
+
+.resource-card__download-badge {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin-top: 1px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.4;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #8a5a00;
+  background: rgba(240, 173, 78, 0.22);
+  border: 1px solid rgba(240, 173, 78, 0.34);
 }
 
 .resource-card__subtitle {

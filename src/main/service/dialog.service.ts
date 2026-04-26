@@ -2,16 +2,18 @@ import { app, clipboard, dialog, nativeImage, shell } from 'electron'
 import { readFile } from 'fs/promises'
 import path from 'path'
 import fs from 'fs'
-import { spawn } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { pathToFileURL } from 'url'
 import sharp from 'sharp'
 import { parseFile } from 'music-metadata'
 import { DatabaseService } from './database.service'
 import { Settings } from '../../common/constants'
+const ffprobeStatic = require('ffprobe-static') as { path?: string }
 
 const LOCAL_FILE_PROTOCOL = 'neo-resource-file'
 const AUDIO_TRANSCODE_PROTOCOL = 'neo-resource-audio'
+const VIDEO_TRANSCODE_PROTOCOL = 'neo-resource-video'
 const TEXT_ENCODING_SAMPLE_BYTES = 256 * 1024
 const TEXT_FILE_CHUNK_BYTES = 512 * 1024
 const MAX_IMAGE_DATA_URL_BYTES = 64 * 1024 * 1024
@@ -34,6 +36,11 @@ function toAudioTranscodeProtocolUrl(filePath: string) {
   return `${AUDIO_TRANSCODE_PROTOCOL}://transcode/${encodeBase64Url(filePath)}`
 }
 
+function toVideoTranscodeProtocolUrl(filePath: string, startTime = 0) {
+  const normalizedStartTime = Math.max(0, Number(startTime ?? 0) || 0)
+  return `${VIDEO_TRANSCODE_PROTOCOL}://transcode/${encodeBase64Url(filePath)}?start=${encodeURIComponent(normalizedStartTime)}`
+}
+
 async function readImageProbe(filePath: string) {
   const [fileStat, metadata] = await Promise.all([
     fs.promises.stat(filePath),
@@ -50,6 +57,37 @@ async function readImageProbe(filePath: string) {
     pixels,
     format: String(metadata.format ?? path.extname(filePath).replace('.', '')).trim().toLowerCase(),
     pages: Number(metadata.pages ?? 1)
+  }
+}
+
+function execFileText(filePath: string, args: string[], timeoutMs = 15000) {
+  return new Promise<string>((resolve, reject) => {
+    execFile(filePath, args, { encoding: 'utf8', windowsHide: true, timeout: timeoutMs, maxBuffer: 1024 * 1024 * 8 }, (error, stdout) => {
+      if (error) {
+        reject(error)
+        return
+      }
+
+      resolve(String(stdout ?? ''))
+    })
+  })
+}
+
+async function readVideoDurationWithFfprobe(filePath: string) {
+  const ffprobePath = String(ffprobeStatic?.path ?? '').trim()
+  if (!ffprobePath || !fs.existsSync(ffprobePath)) {
+    return 0
+  }
+
+  try {
+    const output = await execFileText(
+      ffprobePath,
+      ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath]
+    )
+    const duration = Number(output.trim())
+    return Number.isFinite(duration) && duration > 0 ? duration : 0
+  } catch {
+    return 0
   }
 }
 
@@ -156,6 +194,13 @@ type AudioPlaybackUrlResult = {
   transcoded: boolean
   sourcePath: string
   playbackPath: string
+}
+type VideoPlaybackUrlResult = {
+  url: string
+  transcoded: boolean
+  sourcePath: string
+  playbackPath: string
+  duration: number
 }
 
 function detectTextBufferEncoding(buffer: Buffer): TextEncoding {
@@ -268,7 +313,15 @@ export class DialogService {
     '.avi',
     '.mov',
     '.wmv',
+    '.flv',
     '.ts'
+  ])
+  private static readonly VIDEO_TRANSCODE_EXTENSIONS = new Set([
+    '.avi',
+    '.mkv',
+    '.mov',
+    '.wmv',
+    '.flv'
   ])
 
   static async getAvailableScriptRuntimes() {
@@ -576,6 +629,35 @@ export class DialogService {
     }
   }
 
+  static async getVideoPlaybackUrl(filePath: string, startTime = 0): Promise<VideoPlaybackUrlResult | null> {
+    const normalizedPath = path.normalize(String(filePath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return null
+    }
+
+    const extension = path.extname(normalizedPath).toLowerCase()
+    const mediaMeta = await this.readMediaMetadata(normalizedPath, true)
+    const sourceDuration = await readVideoDurationWithFfprobe(normalizedPath)
+      || Math.max(0, Number(mediaMeta.duration ?? 0))
+    if (!this.VIDEO_TRANSCODE_EXTENSIONS.has(extension)) {
+      return {
+        url: toLocalFileProtocolUrl(normalizedPath),
+        transcoded: false,
+        sourcePath: normalizedPath,
+        playbackPath: normalizedPath,
+        duration: sourceDuration
+      }
+    }
+
+    return {
+      url: toVideoTranscodeProtocolUrl(normalizedPath, startTime),
+      transcoded: true,
+      sourcePath: normalizedPath,
+      playbackPath: normalizedPath,
+      duration: sourceDuration
+    }
+  }
+
   static async getImagePreviewUrl(
     filePath: string,
     options?: {
@@ -669,6 +751,16 @@ export class DialogService {
     }
 
     clipboard.writeImage(image)
+    return ''
+  }
+
+  static async copyTextToClipboard(text: string) {
+    const normalizedText = String(text ?? '')
+    if (!normalizedText.trim()) {
+      return '复制内容不能为空'
+    }
+
+    clipboard.writeText(normalizedText)
     return ''
   }
 
@@ -856,10 +948,10 @@ export class DialogService {
         filePath: path.normalize(filePath).toLowerCase(),
         size: fileStat.size,
         mtimeMs: Math.trunc(fileStat.mtimeMs),
-        format: 'mp3-192k'
+        format: 'wav-pcm_s16le-44100-2ch'
       }))
       .digest('hex')
-    return path.join(cacheRoot, `${cacheKey}.mp3`)
+    return path.join(cacheRoot, `${cacheKey}.wav`)
   }
 
   private static listImageFiles(directoryPath: string) {

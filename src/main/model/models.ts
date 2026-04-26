@@ -42,6 +42,8 @@ export class ResourceMeta {
   version!: string
   website!: string
   websiteType!: string
+  favicon?: string
+  isDownloadLink?: boolean
   lastReadPage: number = 0
   lastReadPercent?: number = 0
 }
@@ -52,6 +54,15 @@ export class ResourceStoreItem {
   workId!: string
 }
 
+export class VideoSubItem {
+  id!: string
+  fileName!: string
+  relativePath!: string
+  coverPath?: string
+  sortOrder!: number
+  isVisible!: boolean
+}
+
 export class FetchResourceInfoResult {
   name!: string
   author!: string
@@ -59,6 +70,7 @@ export class FetchResourceInfoResult {
   cv: string = ''
   illust: string = ''
   scenario: string = ''
+  favicon: string = ''
   lastPlayFile?: string
   lastPlayTime?: number
   translator: string = ''
@@ -67,6 +79,7 @@ export class FetchResourceInfoResult {
   year?: number | null
   cover: string = ''
   website: string = ''
+  isDownloadLink?: boolean
   tag: string[] = []
   type: string[] = []
 }

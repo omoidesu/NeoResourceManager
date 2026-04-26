@@ -2,6 +2,7 @@ appId: com.electron.app
 productName: neoresourcemanager
 directories:
   buildResources: build
+afterPack: scripts/after-pack-prune-media-binaries.cjs
 files:
   - '!**/.vscode/*'
   - '!plugin{,/**}'
@@ -18,8 +19,12 @@ asarUnpack:
 extraResources:
   - from: drizzle
     to: drizzle
+extraFiles:
+  - from: plugin
+    to: plugin
 win:
   executableName: neoresourcemanager
+  icon: build/icon.ico
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}

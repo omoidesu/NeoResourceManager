@@ -4,6 +4,50 @@ import {SettingDetail} from "../common/constants";
 import {ResourceForm} from "../main/model/models";
 import type { AppNotificationMessage, BatchImportProgressMessage, ResourceStateChangedMessage } from '../main/service/notification-queue.service'
 
+const sendRendererLog = (level: 'debug' | 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>) => {
+  try {
+    ipcRenderer.send('renderer:log', {
+      level,
+      message,
+      meta
+    })
+  } catch {
+    // noop
+  }
+}
+
+sendRendererLog('info', 'preload initialized', {
+  contextIsolated: process.contextIsolated,
+  pid: process.pid
+})
+
+window.addEventListener('error', (event) => {
+  sendRendererLog('error', 'renderer window error', {
+    message: event.message,
+    filename: event.filename,
+    lineno: event.lineno,
+    colno: event.colno,
+    error: event.error instanceof Error
+      ? {
+          message: event.error.message,
+          stack: event.error.stack ?? ''
+        }
+      : String(event.error ?? '')
+  })
+})
+
+window.addEventListener('unhandledrejection', (event) => {
+  const reason = event.reason
+  sendRendererLog('error', 'renderer unhandledrejection', {
+    reason: reason instanceof Error
+      ? {
+          message: reason.message,
+          stack: reason.stack ?? ''
+        }
+      : String(reason)
+  })
+})
+
 // Custom APIs for renderer
 const api = {
   db: {
@@ -50,6 +94,7 @@ const api = {
     getImageFileUrl: (filePath: string) => ipcRenderer.invoke('dialog:get-image-file-url', filePath),
     getFileUrl: (filePath: string) => ipcRenderer.invoke('dialog:get-file-url', filePath),
     getAudioPlaybackUrl: (filePath: string) => ipcRenderer.invoke('dialog:get-audio-playback-url', filePath),
+    getVideoPlaybackUrl: (filePath: string, startTime?: number) => ipcRenderer.invoke('dialog:get-video-playback-url', filePath, startTime),
     readTextFile: (filePath: string, encoding?: string) => ipcRenderer.invoke('dialog:read-text-file', filePath, encoding),
     getTextFileInfo: (filePath: string) => ipcRenderer.invoke('dialog:get-text-file-info', filePath),
     readTextFileChunk: (filePath: string, options?: { offset?: number; length?: number; encoding?: string }) =>
@@ -60,6 +105,7 @@ const api = {
     openPath: (filePath: string, fileName?: string) => ipcRenderer.invoke('dialog:open-path', filePath, fileName),
     openExternalUrl: (url: string) => ipcRenderer.invoke('dialog:open-external-url', url),
     copyImageToClipboard: (filePath: string) => ipcRenderer.invoke('dialog:copy-image-to-clipboard', filePath),
+    copyTextToClipboard: (text: string) => ipcRenderer.invoke('dialog:copy-text-to-clipboard', text),
     openScreenshotFolder: (resourceId: string) => ipcRenderer.invoke('dialog:open-screenshot-folder', resourceId),
     getScreenshotImages: (resourceId: string) => ipcRenderer.invoke('dialog:get-screenshot-images', resourceId),
     saveVideoFrameScreenshot: (resourceId: string, dataUrl: string, currentTime?: number) =>
@@ -97,12 +143,16 @@ const api = {
       ipcRenderer.invoke('service:import-batch-asmr-directories', categoryId, items),
     fetchResourceInfo: (websiteId: string, resourceId: string) =>
       ipcRenderer.invoke('service:fetch-resource-info', websiteId, resourceId),
-    captureCoverScreenshot: (basePath: string) =>
-      ipcRenderer.invoke('service:capture-cover-screenshot', basePath),
-    extractVideoCoverFrames: (basePath: string) =>
-      ipcRenderer.invoke('service:extract-video-cover-frames', basePath),
-    launchResource: (resourceId: string, basePath: string, fileName?: string | null) =>
-      ipcRenderer.invoke('service:launch-resource', resourceId, basePath, fileName),
+    fetchWebsiteInfo: (url: string) =>
+      ipcRenderer.invoke('service:fetch-website-info', url),
+      captureCoverScreenshot: (basePath: string) =>
+        ipcRenderer.invoke('service:capture-cover-screenshot', basePath),
+      extractVideoCoverFrames: (basePath: string) =>
+        ipcRenderer.invoke('service:extract-video-cover-frames', basePath),
+      extractVideoSubCoverFrames: (basePath: string) =>
+        ipcRenderer.invoke('service:extract-video-sub-cover-frames', basePath),
+      launchResource: (resourceId: string, basePath: string, fileName?: string | null) =>
+        ipcRenderer.invoke('service:launch-resource', resourceId, basePath, fileName),
     startReadingResource: (resourceId: string) =>
       ipcRenderer.invoke('service:start-reading-resource', resourceId),
     getMultiImageReadingProgress: (resourceId: string) =>
@@ -117,6 +167,8 @@ const api = {
         ipcRenderer.invoke('service:update-asmr-playback-progress', resourceId, lastPlayFile, lastPlayTime),
       updateVideoPlaybackProgress: (resourceId: string, lastPlayFile: string, lastPlayTime: number) =>
         ipcRenderer.invoke('service:update-video-playback-progress', resourceId, lastPlayFile, lastPlayTime),
+      updateVideoSubItems: (resourceId: string, items: any[]) =>
+        ipcRenderer.invoke('service:update-video-sub-items', resourceId, items),
       startAsmrPlayback: (resourceId: string) =>
         ipcRenderer.invoke('service:start-asmr-playback', resourceId),
       stopAsmrPlayback: (resourceId: string) =>

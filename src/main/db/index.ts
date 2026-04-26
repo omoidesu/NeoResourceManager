@@ -68,6 +68,33 @@ const RECONCILE_MIGRATION_RULES: ReconcileMigrationRule[] = [
       { name: 'last_read_percent', type: 'real DEFAULT 0' },
       { name: 'isbn', type: 'text' }
     ]
+  },
+  {
+    tag: '0012_add_video_sub_table',
+    table: 'video_sub',
+    columns: [
+      { name: 'id', type: 'text' },
+      { name: 'resource_id', type: 'text' },
+      { name: 'file_name', type: 'text' },
+      { name: 'relative_path', type: 'text' },
+      { name: 'sort_order', type: 'integer DEFAULT 0' },
+      { name: 'is_visible', type: 'integer DEFAULT 1' },
+      { name: 'cover_path', type: 'text' }
+    ]
+  },
+  {
+    tag: '0013_add_website_meta_url',
+    table: 'website_meta',
+    columns: [
+      { name: 'url', type: 'text' }
+    ]
+  },
+  {
+    tag: '0014_add_website_meta_is_download_link',
+    table: 'website_meta',
+    columns: [
+      { name: 'is_download_link', type: 'integer DEFAULT 0' }
+    ]
   }
 ]
 

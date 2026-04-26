@@ -46,6 +46,13 @@ declare global {
           sourcePath: string
           playbackPath: string
         } | null>,
+        getVideoPlaybackUrl: (filePath: string, startTime?: number) => Promise<{
+          url: string
+          transcoded: boolean
+          sourcePath: string
+          playbackPath: string
+          duration: number
+        } | null>,
         readTextFile: (filePath: string, encoding?: string) => Promise<string | null>,
         getTextFileInfo: (filePath: string) => Promise<{
           size: number
@@ -70,6 +77,7 @@ declare global {
         openPath: (filePath: string, fileName?: string) => Promise<string>,
         openExternalUrl: (url: string) => Promise<string>,
         copyImageToClipboard: (filePath: string) => Promise<string>,
+        copyTextToClipboard: (text: string) => Promise<string>,
         openScreenshotFolder: (resourceId: string) => Promise<string>,
         getScreenshotImages: (resourceId: string) => Promise<string[]>,
         saveVideoFrameScreenshot: (resourceId: string, dataUrl: string, currentTime?: number) => Promise<any>,
@@ -98,8 +106,10 @@ declare global {
         importBatchMultiImageDirectories: (categoryId: string, items: any[]) => Promise<any>,
         importBatchAsmrDirectories: (categoryId: string, items: any[]) => Promise<any>,
         fetchResourceInfo: (websiteId: string, resourceId: string) => Promise<any>,
+        fetchWebsiteInfo: (url: string) => Promise<any>,
         captureCoverScreenshot: (basePath: string) => Promise<any>,
         extractVideoCoverFrames: (basePath: string) => Promise<any>,
+        extractVideoSubCoverFrames: (basePath: string) => Promise<any>,
         launchResource: (resourceId: string, basePath: string, fileName?: string | null) => Promise<any>,
         startReadingResource: (resourceId: string) => Promise<any>,
         getMultiImageReadingProgress: (resourceId: string) => Promise<any>,
@@ -108,6 +118,7 @@ declare global {
         updateNovelReadingProgress: (resourceId: string, lastReadPercent: number) => Promise<any>,
         updateAsmrPlaybackProgress: (resourceId: string, lastPlayFile: string, lastPlayTime: number) => Promise<any>,
         updateVideoPlaybackProgress: (resourceId: string, lastPlayFile: string, lastPlayTime: number) => Promise<any>,
+        updateVideoSubItems: (resourceId: string, items: any[]) => Promise<any>,
         startAsmrPlayback: (resourceId: string) => Promise<any>,
         stopAsmrPlayback: (resourceId: string) => Promise<any>,
         startVideoPlayback: (resourceId: string) => Promise<any>,

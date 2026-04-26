@@ -153,6 +153,10 @@ function registerDialog() {
     return DialogService.getAudioPlaybackUrl(filePath);
   })
 
+  ipcMain.handle('dialog:get-video-playback-url', async (_event, filePath: string, startTime?: number) => {
+    return DialogService.getVideoPlaybackUrl(filePath, startTime);
+  })
+
   ipcMain.handle('dialog:read-text-file', async (_event, filePath: string, encoding?: string) => {
     return DialogService.readTextFile(filePath, encoding);
   })
@@ -187,6 +191,10 @@ function registerDialog() {
 
   ipcMain.handle('dialog:copy-image-to-clipboard', async (_event, filePath: string) => {
     return DialogService.copyImageToClipboard(filePath);
+  })
+
+  ipcMain.handle('dialog:copy-text-to-clipboard', async (_event, text: string) => {
+    return DialogService.copyTextToClipboard(text);
   })
 
   ipcMain.handle('dialog:open-screenshot-folder', async (_event, resourceId: string) => {
@@ -303,13 +311,21 @@ function registerService() {
     return ResourceService.fetchResourceInfo(websiteId, resourceId)
   })
 
+  ipcMain.handle('service:fetch-website-info', async (_event, url: string) => {
+    return ResourceService.fetchWebsiteInfo(url)
+  })
+
   ipcMain.handle('service:capture-cover-screenshot', async (_event, basePath: string) => {
     return ResourceService.captureCoverScreenshot(basePath)
   })
 
   ipcMain.handle('service:extract-video-cover-frames', async (_event, basePath: string) => {
-    return ResourceService.extractVideoCoverFrames(basePath)
-  })
+      return ResourceService.extractVideoCoverFrames(basePath)
+    })
+
+    ipcMain.handle('service:extract-video-sub-cover-frames', async (_event, basePath: string) => {
+      return ResourceService.extractVideoSubCoverFrames(basePath)
+    })
 
   ipcMain.handle('service:launch-resource', async (_event, resourceId: string, basePath: string, fileName?: string | null) => {
     return ResourceService.launchResource(resourceId, basePath, fileName)
@@ -342,6 +358,10 @@ function registerService() {
   ipcMain.handle('service:update-video-playback-progress', async (_event, resourceId: string, lastPlayFile: string, lastPlayTime: number) => {
     return ResourceService.updateVideoPlaybackProgress(resourceId, lastPlayFile, lastPlayTime)
   })
+
+  ipcMain.handle('service:update-video-sub-items', async (_event, resourceId: string, items: any[]) => {
+      return ResourceService.updateVideoSubItems(resourceId, items)
+    })
 
   ipcMain.handle('service:start-asmr-playback', async (_event, resourceId: string) => {
     return ResourceService.startAsmrPlayback(resourceId)

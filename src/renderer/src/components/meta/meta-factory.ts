@@ -68,6 +68,11 @@ export const createEmptyMetaByType = (extendTable: string): Record<string, unkno
         lastPlayFile: '',
         lastPlayTime: 0
       }
+    case 'website_meta':
+      return {
+        website: '',
+        favicon: ''
+      }
     default:
       return {}
   }

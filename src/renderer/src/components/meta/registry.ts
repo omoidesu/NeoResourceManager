@@ -8,6 +8,7 @@ const SingleImageMetaForm = defineAsyncComponent(() => import('./SingleImageMeta
 const MultiImageMetaForm = defineAsyncComponent(() => import('./MultiImageMetaForm.vue'))
 const NovelMetaForm = defineAsyncComponent(() => import('./NovelMetaForm.vue'))
 const VideoMetaForm = defineAsyncComponent(() => import('./VideoMetaForm.vue'))
+const WebsiteMetaForm = defineAsyncComponent(() => import('./WebsiteMetaForm.vue'))
 
 export const META_FORM_COMPONENTS: Record<string, Component> = {
   game_meta: markRaw(GameMetaForm),
@@ -17,7 +18,8 @@ export const META_FORM_COMPONENTS: Record<string, Component> = {
   single_image_meta: markRaw(SingleImageMetaForm),
   multi_image_meta: markRaw(MultiImageMetaForm),
   novel_meta: markRaw(NovelMetaForm),
-  video_meta: markRaw(VideoMetaForm)
+  video_meta: markRaw(VideoMetaForm),
+  website_meta: markRaw(WebsiteMetaForm)
 }
 
 export const resolveMetaFormComponent = (extendTable: string): Component | null => {

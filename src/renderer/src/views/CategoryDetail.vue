@@ -2,7 +2,7 @@
 import {computed, h, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch} from 'vue'
 import type { ComputedRef } from 'vue'
 import { useRoute } from 'vue-router'
-import { CheckmarkOutline, ChevronBackOutline, ChevronForwardOutline, CloseOutline, EyeOutline, FolderOpenOutline, FunnelOutline, Play, SearchOutline, Stop, TrashOutline } from '@vicons/ionicons5'
+import { CheckmarkOutline, ChevronBackOutline, ChevronDownOutline, ChevronForwardOutline, ChevronUpOutline, CloseOutline, CopyOutline, EyeOutline, FolderOpenOutline, FunnelOutline, Play, SearchOutline, Stop, TrashOutline } from '@vicons/ionicons5'
 import { createLogger } from '../../../main/util/logger'
 import { confirmDialog, notify } from '../utils/notification'
 import { removeOngoingCenterItem, upsertOngoingCenterItem } from '../utils/notification-center'
@@ -15,9 +15,11 @@ import EpubReader from '../components/EpubReader.vue'
 import EbookReader from '../components/EbookReader.vue'
 import VideoPlayer from '../components/VideoPlayer.vue'
 import RichTextEditor from '../components/RichTextEditor.vue'
+import BangumiDirectory from '../components/BangumiDirectory.vue'
 import { createEmptyMetaByType } from '../components/meta/meta-factory'
 import { resolveMetaFormComponent } from '../components/meta/registry'
 import { setAudioPlayerSession, setAudioPlayerVisible, useAudioPlayerStore } from '../utils/audio-player-store'
+import { getWebsitePlaceholderEmoji } from '../utils/website-placeholder-emoji'
 import { DictType, ResourceLaunchMode, ResourceLogSpecialTime, Settings } from '../../../common/constants'
 import type { ResourceForm, ResourceMeta } from '../../../main/model/models'
 
@@ -48,6 +50,8 @@ const showBatchImportModal = ref(false)
 const showBatchLabelModal = ref(false)
 const showAudioCoverCandidateModal = ref(false)
 const showVideoCoverCandidateModal = ref(false)
+const showVideoSubCoverCandidateModal = ref(false)
+const showVideoOrderModal = ref(false)
 const fetchResourceInfoLoading = ref(false)
 const videoCoverFrameLoading = ref(false)
 const formData = ref<any>({ name: '', meta: {} })
@@ -80,6 +84,16 @@ const videoCoverCandidates = ref<Array<{
   previewSrc: string
   time: number
   group: 'fixed' | 'random'
+}>>([])
+const videoSubCoverCandidateItems = ref<Array<{
+  fileName: string
+  relativePath: string
+  candidates: Array<{
+    label: string
+    coverPath: string
+    previewSrc: string
+    time: number
+  }>
 }>>([])
 const detailScreenshotPreviewSrc = ref('')
 const detailDescriptionContentRef = ref<HTMLElement | null>(null)
@@ -117,7 +131,73 @@ const showVideoPlayer = ref(false)
 const videoPlayerPlaylist = ref<Array<{ path: string; label: string; resourceId?: string; resourceTitle?: string; coverSrc?: string; subtitlePath?: string }>>([])
 const videoPlayerInitialPath = ref('')
 const videoPlayerInitialTime = ref(0)
+const audioPlaybackResumeRestartThreshold = ref(Math.max(0, Math.min(100, Number(Settings.AUDIO_PLAYBACK_RESUME_RESTART_THRESHOLD.default ?? 95))))
+const videoPlaybackResumeRestartThreshold = ref(Math.max(0, Math.min(100, Number(Settings.VIDEO_PLAYBACK_RESUME_RESTART_THRESHOLD.default ?? 95))))
 const videoPlayerTitle = ref('')
+const handleVideoPlayerPlaylistUpdate = (value: Array<{ path: string; label: string; resourceId?: string; resourceTitle?: string; coverSrc?: string; subtitlePath?: string }>) => {
+  videoPlayerPlaylist.value = value.map((item) => ({ ...item }))
+}
+const normalizePlaybackResumeRestartThreshold = (value: unknown) => {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) {
+    return 95
+  }
+
+  return Math.max(0, Math.min(100, Math.round(numericValue)))
+}
+const loadPlaybackResumeRestartThresholds = async () => {
+  try {
+    const [audioSetting, videoSetting] = await Promise.all([
+      window.api.db.getSetting(Settings.AUDIO_PLAYBACK_RESUME_RESTART_THRESHOLD),
+      window.api.db.getSetting(Settings.VIDEO_PLAYBACK_RESUME_RESTART_THRESHOLD)
+    ])
+    audioPlaybackResumeRestartThreshold.value = normalizePlaybackResumeRestartThreshold(
+      audioSetting?.value ?? Settings.AUDIO_PLAYBACK_RESUME_RESTART_THRESHOLD.default
+    )
+    videoPlaybackResumeRestartThreshold.value = normalizePlaybackResumeRestartThreshold(
+      videoSetting?.value ?? Settings.VIDEO_PLAYBACK_RESUME_RESTART_THRESHOLD.default
+    )
+  } catch {
+    audioPlaybackResumeRestartThreshold.value = normalizePlaybackResumeRestartThreshold(
+      Settings.AUDIO_PLAYBACK_RESUME_RESTART_THRESHOLD.default
+    )
+    videoPlaybackResumeRestartThreshold.value = normalizePlaybackResumeRestartThreshold(
+      Settings.VIDEO_PLAYBACK_RESUME_RESTART_THRESHOLD.default
+    )
+  }
+}
+const applyVideoPlaybackProgressToResource = (resource: any, filePath: string, playbackTime: number) => {
+  if (!resource || typeof resource !== 'object') {
+    return resource
+  }
+
+  return {
+    ...resource,
+    videoMeta: {
+      ...(resource.videoMeta ?? {}),
+      lastPlayFile: filePath,
+      lastPlayTime: playbackTime
+    }
+  }
+}
+const handleVideoPlaybackProgressPersisted = (payload: { resourceId: string; filePath: string; playbackTime: number }) => {
+  const resourceId = String(payload?.resourceId ?? '').trim()
+  const filePath = String(payload?.filePath ?? '').trim()
+  const playbackTime = Math.max(0, Number(payload?.playbackTime ?? 0))
+  if (!resourceId || !filePath) {
+    return
+  }
+
+  resourceList.value = resourceList.value.map((item) =>
+    String(item?.id ?? '').trim() === resourceId
+      ? applyVideoPlaybackProgressToResource(item, filePath, playbackTime)
+      : item
+  )
+
+  if (String(selectedDetailResource.value?.id ?? '').trim() === resourceId) {
+    selectedDetailResource.value = applyVideoPlaybackProgressToResource(selectedDetailResource.value, filePath, playbackTime)
+  }
+}
 const audioPlayerPlaylist = ref<Array<{ path: string; label: string; duration?: number | null; resourceId?: string; resourceTitle?: string; artist?: string; coverSrc?: string; hasSubtitle?: boolean; subtitlePath?: string }>>([])
 const audioPlayerDisplayMode = ref<'default' | 'music'>('default')
 const detailAudioContextMenuVisible = ref(false)
@@ -145,6 +225,13 @@ const detailDrawerWidth = ref(500)
 const isResizingDetailDrawer = ref(false)
 const detailDrawerResizeStartX = ref(0)
 const detailDrawerResizeStartWidth = ref(500)
+const videoOrderResource = ref<any | null>(null)
+const videoOrderItems = ref<Array<{ id: string; fileName: string; relativePath: string; coverPath?: string; sortOrder: number; isVisible: boolean }>>([])
+const videoOrderInitialItems = ref<Array<{ id: string; fileName: string; relativePath: string; coverPath?: string; sortOrder: number; isVisible: boolean }>>([])
+const isVideoOrderSubmitting = ref(false)
+const videoOrderDragIndex = ref<number | null>(null)
+const videoOrderDragOverIndex = ref<number | null>(null)
+const videoSubCoverPreviewUrls = ref<Record<string, string>>({})
 const engineIconModules = import.meta.glob('../assets/engine-icons/*', {
   eager: true,
   import: 'default'
@@ -286,6 +373,36 @@ const createEmptyFormData = () => ({
   meta: createEmptyMetaByType(String(categorySettings.value.extendTable ?? ''))
 })
 
+const normalizePathValue = (targetPath: string | null | undefined) => String(targetPath ?? '').replace(/\\/g, '/').trim()
+const compareByFileName = (left: string, right: string) => String(left ?? '').localeCompare(String(right ?? ''), undefined, {
+  numeric: true,
+  sensitivity: 'base'
+})
+const getRelativeVideoPath = (basePath: string | null | undefined, filePath: string | null | undefined) => {
+  const normalizedBasePath = normalizePathValue(basePath).replace(/\/+$/, '')
+  const normalizedFilePath = normalizePathValue(filePath)
+
+  if (!normalizedBasePath || !normalizedFilePath) {
+    return normalizedFilePath
+  }
+
+  const normalizedBasePathLower = normalizedBasePath.toLowerCase()
+  const normalizedFilePathLower = normalizedFilePath.toLowerCase()
+
+  if (normalizedFilePathLower === normalizedBasePathLower) {
+    return ''
+  }
+
+  if (!normalizedFilePathLower.startsWith(`${normalizedBasePathLower}/`)) {
+    return normalizedFilePath
+  }
+
+  return normalizedFilePath.slice(normalizedBasePath.length + 1)
+}
+
+const getVideoSubCoverKey = (resource: any, relativePath: string | null | undefined) =>
+  `${String(resource?.id ?? '').trim()}::${normalizePathValue(relativePath).toLowerCase()}`
+
 const buildDisplayBasePath = (resource: any) => {
   const basePath = String(resource?.basePath ?? '')
   const fileName = String(resource?.fileName ?? resource?.filename ?? '')
@@ -418,10 +535,11 @@ const mapResourceDetailToFormData = (resource: any) => {
       ...(resource?.asmrMeta ?? {}),
       ...(resource?.audioMeta ?? {}),
       ...(resource?.novelMeta ?? {}),
+      ...(resource?.websiteMeta ?? {}),
       pixivId: String(pixivStore?.workId ?? ''),
       websiteType: String(primaryStore?.storeId ?? ''),
       gameId: String(primaryStore?.workId ?? ''),
-      website: String(primaryStore?.url ?? ''),
+      website: String(resource?.websiteMeta?.url ?? primaryStore?.url ?? ''),
       additionalStores: additionalStores.map((item: any) => ({
         websiteType: String(item?.storeId ?? ''),
         workId: String(item?.workId ?? ''),
@@ -471,7 +589,7 @@ let hasOpenedVideoPlayer = false
 const showBatchImportButton = computed(() => {
   const extendTable = String(categorySettings.value.extendTable ?? '')
   if (extendTable === 'video_meta') {
-    return String(categorySettings.value.resourcePathType ?? '') === 'file'
+    return true
   }
 
   return ['game_meta', 'single_image_meta', 'multi_image_meta', 'asmr_meta', 'audio_meta', 'novel_meta'].includes(extendTable)
@@ -557,19 +675,6 @@ const pageSizeOptions = [
   { label: '24 / 页', value: 24 },
   { label: '48 / 页', value: 48 },
   { label: '96 / 页', value: 96 }
-]
-
-const sortOptions = [
-  { label: '最新添加', value: 'createTime-desc' },
-  { label: '最早添加', value: 'createTime-asc' },
-  { label: '标题 A-Z', value: 'title-asc' },
-  { label: '标题 Z-A', value: 'title-desc' },
-  { label: '最后游玩最近', value: 'lastAccessTime-desc' },
-  { label: '最后游玩最早', value: 'lastAccessTime-asc' },
-  { label: '游玩时长最长', value: 'totalRuntime-desc' },
-  { label: '游玩时长最短', value: 'totalRuntime-asc' },
-  { label: '首次游玩最近', value: 'firstAccessTime-desc' },
-  { label: '首次游玩最早', value: 'firstAccessTime-asc' }
 ]
 
 const normalizedAuthorList = computed(() =>
@@ -730,6 +835,10 @@ const canMtoolLaunch = computed(() => Boolean(mtoolPath.value.trim()))
 const showScreenshotFolder = computed(() => categorySettings.value.extendTable === 'game_meta')
 const completedExtendTable = computed(() => String(categorySettings.value.extendTable ?? '').trim())
 const isVideoCategory = computed(() => completedExtendTable.value === 'video_meta')
+const isWebsiteCategory = computed(() => completedExtendTable.value === 'website_meta')
+const isVideoFolderCategory = computed(() =>
+  isVideoCategory.value && String(categorySettings.value.resourcePathType ?? '').trim() === 'folder'
+)
 const showCompletedToggle = computed(() => ['game_meta', 'novel_meta', 'video_meta'].includes(completedExtendTable.value))
 const completedActionLabel = computed(() => {
   if (isNovelCategory.value) {
@@ -748,7 +857,17 @@ const effectiveCompletedOnly = computed(() => showCompletedFilter.value && compl
 const showCardCover = computed(() => categorySettings.value.extendTable !== 'software_meta')
 const showDeleteFiles = computed(() => categorySettings.value.extendTable === 'game_meta')
 const showEngineFilter = computed(() => categorySettings.value.extendTable === 'game_meta')
+const showAuthorFilter = computed(() => !isWebsiteCategory.value)
+const showMissingFilter = computed(() => !isWebsiteCategory.value)
+const showRunningFilter = computed(() => !isWebsiteCategory.value)
 const isSoftwareCategory = computed(() => categorySettings.value.extendTable === 'software_meta')
+const showCardDefaultAppOpen = computed(() => ![
+  'game_meta',
+  'software_meta',
+  'website_meta',
+  'multi_image_meta',
+  'asmr_meta'
+].includes(String(categorySettings.value.extendTable ?? '').trim()) && !isVideoFolderCategory.value)
 const softwareScriptShellType = computed<'powershell' | 'cmd'>(() =>
   softwareScriptRuntimes.value.find((item) => item.value === softwareScriptRuntimePath.value)?.shellType ?? 'powershell'
 )
@@ -759,6 +878,9 @@ const softwareScriptPlaceholder = computed(() =>
 )
 const filterSectionCount = computed(() => {
   let count = detailIsAsmr.value ? 2 : 3
+  if (!showAuthorFilter.value) {
+    count -= 1
+  }
   if (isVideoCategory.value) {
     count += 1
   }
@@ -787,24 +909,76 @@ const visibleDetailLogs = computed(() => detailLogs.value.slice(0, visibleLogCou
 const hasMoreDetailLogs = computed(() => visibleLogCount.value < detailLogs.value.length)
 const noMore = computed(() => detailLogs.value.length > 5 && !hasMoreDetailLogs.value)
 const detailStats = computed(() => selectedDetailResource.value?.stats ?? null)
+const detailUsesWebsiteTerms = computed(() => detailIsWebsite.value)
 const detailUsesBrowseTerms = computed(() => isSingleImageCategory.value || detailIsManga.value || detailIsNovel.value)
 const detailUsesPlayTerms = computed(() => detailIsAsmr.value || detailIsAudio.value || isVideoCategory.value)
+const sortActionTerms = computed(() => {
+  if (isWebsiteCategory.value) {
+    return {
+      latest: '访问',
+      first: '访问',
+      runtime: '访问'
+    }
+  }
+
+  if (detailUsesBrowseTerms.value) {
+    return {
+      latest: '浏览',
+      first: '浏览',
+      runtime: '浏览'
+    }
+  }
+
+  if (detailUsesPlayTerms.value) {
+    return {
+      latest: '播放',
+      first: '播放',
+      runtime: '播放'
+    }
+  }
+
+  return {
+    latest: '启动',
+    first: '启动',
+    runtime: '运行'
+  }
+})
+const sortOptions = computed(() => [
+  { label: '最新添加', value: 'createTime-desc' },
+  { label: '最早添加', value: 'createTime-asc' },
+  { label: '名称 A-Z', value: 'title-asc' },
+  { label: '名称 Z-A', value: 'title-desc' },
+  { label: `最后${sortActionTerms.value.latest}最近`, value: 'lastAccessTime-desc' },
+  { label: `最后${sortActionTerms.value.latest}最早`, value: 'lastAccessTime-asc' },
+  { label: `${sortActionTerms.value.runtime}时长最长`, value: 'totalRuntime-desc' },
+  { label: `${sortActionTerms.value.runtime}时长最短`, value: 'totalRuntime-asc' },
+  { label: `首次${sortActionTerms.value.first}最近`, value: 'firstAccessTime-desc' },
+  { label: `首次${sortActionTerms.value.first}最早`, value: 'firstAccessTime-asc' }
+])
 const detailStatsText = computed(() => ({
-  firstAccess: detailUsesBrowseTerms.value ? '第一次浏览' : (detailUsesPlayTerms.value ? '第一次播放' : '第一次启动'),
-  lastAccess: detailUsesBrowseTerms.value ? '最后一次浏览' : (detailUsesPlayTerms.value ? '最后一次播放' : '最后一次启动'),
-  accessCount: detailUsesBrowseTerms.value ? '浏览次数' : (detailUsesPlayTerms.value ? '播放次数' : '启动次数'),
+  firstAccess: detailUsesWebsiteTerms.value ? '第一次访问' : (detailUsesBrowseTerms.value ? '第一次浏览' : (detailUsesPlayTerms.value ? '第一次播放' : '第一次启动')),
+  lastAccess: detailUsesWebsiteTerms.value ? '最后一次访问' : (detailUsesBrowseTerms.value ? '最后一次浏览' : (detailUsesPlayTerms.value ? '最后一次播放' : '最后一次启动')),
+  accessCount: detailUsesWebsiteTerms.value ? '访问次数' : (detailUsesBrowseTerms.value ? '浏览次数' : (detailUsesPlayTerms.value ? '播放次数' : '启动次数')),
   totalRuntime: detailUsesBrowseTerms.value ? '浏览总时长' : (detailUsesPlayTerms.value ? '播放总时长' : '运行总时长'),
 }))
-const detailPreviewSectionTitle = computed(() => detailIsManga.value ? '' : '游戏截图')
+const detailShowTotalRuntime = computed(() => !detailIsWebsite.value)
+const detailPreviewSectionTitle = computed(() => {
+  if (detailIsManga.value) return ''
+  if (String(categoryName.value ?? '').trim() === '电影') return '截图'
+  return '游戏截图'
+})
 const detailGallerySectionTitle = computed(() => {
   if (detailIsManga.value) return '图片预览'
   if (detailIsAsmr.value) return '音声目录'
   if (isVideoCategory.value) return '播放日志'
   return '启动日志'
 })
+const detailDirectorySectionTitle = computed(() => detailIsAsmr.value ? detailGallerySectionTitle.value : '番剧目录')
+const detailDirectoryEmptyText = computed(() => detailIsAsmr.value ? '暂无音频文件' : '暂无目录内容')
 const detailEmptyLogDescription = computed(() => isVideoCategory.value ? '暂无播放日志' : '暂无启动日志')
 const detailLogModeLabel = computed(() => isVideoCategory.value ? '播放方式' : '启动方式')
 const detailLogDurationLabel = computed(() => isVideoCategory.value ? '播放时长' : '运行时长')
+const detailShowLogs = computed(() => !detailIsWebsite.value && !isSingleImageCategory.value && !detailIsManga.value && !detailIsAudio.value)
 const hasDetailDescription = computed(() => {
   const rawDescription = String(selectedDetailResource.value?.description ?? '').trim()
   if (!rawDescription) {
@@ -927,10 +1101,13 @@ const collectAudioTreeTracks = (nodes: any[]): Array<{ path: string; label: stri
 
 const detailAudioPlaylist = computed(() => collectAudioTreeTracks(detailAudioTree.value))
 
-const collectAudioTreeVideoTracks = (nodes: any[]): Array<{ path: string; label: string; resourceTitle?: string; coverSrc?: string; subtitlePath?: string }> => {
-  const tracks: Array<{ path: string; label: string; resourceTitle?: string; coverSrc?: string; subtitlePath?: string }> = []
-  const resourceTitle = String(selectedDetailResource.value?.title ?? categoryName.value ?? '视频播放')
-  const coverSrc = detailCoverPreviewSrc.value
+const collectAudioTreeVideoTracks = (
+  nodes: any[],
+  resource: any = selectedDetailResource.value
+): Array<{ path: string; label: string; resourceId?: string; resourceTitle?: string; coverSrc?: string; subtitlePath?: string }> => {
+  const tracks: Array<{ path: string; label: string; resourceId?: string; resourceTitle?: string; coverSrc?: string; subtitlePath?: string }> = []
+  const resourceTitle = String(resource?.title ?? selectedDetailResource.value?.title ?? categoryName.value ?? '视频播放')
+  const resourceId = String(resource?.id ?? selectedDetailResource.value?.id ?? '').trim()
 
   const visit = (items: any[]) => {
     for (const item of items) {
@@ -942,8 +1119,10 @@ const collectAudioTreeVideoTracks = (nodes: any[]): Array<{ path: string; label:
         tracks.push({
           path: String(item.path),
           label: String(item.label ?? getResourceNameFromBasePath(String(item.path)) ?? '当前视频'),
+          resourceId,
           resourceTitle,
-          coverSrc
+          coverSrc: String(item.coverPreviewSrc ?? ''),
+          subtitlePath: String(item.subtitlePath ?? '').trim() || undefined
         })
       }
 
@@ -957,7 +1136,203 @@ const collectAudioTreeVideoTracks = (nodes: any[]): Array<{ path: string; label:
   return tracks
 }
 
-const detailAudioVideoPlaylist = computed(() => collectAudioTreeVideoTracks(detailAudioTree.value))
+const getDetailVideoSubItems = (resource: any) =>
+  (Array.isArray(resource?.videoSubs) ? resource.videoSubs : [])
+    .map((item: any) => ({
+      id: String(item?.id ?? ''),
+      fileName: String(item?.fileName ?? '').trim(),
+      relativePath: normalizePathValue(String(item?.relativePath ?? '')),
+      coverPath: String(item?.coverPath ?? '').trim(),
+      sortOrder: Number.isFinite(Number(item?.sortOrder)) ? Number(item.sortOrder) : Number.MAX_SAFE_INTEGER,
+      isVisible: item?.isVisible !== false
+    }))
+    .filter((item) => item.relativePath)
+    .sort((left, right) => {
+      const sortCompare = left.sortOrder - right.sortOrder
+      if (sortCompare !== 0) {
+        return sortCompare
+      }
+
+      return compareByFileName(left.fileName || left.relativePath, right.fileName || right.relativePath)
+    })
+
+const getVideoSubCoverPreviewSrc = (resource: any, relativePath: string | null | undefined) =>
+  videoSubCoverPreviewUrls.value[getVideoSubCoverKey(resource, relativePath)] ?? ''
+
+const refreshVideoSubCoverPreviewUrls = async (resource: any) => {
+  const resourceId = String(resource?.id ?? '').trim()
+  if (!resourceId) {
+    return
+  }
+
+  const videoSubItems = getDetailVideoSubItems(resource)
+  if (!videoSubItems.length) {
+    return
+  }
+
+  const updates = await Promise.all(videoSubItems.map(async (item) => {
+    const coverPath = String(item.coverPath ?? '').trim()
+    if (!coverPath) {
+      return {
+        key: getVideoSubCoverKey(resource, item.relativePath),
+        value: ''
+      }
+    }
+
+    try {
+      return {
+        key: getVideoSubCoverKey(resource, item.relativePath),
+        value: (await window.api.dialog.getImagePreviewUrl(coverPath, {
+          maxWidth: 320,
+          maxHeight: 180,
+          fit: 'cover',
+          quality: 78
+        })) ?? ''
+      }
+    } catch {
+      return {
+        key: getVideoSubCoverKey(resource, item.relativePath),
+        value: ''
+      }
+    }
+  }))
+
+  const nextMap = { ...videoSubCoverPreviewUrls.value }
+  for (const item of updates) {
+    nextMap[item.key] = item.value
+  }
+  videoSubCoverPreviewUrls.value = nextMap
+}
+
+const sortVideoTracksBySubItems = <T extends { path: string; label?: string }>(tracks: T[], resource: any) => {
+  const videoSubItems = getDetailVideoSubItems(resource)
+  if (!videoSubItems.length) {
+    return [...tracks]
+  }
+
+  const basePath = String(resource?.basePath ?? '')
+  const orderMap = new Map<string, number>(videoSubItems.map((item, index) => [item.relativePath.toLowerCase(), index]))
+  const visibleMap = new Map<string, boolean>(videoSubItems.map((item) => [item.relativePath.toLowerCase(), item.isVisible]))
+
+  return [...tracks]
+    .filter((track) => {
+      const relativePath = getRelativeVideoPath(basePath, track.path).toLowerCase()
+      return visibleMap.get(relativePath) !== false
+    })
+    .sort((left, right) => {
+      const leftRelativePath = getRelativeVideoPath(basePath, left.path).toLowerCase()
+      const rightRelativePath = getRelativeVideoPath(basePath, right.path).toLowerCase()
+      const leftIndex = orderMap.get(leftRelativePath)
+      const rightIndex = orderMap.get(rightRelativePath)
+
+      if (leftIndex != null && rightIndex != null && leftIndex !== rightIndex) {
+        return leftIndex - rightIndex
+      }
+
+      if (leftIndex != null || rightIndex != null) {
+        return leftIndex != null ? -1 : 1
+      }
+
+      const labelCompare = compareByFileName(String(left.label ?? ''), String(right.label ?? ''))
+      if (labelCompare !== 0) {
+        return labelCompare
+      }
+
+      return compareByFileName(leftRelativePath, rightRelativePath)
+    })
+}
+
+const reorderVideoTreeBySubItems = (nodes: any[], resource: any): any[] => {
+  const videoSubItems = getDetailVideoSubItems(resource)
+  if (!isVideoFolderCategory.value || !videoSubItems.length) {
+    return nodes
+  }
+
+  const basePath = String(resource?.basePath ?? '')
+  const orderMap = new Map<string, number>(videoSubItems.map((item, index) => [item.relativePath.toLowerCase(), index]))
+  const visibleMap = new Map<string, boolean>(videoSubItems.map((item) => [item.relativePath.toLowerCase(), item.isVisible]))
+  const coverPathMap = new Map(videoSubItems.map((item) => [item.relativePath.toLowerCase(), item.coverPath ?? '']))
+
+  const visit = (entries: any[]): any[] =>
+    entries
+      .map((entry) => {
+        if (!entry) {
+          return null
+        }
+
+        if (entry.kind === 'video' && entry.path) {
+          const relativePath = getRelativeVideoPath(basePath, String(entry.path)).toLowerCase()
+          if (visibleMap.get(relativePath) === false) {
+            return null
+          }
+          const orderIndex = orderMap.get(relativePath)
+
+          return {
+            ...entry,
+            coverPath: coverPathMap.get(relativePath) ?? '',
+            coverPreviewSrc: getVideoSubCoverPreviewSrc(resource, relativePath),
+            sortOrderLabel: orderIndex != null ? orderIndex + 1 : ''
+          }
+        }
+
+        if (Array.isArray(entry.children) && entry.children.length) {
+          const nextChildren = visit(entry.children)
+          if (!nextChildren.length && entry.isDirectory) {
+            return null
+          }
+
+          return {
+            ...entry,
+            children: nextChildren
+          }
+        }
+
+        return { ...entry }
+      })
+      .filter((entry): entry is any => Boolean(entry))
+      .sort((left, right) => {
+        const resolveOrderIndex = (entry: any): number | null => {
+          if (entry?.isDirectory) {
+            const childIndexes = Array.isArray(entry.children)
+              ? entry.children
+                  .map((child: any) => resolveOrderIndex(child))
+                  .filter((value: number | null): value is number => value != null)
+              : []
+            return childIndexes.length ? Math.min(...childIndexes) : null
+          }
+
+          if (entry?.kind === 'video' && entry?.path) {
+            const relativePath = getRelativeVideoPath(basePath, String(entry.path)).toLowerCase()
+            return orderMap.get(relativePath) ?? null
+          }
+
+          return null
+        }
+
+        if (Boolean(left?.isDirectory) !== Boolean(right?.isDirectory)) {
+          return left?.isDirectory ? -1 : 1
+        }
+
+        const leftIndex = resolveOrderIndex(left)
+        const rightIndex = resolveOrderIndex(right)
+        if (leftIndex != null && rightIndex != null && leftIndex !== rightIndex) {
+          return leftIndex - rightIndex
+        }
+
+        if (leftIndex != null || rightIndex != null) {
+          return leftIndex != null ? -1 : 1
+        }
+
+        return compareByFileName(String(left?.label ?? ''), String(right?.label ?? ''))
+      })
+
+  return visit(nodes)
+}
+
+const detailAudioVideoPlaylist = computed(() => sortVideoTracksBySubItems(
+  collectAudioTreeVideoTracks(detailAudioTree.value, selectedDetailResource.value),
+  selectedDetailResource.value
+))
 
 const normalizeAudioPath = (filePath: string | null | undefined) => String(filePath ?? '').replace(/\\/g, '/').trim().toLowerCase()
 const getAudioDirectoryPath = (filePath: string | null | undefined) => String(filePath ?? '').replace(/\\/g, '/').trim().split('/').slice(0, -1).join('/')
@@ -1056,6 +1431,7 @@ const buildMusicPlaylistTrack = (resource: any) => {
 }
 
 const applyAudioPlayerSession = async (resource: any, playlist: Array<{ path: string; label: string; duration?: number | null; resourceId?: string; resourceTitle?: string; artist?: string; coverSrc?: string; coverPath?: string; hasSubtitle?: boolean; subtitlePath?: string }>, initialPath: string, initialTime = 0) => {
+  await loadPlaybackResumeRestartThresholds()
   audioPlayerPlaylist.value = [...playlist]
   audioPlayerDisplayMode.value = String(resource?.category?.referencePath ?? resource?.extendTable ?? categorySettings.value.extendTable ?? '').trim() === 'audio_meta'
     ? 'music'
@@ -1065,6 +1441,7 @@ const applyAudioPlayerSession = async (resource: any, playlist: Array<{ path: st
     resourceId: String(resource?.id ?? ''),
     initialPath,
     initialTime: Math.max(0, Number(initialTime ?? 0)),
+    audioResumeRestartThreshold: audioPlaybackResumeRestartThreshold.value,
     title: String(resource?.title ?? categoryName.value ?? '音频播放器'),
     artist: getAudioPlayerArtistText(resource),
     displayMode: audioPlayerDisplayMode.value,
@@ -1081,7 +1458,8 @@ const resolveResourceAudioTree = async (resource: any) => {
     return detailAudioTree.value
   }
 
-  return await window.api.dialog.getDirectoryAudioTree(String(resource?.basePath ?? ''))
+  const directoryTree = await window.api.dialog.getDirectoryAudioTree(String(resource?.basePath ?? ''))
+  return reorderVideoTreeBySubItems(directoryTree, resource)
 }
 
 const openAsmrPlaybackFromLaunch = async (resource: any) => {
@@ -1184,6 +1562,43 @@ const buildVideoPlaylistTrack = async (resource: any) => {
 }
 
 const openVideoPlaybackFromLaunch = async (resource: any) => {
+  await loadPlaybackResumeRestartThresholds()
+  if (isVideoFolderCategory.value) {
+    let playbackResource = resource
+    const resourceId = String(resource?.id ?? '').trim()
+    if (resourceId) {
+      try {
+        const detailResult = await window.api.service.getResourceDetail(resourceId)
+        if (detailResult?.type === 'success' && detailResult?.data) {
+          playbackResource = detailResult.data
+        }
+      } catch {
+        // ignore detail fetch errors and fall back to current resource
+      }
+    }
+
+    await refreshVideoSubCoverPreviewUrls(playbackResource)
+    const audioTree = await resolveResourceAudioTree(playbackResource)
+      const playlist = sortVideoTracksBySubItems(collectAudioTreeVideoTracks(audioTree, playbackResource), playbackResource)
+    if (!playlist.length) {
+      showNotifyByType('warning', '播放视频', '当前没有可播放的视频文件')
+      return
+    }
+
+    const lastPlayFile = String(playbackResource?.videoMeta?.lastPlayFile ?? '').trim()
+    const normalizedLastPlayFile = lastPlayFile.replace(/\\/g, '/')
+    const resumeTrack = normalizedLastPlayFile
+      ? playlist.find((item) => item.path.replace(/\\/g, '/') === normalizedLastPlayFile)
+      : null
+
+    videoPlayerPlaylist.value = playlist
+    videoPlayerInitialPath.value = resumeTrack?.path ?? String(playlist[0]?.path ?? '')
+    videoPlayerInitialTime.value = resumeTrack ? Math.max(0, Number(playbackResource?.videoMeta?.lastPlayTime ?? 0)) : 0
+    videoPlayerTitle.value = String(playbackResource?.title ?? categoryName.value ?? '视频播放')
+    showVideoPlayer.value = true
+    return
+  }
+
   const targetPath = getResourceFilePath(resource)
   if (!targetPath) {
     showNotifyByType('warning', '播放视频', '当前视频路径无效')
@@ -1395,7 +1810,7 @@ const openAudioPlayer = async (targetPath: string) => {
   await applyAudioPlayerSession(selectedDetailResource.value, playlist, normalizedPath, 0)
 }
 
-const openAudioTreeVideoPlayer = (targetPath: string) => {
+const openAudioTreeVideoPlayer = async (targetPath: string) => {
   const normalizedPath = String(targetPath ?? '').trim()
   if (!normalizedPath) {
     return
@@ -1412,10 +1827,15 @@ const openAudioTreeVideoPlayer = (targetPath: string) => {
   const playlist = directoryTracks.length ? directoryTracks : allTracks
   const normalizedTargetPath = normalizedPath.replace(/\\/g, '/')
   const matchedTrack = playlist.find((track) => track.path.replace(/\\/g, '/') === normalizedTargetPath)
+  await loadPlaybackResumeRestartThresholds()
 
   videoPlayerPlaylist.value = playlist
   videoPlayerInitialPath.value = matchedTrack?.path ?? normalizedPath
-  videoPlayerInitialTime.value = 0
+  const lastPlayFile = String(selectedDetailResource.value?.videoMeta?.lastPlayFile ?? '').trim().replace(/\\/g, '/')
+  const normalizedMatchedPath = String(matchedTrack?.path ?? normalizedPath).replace(/\\/g, '/')
+  videoPlayerInitialTime.value = lastPlayFile && lastPlayFile === normalizedMatchedPath
+    ? Math.max(0, Number(selectedDetailResource.value?.videoMeta?.lastPlayTime ?? 0))
+    : 0
   videoPlayerTitle.value = String(selectedDetailResource.value?.title ?? categoryName.value ?? '视频播放')
   showVideoPlayer.value = true
 }
@@ -1426,7 +1846,7 @@ const handleAudioTreePlay = (option: any) => {
   }
 
   if (option?.kind === 'video') {
-    openAudioTreeVideoPlayer(String(option.path))
+    void openAudioTreeVideoPlayer(String(option.path))
     return
   }
 
@@ -1480,6 +1900,24 @@ const renderAudioTreeFileLabel = (option: any, icon: string, label: string) => h
   class: 'detail-audio-tree__file',
   onContextmenu: (event: MouseEvent) => handleOpenAudioTreeContextMenu(event, option)
 }, [
+  option?.kind === 'video'
+    ? h('div', {
+        class: 'detail-audio-tree__video-cover-shell'
+      }, [
+        option?.coverPreviewSrc
+          ? h('img', {
+              src: String(option.coverPreviewSrc),
+              alt: '',
+              class: 'detail-audio-tree__video-cover'
+            })
+          : h('div', {
+              class: 'detail-audio-tree__video-cover detail-audio-tree__video-cover--empty'
+            }, 'VIDEO'),
+        h('span', {
+          class: 'detail-audio-tree__video-cover-index'
+        }, String(option?.sortOrderLabel ?? ''))
+      ])
+    : null,
   h('div', {
     class: 'detail-audio-tree__file-title'
   }, [
@@ -1574,8 +2012,35 @@ const detailDescriptionBoxStyle = computed(() => ({
   height: `${detailDescriptionHeight.value}px`
 }))
 const currentScreenshotPath = computed(() => detailScreenshotPaths.value[currentScreenshotIndex.value] ?? '')
+const normalizeWebsiteUrl = (value: unknown) => {
+  const normalizedValue = String(value ?? '').trim()
+  if (!normalizedValue) {
+    return ''
+  }
+
+  const valueWithScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(normalizedValue)
+    ? normalizedValue
+    : `https://${normalizedValue}`
+
+  try {
+    const parsedUrl = new URL(valueWithScheme)
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+      return ''
+    }
+
+    return parsedUrl.toString()
+  } catch {
+    return ''
+  }
+}
+const getWebsiteResourceUrl = (resource: any) =>
+  normalizeWebsiteUrl(resource?.websiteMeta?.url ?? resource?.meta?.website ?? resource?.website ?? '')
 const detailCanLaunch = computed(() => {
   const resource = selectedDetailResource.value
+  if (categorySettings.value.extendTable === 'website_meta') {
+    return Boolean(getWebsiteResourceUrl(resource))
+  }
+
   return Boolean(resource?.basePath) && !resource?.missingStatus && !resource?.isRunning
 })
 const detailCanStop = computed(() => {
@@ -1587,7 +2052,23 @@ const detailIsAsmr = computed(() => categorySettings.value.extendTable === 'asmr
 const detailIsAudio = computed(() => categorySettings.value.extendTable === 'audio_meta')
 const detailIsNovel = computed(() => categorySettings.value.extendTable === 'novel_meta')
 const detailIsVideo = computed(() => categorySettings.value.extendTable === 'video_meta')
-const detailOpenFolderText = computed(() => `打开${categoryName.value || '资源'}文件夹`)
+const detailIsWebsite = computed(() => categorySettings.value.extendTable === 'website_meta')
+const detailWebsiteUrl = computed(() => getWebsiteResourceUrl(selectedDetailResource.value))
+const detailWebsiteIsDownloadLink = computed(() => Boolean(
+  selectedDetailResource.value?.websiteMeta?.isDownloadLink
+  ?? selectedDetailResource.value?.meta?.isDownloadLink
+))
+const detailWebsiteAddressLabel = computed(() => detailWebsiteIsDownloadLink.value ? '下载地址' : '网站地址')
+const detailWebsiteIconLabel = computed(() => detailWebsiteIsDownloadLink.value ? '链接图标' : '站点图标')
+const detailOpenFolderText = computed(() => detailIsWebsite.value ? `打开${categoryName.value || '资源'}` : `打开${categoryName.value || '资源'}文件夹`)
+const detailWebsitePlaceholderEmoji = computed(() =>
+  getWebsitePlaceholderEmoji(
+    selectedDetailResource.value?.id,
+    detailWebsiteUrl.value,
+    detailWebsiteIsDownloadLink.value
+  )
+)
+const detailWebsiteCoverPlaceholderText = computed(() => detailWebsiteIsDownloadLink.value ? '下载链接' : '网站封面')
 const detailMetaItems = computed(() => {
   const resource = selectedDetailResource.value
   if (!resource) {
@@ -1595,18 +2076,28 @@ const detailMetaItems = computed(() => {
   }
 
   const pushItem = (
-    items: Array<{ label: string; value: string; icon?: string }>,
+    items: Array<{ label: string; value: string; icon?: string; full?: boolean; copyValue?: string; clampLines?: number }>,
     label: string,
     value: unknown,
-    icon?: string
+    icon?: string,
+    full = false,
+    copyValue?: string,
+    clampLines?: number
   ) => {
     const normalizedValue = String(value ?? '').trim()
     if (normalizedValue) {
-      items.push({ label, value: normalizedValue, icon })
+      items.push({
+        label,
+        value: normalizedValue,
+        icon,
+        full,
+        copyValue: String(copyValue ?? '').trim() || undefined,
+        clampLines: Number(clampLines) > 0 ? Number(clampLines) : undefined
+      })
     }
   }
 
-  const items: Array<{ label: string; value: string; icon?: string }> = []
+  const items: Array<{ label: string; value: string; icon?: string; full?: boolean; copyValue?: string; clampLines?: number }> = []
   const extendTable = categorySettings.value.extendTable
 
   if (extendTable === 'game_meta') {
@@ -1659,10 +2150,48 @@ const detailMetaItems = computed(() => {
     pushItem(items, 'ISBN', resource.novelMeta?.isbn)
     pushItem(items, '发行年', Number(resource.novelMeta?.year) > 0 ? resource.novelMeta?.year : '')
     pushItem(items, '出版社', resource.novelMeta?.publisher)
+  } else if (extendTable === 'website_meta') {
+    pushItem(
+      items,
+      detailWebsiteAddressLabel.value,
+      detailWebsiteUrl.value,
+      undefined,
+      true,
+      detailWebsiteUrl.value,
+      detailWebsiteIsDownloadLink.value ? 3 : undefined
+    )
+    if (detailWebsiteIsDownloadLink.value) {
+      pushItem(items, '链接类型', '下载链接')
+    } else {
+      pushItem(
+        items,
+        detailWebsiteIconLabel.value,
+        detailWebsiteFaviconSrc.value ? '已获取' : detailWebsitePlaceholderEmoji.value,
+        detailWebsiteFaviconSrc.value || normalizeWebsiteIconSource(String(resource.websiteMeta?.favicon ?? ''))
+      )
+    }
   }
 
   return items
 })
+const handleCopyText = async (text: string, label = '内容') => {
+  const normalizedText = String(text ?? '')
+  if (!normalizedText.trim()) {
+    return
+  }
+
+  try {
+    const message = await window.api.dialog.copyTextToClipboard(normalizedText)
+    if (message) {
+      showNotifyByType('error', `复制${label}`, message)
+      return
+    }
+
+    showNotifyByType('success', `复制${label}`, `${label}已复制到剪贴板`)
+  } catch (error) {
+    showNotifyByType('error', `复制${label}`, error instanceof Error ? error.message : `复制${label}失败`)
+  }
+}
 const detailStores = computed(() =>
   Array.isArray(selectedDetailResource.value?.stores)
     ? selectedDetailResource.value.stores
@@ -1685,6 +2214,20 @@ const hasPendingRatingChange = computed(() => {
 
   return Number(selectedDetailResource.value.rating ?? -1) !== Number(detailRatingDraft.value)
 })
+const detailWebsiteFaviconSrc = ref('')
+
+const normalizeWebsiteIconSource = (iconPath: string) => {
+  const normalizedPath = String(iconPath ?? '').trim()
+  if (!normalizedPath) {
+    return ''
+  }
+
+  if (normalizedPath.startsWith('//')) {
+    return `https:${normalizedPath}`
+  }
+
+  return normalizedPath
+}
 
 const totalPages = computed(() => Math.max(1, Math.ceil(totalResources.value / pageSize.value)))
 
@@ -1919,6 +2462,16 @@ const closeVideoCoverCandidateModal = () => {
 const handleUseVideoCoverCandidate = (coverPath: string) => {
   formData.value.coverPath = String(coverPath ?? '').trim()
   closeVideoCoverCandidateModal()
+}
+
+const closeVideoSubCoverCandidateModal = () => {
+  showVideoSubCoverCandidateModal.value = false
+  videoSubCoverCandidateItems.value = []
+}
+
+const handleUseVideoSubCoverCandidate = (coverPath: string) => {
+  formData.value.coverPath = String(coverPath ?? '').trim()
+  closeVideoSubCoverCandidateModal()
 }
 
 const formatVideoFrameTime = (seconds: number) => {
@@ -2821,6 +3374,24 @@ const addResourceRule = computed(() => ({
       return true
     }
   },
+  'meta.website': {
+    trigger: ['blur', 'change'],
+    validator: (_rule: unknown, value: string) => {
+      if (String(categorySettings.value.extendTable ?? '').trim() !== 'website_meta') {
+        return true
+      }
+
+      if (!String(value ?? '').trim()) {
+        return new Error('请输入网站地址')
+      }
+
+      if (!normalizeWebsiteUrl(value)) {
+        return new Error('请输入合法的网站地址')
+      }
+
+      return true
+    }
+  },
   name: {
     required: true,
     message: `请输入${categoryName.value}名`,
@@ -3010,6 +3581,13 @@ watch(showCompletedFilter, (visible) => {
   }
 })
 
+watch(isWebsiteCategory, (visible) => {
+  if (visible) {
+    missingFile.value = false
+    runningOnly.value = false
+  }
+}, { immediate: true })
+
 watch(showVideoPlayer, (visible) => {
   if (visible) {
     hasOpenedVideoPlayer = true
@@ -3043,6 +3621,7 @@ let stopResourceStateListener: null | (() => void) = null
 let stopBatchImportProgressListener: null | (() => void) = null
 
 onMounted(() => {
+  void loadPlaybackResumeRestartThresholds()
   window.addEventListener('click', closeDetailAudioContextMenu)
   window.addEventListener('resize', closeDetailAudioContextMenu)
   stopResourceStateListener = window.api.service.onResourceStateChanged((message) => {
@@ -3212,6 +3791,39 @@ watch(
       })) ?? ''
     } catch {
       detailScreenshotPreviewSrc.value = ''
+    }
+  },
+  { immediate: true }
+)
+
+watch(
+  () => [detailIsWebsite.value, selectedDetailResource.value?.websiteMeta?.favicon] as const,
+  async ([isWebsite, favicon]) => {
+    if (!isWebsite || !favicon) {
+      detailWebsiteFaviconSrc.value = ''
+      return
+    }
+
+    const normalizedFavicon = normalizeWebsiteIconSource(String(favicon))
+    if (!normalizedFavicon) {
+      detailWebsiteFaviconSrc.value = ''
+      return
+    }
+
+    if (/^https?:\/\//i.test(normalizedFavicon) || /^data:/i.test(normalizedFavicon)) {
+      detailWebsiteFaviconSrc.value = normalizedFavicon
+      return
+    }
+
+    try {
+      detailWebsiteFaviconSrc.value = (await window.api.dialog.getImagePreviewUrl(normalizedFavicon, {
+        maxWidth: 64,
+        maxHeight: 64,
+        fit: 'cover',
+        quality: 80
+      })) ?? ''
+    } catch {
+      detailWebsiteFaviconSrc.value = ''
     }
   },
   { immediate: true }
@@ -3415,6 +4027,11 @@ const handleBatchImportClick = () => {
 
     if (isVideoCategory.value && String(categorySettings.value.resourcePathType ?? '') === 'file') {
       await handleBatchImportVideoFiles()
+      return
+    }
+
+    if (isVideoFolderCategory.value) {
+      await handleBatchImportAnimeDirectories()
       return
     }
 
@@ -4304,6 +4921,137 @@ const handleBatchImportVideoFiles = async () => {
   }
 }
 
+const buildBatchAnimeResourcePayload = (directoryPath: string): ResourceForm => {
+  const directoryName = getResourceNameFromBasePath(directoryPath)
+  const videoMetaBase = createEmptyMetaByType('video_meta') as unknown as ResourceMeta
+
+  return {
+    name: directoryName || getFileName(directoryPath) || String(directoryPath ?? '').trim(),
+    description: '',
+    coverPath: '',
+    basePath: String(directoryPath ?? '').trim(),
+    author: '',
+    authors: [],
+    actors: [],
+    tags: [],
+    types: [],
+    categoryId: categoryInfo.value.id,
+    meta: {
+      ...videoMetaBase,
+      year: null,
+      lastPlayFile: '',
+      lastPlayTime: 0
+    }
+  }
+}
+
+const handleBatchImportAnimeDirectories = async () => {
+  const targetCategoryId = categoryId.value
+  const currentState = ensureBatchImportState(targetCategoryId)
+
+  if (currentState.analyzeRunning || currentState.importRunning) {
+    patchBatchImportState(targetCategoryId, {
+      analyzeInBackground: false,
+      analyzeToastDismissed: false,
+      showLoading: true
+    })
+    syncBatchImportOngoingCenter(targetCategoryId)
+    return
+  }
+
+  try {
+    const directoryPaths = await window.api.dialog.selectFolders()
+
+    if (!Array.isArray(directoryPaths) || !directoryPaths.length) {
+      return
+    }
+
+    patchBatchImportState(targetCategoryId, {
+      items: [],
+      fetchInfoEnabled: false,
+      analyzeTotal: directoryPaths.length,
+      analyzeCurrent: 0,
+      analyzeMessage: '正在准备导入番剧，请稍候...',
+      analyzeCancelled: false,
+      analyzeInBackground: false,
+      analyzeToastDismissed: false,
+      analyzeRunning: false,
+      importRunning: true,
+      showLoading: true,
+      showPreview: false
+    })
+    syncBatchImportOngoingCenter(targetCategoryId)
+
+    let successCount = 0
+    let skippedCount = 0
+    let failedCount = 0
+
+    for (const [index, rawDirectoryPath] of directoryPaths.entries()) {
+      if (ensureBatchImportState(targetCategoryId).analyzeCancelled) {
+        break
+      }
+
+      const directoryPath = String(rawDirectoryPath ?? '').trim()
+      const directoryName = getResourceNameFromBasePath(directoryPath) || directoryPath || '未知目录'
+      patchBatchImportState(targetCategoryId, {
+        analyzeCurrent: index,
+        analyzeMessage: `正在导入第 ${index + 1} / ${directoryPaths.length} 个番剧\n${directoryName}`
+      })
+      syncBatchImportOngoingCenter(targetCategoryId)
+
+      if (!directoryPath || !validateBasePathExtension(directoryPath)) {
+        skippedCount += 1
+        continue
+      }
+
+      const existsResult = await window.api.service.checkResourceExistsByPath(directoryPath)
+      if (existsResult?.exists) {
+        skippedCount += 1
+        continue
+      }
+
+      if (existsResult?.type === 'error') {
+        failedCount += 1
+        continue
+      }
+
+      const result = await window.api.service.saveResource(buildBatchAnimeResourcePayload(directoryPath))
+      if (result?.type === 'error') {
+        failedCount += 1
+      } else {
+        successCount += 1
+      }
+    }
+
+    patchBatchImportState(targetCategoryId, {
+      analyzeCurrent: directoryPaths.length,
+      analyzeMessage: '番剧批量导入完成'
+    })
+
+    const stopped = ensureBatchImportState(targetCategoryId).analyzeCancelled
+    const notifyType = failedCount > 0 && successCount === 0 ? 'error' : stopped ? 'warning' : 'success'
+    showNotifyByType(
+      notifyType,
+      '批量导入番剧',
+      `${stopped ? '已停止，' : ''}导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}`
+    )
+
+    if (successCount > 0) {
+      await fetchData()
+    }
+  } catch (error) {
+    showNotifyByType('error', '批量导入番剧', error instanceof Error ? error.message : '批量导入番剧失败')
+  } finally {
+    patchBatchImportState(targetCategoryId, {
+      importRunning: false,
+      showLoading: false,
+      analyzeInBackground: false,
+      analyzeToastDismissed: false
+    })
+    clearBatchImportOngoingCenter(targetCategoryId)
+  }
+}
+
 const buildBatchAudioResourcePayload = (filePath: string, analysis: any, coverPath: string, lyricsPath: string): ResourceForm => {
   const authorNames = normalizeAudioAuthorList([
     ...(Array.isArray(analysis?.artists) ? analysis.artists : []),
@@ -4901,12 +5649,14 @@ const handleCloseModal = () => {
   showModal.value = false
   editingResourceId.value = ''
   editInitialFormData.value = null
+  closeVideoSubCoverCandidateModal()
 }
 
 const handleCloseEditDrawer = () => {
   showEditModal.value = false
   editingResourceId.value = ''
   editInitialFormData.value = null
+  closeVideoSubCoverCandidateModal()
 }
 
 const handleResetEditForm = () => {
@@ -4932,9 +5682,43 @@ const handleSubmitResource = async () => {
     return
   }
 
+  if (String(categorySettings.value.extendTable ?? '').trim() === 'website_meta' && !normalizeWebsiteUrl(formData.value?.meta?.website)) {
+    showNotifyByType('warning', '添加资源', '请填写网站地址')
+    return
+  }
+
   formData.value['categoryId'] = categoryInfo.value.id
   syncAudioAuthorFields(formData.value)
+  if (String(categorySettings.value.extendTable ?? '').trim() === 'website_meta') {
+    formData.value.meta.website = normalizeWebsiteUrl(formData.value?.meta?.website)
+  }
   const payload = cloneFormData(formData.value)
+  const isWebsiteSubmit = String(categorySettings.value.extendTable ?? '').trim() === 'website_meta'
+
+  if (isWebsiteSubmit) {
+    const draft = cloneFormData(formData.value)
+    handleCloseModal()
+    await nextTick()
+
+    void (async () => {
+      const result = await window.api.service.saveResource(payload)
+      const resultType = result?.type ?? 'info'
+      const resultMessage = result?.message ?? '操作完成'
+
+      showNotifyByType(resultType, '添加资源', resultMessage)
+
+      if (resultType !== 'error') {
+        void fetchData()
+        return
+      }
+
+      formData.value = draft
+      showModal.value = true
+      await nextTick()
+    })()
+    return
+  }
+
   const result = await window.api.service.saveResource(payload)
   const resultType = result?.type ?? 'info'
   const resultMessage = result?.message ?? '操作完成'
@@ -4943,7 +5727,8 @@ const handleSubmitResource = async () => {
 
   if (resultType !== 'error') {
     handleCloseModal()
-    await fetchData()
+    await nextTick()
+    void fetchData()
   }
 }
 
@@ -5034,9 +5819,51 @@ const handleSubmitEditResource = async () => {
     return
   }
 
+  if (String(categorySettings.value.extendTable ?? '').trim() === 'website_meta' && !normalizeWebsiteUrl(formData.value?.meta?.website)) {
+    showNotifyByType('warning', `修改${categoryName.value}`, '请填写网站地址')
+    return
+  }
+
   formData.value.categoryId = categoryInfo.value.id
   syncAudioAuthorFields(formData.value)
+  if (String(categorySettings.value.extendTable ?? '').trim() === 'website_meta') {
+    formData.value.meta.website = normalizeWebsiteUrl(formData.value?.meta?.website)
+  }
   const payload = cloneFormData(formData.value)
+  const isWebsiteSubmit = String(categorySettings.value.extendTable ?? '').trim() === 'website_meta'
+
+  if (isWebsiteSubmit) {
+    const draft = cloneFormData(formData.value)
+    const currentEditingResourceId = editingResourceId.value
+    const shouldCloseDetailDrawer = showDetailDrawer.value && selectedDetailResource.value?.id === editingResourceId.value
+
+    handleCloseEditDrawer()
+    if (shouldCloseDetailDrawer) {
+      showDetailDrawer.value = false
+      selectedDetailResource.value = null
+    }
+    await nextTick()
+
+    void (async () => {
+      const result = await window.api.service.updateResource(currentEditingResourceId, payload)
+      const resultType = result?.type ?? 'info'
+      const resultMessage = result?.message ?? '操作完成'
+
+      showNotifyByType(resultType, `修改${categoryName.value}`, resultMessage)
+
+      if (resultType !== 'error') {
+        void fetchData()
+        return
+      }
+
+      editingResourceId.value = currentEditingResourceId
+      formData.value = draft
+      showEditModal.value = true
+      await nextTick()
+    })()
+    return
+  }
+
   const result = await window.api.service.updateResource(editingResourceId.value, payload)
   const resultType = result?.type ?? 'info'
   const resultMessage = result?.message ?? '操作完成'
@@ -5049,7 +5876,8 @@ const handleSubmitEditResource = async () => {
       showDetailDrawer.value = false
       selectedDetailResource.value = null
     }
-    await fetchData()
+    await nextTick()
+    void fetchData()
   }
 }
 
@@ -5080,12 +5908,53 @@ const handleUseScreenshotCover = async () => {
 const handleUseVideoRandomFrameCover = async () => {
   const basePath = String(formData.value?.basePath ?? '').trim()
   if (!basePath) {
-    showNotifyByType('warning', '随机帧封面', '请先选择视频文件')
+    showNotifyByType('warning', '随机帧封面', isVideoFolderCategory.value ? '请先选择番剧目录' : '请先选择视频文件')
     return
   }
 
   videoCoverFrameLoading.value = true
   try {
+    if (isVideoFolderCategory.value) {
+      const result = await window.api.service.extractVideoSubCoverFrames(basePath)
+      const resultType = result?.type ?? 'info'
+      const resultMessage = result?.message ?? '番剧随机帧生成完成'
+
+      if (resultType === 'error' || resultType === 'warning') {
+        showNotifyByType(resultType, '随机帧封面', resultMessage)
+        return
+      }
+
+      const rawItems = Array.isArray(result?.data?.items) ? result.data.items : []
+      const resolvedItems = await Promise.all(rawItems.map(async (item: any) => {
+        const rawCandidates = Array.isArray(item?.coverCandidates) ? item.coverCandidates : []
+        const resolvedCandidates = await Promise.all(rawCandidates.map(async (candidate: any) => {
+          const coverPath = String(candidate?.coverPath ?? '').trim()
+          return {
+            label: String(candidate?.label ?? '').trim() || '随机帧',
+            coverPath,
+            previewSrc: await resolveCoverPreviewUrl(coverPath),
+            time: Math.max(0, Number(candidate?.time ?? 0))
+          }
+        }))
+
+        return {
+          fileName: String(item?.fileName ?? '').trim(),
+          relativePath: String(item?.relativePath ?? '').trim(),
+          candidates: resolvedCandidates.filter((candidate) => candidate.coverPath && candidate.previewSrc)
+        }
+      }))
+      const availableItems = resolvedItems.filter((item) => item.candidates.length)
+
+      if (!availableItems.length) {
+        showNotifyByType('warning', '随机帧封面', '已生成番剧随机帧，但预览加载失败')
+        return
+      }
+
+      videoSubCoverCandidateItems.value = availableItems
+      showVideoSubCoverCandidateModal.value = true
+      return
+    }
+
     const result = await window.api.service.extractVideoCoverFrames(basePath)
     const resultType = result?.type ?? 'info'
     const resultMessage = result?.message ?? '随机帧生成完成'
@@ -5438,6 +6307,46 @@ const handleFetchGameInfo = async () => {
   }
 }
 
+const handleFetchWebsiteInfo = async () => {
+  if (fetchResourceInfoLoading.value) {
+    return
+  }
+
+  const normalizedUrl = normalizeWebsiteUrl(formData.value?.meta?.website)
+  if (!normalizedUrl) {
+    showNotifyByType('warning', '获取网站信息', '请先输入合法的网站地址')
+    return
+  }
+
+  fetchResourceInfoLoading.value = true
+
+  try {
+    const result = await window.api.service.fetchWebsiteInfo(normalizedUrl)
+    const resultType = result?.type ?? 'info'
+    const resultMessage = result?.message ?? '获取网站信息完成'
+    const data = result?.data ?? {}
+
+    if (resultType !== 'error') {
+      formData.value.meta.website = String(data.website ?? normalizedUrl).trim() || normalizedUrl
+
+      if (String(data.name ?? '').trim()) {
+        formData.value.name = String(data.name).trim()
+      }
+
+      formData.value.meta.favicon = String(data.favicon ?? '').trim()
+    }
+
+    if (resultType === 'error' || resultType === 'warning') {
+      showNotifyByType(resultType, '获取网站信息', resultMessage)
+      return
+    }
+
+    showNotifyByType('success', '获取网站信息', resultMessage)
+  } finally {
+    fetchResourceInfoLoading.value = false
+  }
+}
+
 const handleCheckGameEngine = async () => {
   const basePath = String(formData.value?.basePath ?? '').trim()
 
@@ -5491,6 +6400,11 @@ const handleLaunchResource = async (resource: any) => {
 
   if (detailIsNovel.value) {
     await openNovelReader(resource)
+    return
+  }
+
+  if (detailIsWebsite.value) {
+    await handleOpenWebsiteResource(resource)
     return
   }
 
@@ -5696,6 +6610,7 @@ const handleShowResourceDetail = (resource: any) => {
       }
     }
 
+    await refreshVideoSubCoverPreviewUrls(selectedDetailResource.value)
     await refreshDetailScreenshots(0)
     await refreshDetailAudioTree()
   })()
@@ -5818,7 +6733,7 @@ const handleOpenResourceFolder = async (resource: any) => {
 
 const handleDefaultAppPlayResource = async (resource: any) => {
   const targetPath = getResourceFilePath(resource)
-  await handleOpenPathWithDefaultApp(targetPath, '使用默认应用播放')
+  await handleOpenPathWithDefaultApp(targetPath, '使用默认应用打开')
 }
 
 const handleOpenScreenshotFolder = async (resource: any) => {
@@ -5842,6 +6757,11 @@ const handleOpenDetailResourcePath = async () => {
     return
   }
 
+  if (detailIsWebsite.value) {
+    await handleOpenWebsiteResource(selectedDetailResource.value)
+    return
+  }
+
   await handleOpenResourceFolder(selectedDetailResource.value)
 }
 
@@ -5853,6 +6773,26 @@ const handleOpenStoreWebsite = async (url: string) => {
     }
   } catch (error) {
     showNotifyByType('error', '打开贩售网站', error instanceof Error ? error.message : '打开贩售网站失败')
+  }
+}
+
+const handleOpenWebsiteResource = async (resource: any) => {
+  const url = getWebsiteResourceUrl(resource)
+  if (!url) {
+    showNotifyByType('warning', '打开网站', '当前资源未填写网站地址')
+    return
+  }
+
+  try {
+    const message = await window.api.dialog.openExternalUrl(url)
+    if (message) {
+      showNotifyByType('error', '打开网站', message)
+      return
+    }
+
+    showNotifyByType('success', '打开网站', `已打开“${resource?.title ?? categoryName.value}”`)
+  } catch (error) {
+    showNotifyByType('error', '打开网站', error instanceof Error ? error.message : '打开网站失败')
   }
 }
 
@@ -6635,15 +7575,179 @@ const refreshDetailScreenshots = async (
 }
 
 const refreshDetailAudioTree = async (targetResource: any = selectedDetailResource.value) => {
-  if (!detailIsAsmr.value) {
+  if (!detailIsAsmr.value && !isVideoFolderCategory.value) {
     detailAudioTree.value = []
     return
   }
 
   try {
-    detailAudioTree.value = await window.api.dialog.getDirectoryAudioTree(String(targetResource?.basePath ?? ''))
+    const directoryTree = await window.api.dialog.getDirectoryAudioTree(String(targetResource?.basePath ?? ''))
+    detailAudioTree.value = reorderVideoTreeBySubItems(directoryTree, targetResource)
   } catch {
     detailAudioTree.value = []
+  }
+}
+
+const resetVideoOrderDialog = () => {
+  videoOrderResource.value = null
+  videoOrderItems.value = []
+  videoOrderInitialItems.value = []
+  isVideoOrderSubmitting.value = false
+  videoOrderDragIndex.value = null
+  videoOrderDragOverIndex.value = null
+}
+
+const handleResetVideoOrderItems = () => {
+  videoOrderItems.value = [...videoOrderItems.value].sort((left, right) => {
+    const fileNameCompare = compareByFileName(left.fileName, right.fileName)
+    if (fileNameCompare !== 0) {
+      return fileNameCompare
+    }
+
+    return compareByFileName(left.relativePath, right.relativePath)
+  }).map((item, index) => ({
+    ...item,
+    sortOrder: index
+  }))
+}
+
+const normalizeVideoOrderItems = (items: Array<{ id: string; fileName: string; relativePath: string; sortOrder: number; isVisible: boolean }>) =>
+  items.map((item, itemIndex) => ({
+    ...item,
+    sortOrder: itemIndex
+  }))
+
+const isVideoOrderItemChanged = (item: { relativePath: string; isVisible: boolean }, index: number) => {
+  const initialItem = videoOrderInitialItems.value.find((entry) => entry.relativePath === item.relativePath)
+  if (!initialItem) {
+    return true
+  }
+
+  return initialItem.sortOrder !== index || initialItem.isVisible !== item.isVisible
+}
+
+const moveVideoOrderItem = (fromIndex: number, toIndex: number) => {
+  if (fromIndex < 0 || toIndex < 0 || fromIndex >= videoOrderItems.value.length || toIndex >= videoOrderItems.value.length) {
+    return
+  }
+
+  const nextItems = [...videoOrderItems.value]
+  const [targetItem] = nextItems.splice(fromIndex, 1)
+  if (!targetItem) {
+    return
+  }
+
+  nextItems.splice(toIndex, 0, targetItem)
+  videoOrderItems.value = normalizeVideoOrderItems(nextItems)
+}
+
+const handleVideoOrderDragStart = (index: number, event: DragEvent) => {
+  videoOrderDragIndex.value = index
+  videoOrderDragOverIndex.value = index
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(index))
+  }
+}
+
+const handleVideoOrderDragEnter = (index: number) => {
+  if (videoOrderDragIndex.value == null || videoOrderDragIndex.value === index) {
+    return
+  }
+
+  videoOrderDragOverIndex.value = index
+}
+
+const handleVideoOrderDrop = (index: number) => {
+  const fromIndex = videoOrderDragIndex.value
+  videoOrderDragIndex.value = null
+  videoOrderDragOverIndex.value = null
+  if (fromIndex == null || fromIndex === index) {
+    return
+  }
+
+  moveVideoOrderItem(fromIndex, index)
+}
+
+const handleVideoOrderDragEnd = () => {
+  videoOrderDragIndex.value = null
+  videoOrderDragOverIndex.value = null
+}
+
+const handleOpenVideoOrderDialog = (resource: any) => {
+  void (async () => {
+    const resourceId = String(resource?.id ?? '').trim()
+    if (!resourceId) {
+      showNotifyByType('warning', '修改顺序', '资源ID无效')
+      return
+    }
+
+    try {
+      const result = await window.api.service.getResourceDetail(resourceId)
+      const resultType = result?.type ?? 'warning'
+      const detail = result?.data ?? null
+      if (resultType === 'error' || !detail) {
+        showNotifyByType(resultType, '修改顺序', result?.message ?? '获取番剧详情失败')
+        return
+      }
+
+      const videoSubs = getDetailVideoSubItems(detail)
+      if (!videoSubs.length) {
+        showNotifyByType('warning', '修改顺序', '当前番剧目录中没有可排序的视频文件')
+        return
+      }
+
+      videoOrderResource.value = detail
+      videoOrderItems.value = videoSubs
+      videoOrderInitialItems.value = videoSubs.map((item, index) => ({
+        ...item,
+        sortOrder: index
+      }))
+      await refreshVideoSubCoverPreviewUrls(detail)
+      showVideoOrderModal.value = true
+    } catch (error) {
+      showNotifyByType('error', '修改顺序', error instanceof Error ? error.message : '打开顺序编辑失败')
+    }
+  })()
+}
+
+const handleSubmitVideoOrder = async () => {
+  const resourceId = String(videoOrderResource.value?.id ?? '').trim()
+  if (!resourceId) {
+    showNotifyByType('warning', '修改顺序', '资源ID无效')
+    return
+  }
+
+  isVideoOrderSubmitting.value = true
+  try {
+    const result = await window.api.service.updateVideoSubItems(resourceId, videoOrderItems.value.map((item, index) => ({
+      relativePath: item.relativePath,
+      isVisible: item.isVisible,
+      sortOrder: index
+    })))
+    const resultType = result?.type ?? 'info'
+    const resultMessage = result?.message ?? '操作完成'
+    showNotifyByType(resultType, '修改顺序', resultMessage)
+
+    if (resultType === 'error') {
+      return
+    }
+
+    if (showDetailDrawer.value && String(selectedDetailResource.value?.id ?? '') === resourceId) {
+      selectedDetailResource.value = {
+        ...selectedDetailResource.value,
+        videoSubs: Array.isArray(result?.data) ? result.data : selectedDetailResource.value?.videoSubs ?? []
+      }
+      await refreshVideoSubCoverPreviewUrls(selectedDetailResource.value)
+      await refreshDetailAudioTree(selectedDetailResource.value)
+    }
+
+    showVideoOrderModal.value = false
+    await fetchData()
+  } catch (error) {
+    showNotifyByType('error', '修改顺序', error instanceof Error ? error.message : '保存番剧顺序失败')
+  } finally {
+    isVideoOrderSubmitting.value = false
   }
 }
 
@@ -6724,7 +7828,7 @@ const handleToggleCompleted = async (resource: any) => {
               <n-icon :component="FunnelOutline" depth="3" /> 筛选条件
             </n-h3>
             <div class="filter-top-options">
-              <n-checkbox v-model:checked="missingFile" class="filter-top-option">
+              <n-checkbox v-if="showMissingFilter" v-model:checked="missingFile" class="filter-top-option">
                 <span class="filter-top-option__label">资源失效</span>
                 <n-tag type="error" :bordered="false" round size="small">{{ missingResourceCount }}</n-tag>
               </n-checkbox>
@@ -6736,7 +7840,7 @@ const handleToggleCompleted = async (resource: any) => {
                 <span class="filter-top-option__label">{{ completedStateLabel }}</span>
                 <n-tag type="info" :bordered="false" round size="small">{{ completedResourceCount }}</n-tag>
               </n-checkbox>
-              <n-checkbox v-model:checked="runningOnly" class="filter-top-option">
+              <n-checkbox v-if="showRunningFilter" v-model:checked="runningOnly" class="filter-top-option">
                 <span class="filter-top-option__label">运行中</span>
                 <n-tag type="success" :bordered="false" round size="small">{{ runningResourceCount }}</n-tag>
               </n-checkbox>
@@ -6744,7 +7848,7 @@ const handleToggleCompleted = async (resource: any) => {
           </div>
 
           <div class="filter-sections" :style="filterSectionsStyle">
-            <div class="filter-section">
+            <div v-if="showAuthorFilter" class="filter-section">
               <n-divider title-placement="left" style="margin-bottom: 5px;">
                 {{ categorySettings.authorText || '作者筛选' }}
               </n-divider>
@@ -6967,10 +8071,12 @@ const handleToggleCompleted = async (resource: any) => {
                 :show-screenshot-folder="showScreenshotFolder"
                 :show-completed-toggle="showCompletedToggle"
                 :show-delete-files="showDeleteFiles"
+                :show-modify-order="isVideoFolderCategory"
                 :stop-needs-confirm="categorySettings.extendTable === 'game_meta'"
                 :selected="selectedResourceIds.includes(String(resource?.id ?? ''))"
                 :selection-mode="resourceSelectionMode"
-                :show-default-app-play="isAudioCategory || isVideoCategory"
+                :show-default-app-play="showCardDefaultAppOpen"
+                default-app-action-text="使用默认应用打开"
                 :show-add-to-playlist="isAudioCategory"
                 @launch="handleLaunchResource"
                 @admin-launch="handleAdminLaunchResource"
@@ -6988,6 +8094,7 @@ const handleToggleCompleted = async (resource: any) => {
                 @toggle-select="handleToggleSelectResource"
                 @delete="handleDeleteResource"
                 @delete-files="handleDeleteResourceFiles"
+                @modify-order="handleOpenVideoOrderDialog"
               />
             </div>
             </div>
@@ -7032,7 +8139,21 @@ const handleToggleCompleted = async (resource: any) => {
     </n-layout>
 
     <n-drawer v-model:show="showDetailDrawer" placement="right" :width="detailDrawerWidth">
-      <n-drawer-content :title="selectedDetailResource?.title || `${categoryName}详情`" closable>
+      <n-drawer-content closable>
+        <template #header>
+          <div class="detail-drawer__header-title">
+            <img
+              v-if="detailIsWebsite && detailWebsiteFaviconSrc"
+              :src="detailWebsiteFaviconSrc"
+              :alt="selectedDetailResource?.title || `${categoryName}详情`"
+              class="detail-drawer__header-icon"
+            />
+            <span v-else-if="detailIsWebsite" class="detail-drawer__header-icon detail-drawer__header-icon--emoji">
+              {{ detailWebsitePlaceholderEmoji }}
+            </span>
+            <span>{{ selectedDetailResource?.title || `${categoryName}详情` }}</span>
+          </div>
+        </template>
         <div class="detail-drawer__resize-handle" @mousedown.prevent="handleDetailDrawerResizeStart" />
         <n-scrollbar style="max-height: 100%;">
             <div v-if="selectedDetailResource" class="detail-drawer" :class="{ 'detail-drawer--software': detailIsSoftware }">
@@ -7043,8 +8164,29 @@ const handleToggleCompleted = async (resource: any) => {
                 :alt="selectedDetailResource.title"
                 class="detail-drawer__cover-image"
               />
-              <div v-else class="detail-drawer__cover-placeholder">
-                暂无封面
+              <div
+                v-else
+                class="detail-drawer__cover-placeholder"
+                :class="{ 'detail-drawer__cover-placeholder--website': detailIsWebsite }"
+              >
+                <template v-if="detailIsWebsite">
+                  <div class="detail-drawer__website-cover">
+                    <div class="detail-drawer__website-cover-glow" />
+                    <div class="detail-drawer__website-cover-badge">
+                      <img
+                        v-if="detailWebsiteFaviconSrc"
+                        :src="detailWebsiteFaviconSrc"
+                        :alt="selectedDetailResource.title"
+                        class="detail-drawer__website-cover-icon"
+                      />
+                      <span v-else class="detail-drawer__website-cover-emoji">{{ detailWebsitePlaceholderEmoji }}</span>
+                    </div>
+                    <span class="detail-drawer__website-cover-text">{{ detailWebsiteCoverPlaceholderText }}</span>
+                  </div>
+                </template>
+                <template v-else>
+                  暂无封面
+                </template>
               </div>
             </div>
 
@@ -7055,11 +8197,11 @@ const handleToggleCompleted = async (resource: any) => {
                   <span class="detail-drawer__label">标题</span>
                   <span class="detail-drawer__value">{{ selectedDetailResource.title || '暂无' }}</span>
                 </div>
-                <div class="detail-drawer__item">
+                <div v-if="!detailIsWebsite" class="detail-drawer__item">
                   <span class="detail-drawer__label">文件名</span>
                   <span class="detail-drawer__value">{{ selectedDetailResource.fileName || '暂无' }}</span>
                 </div>
-                <div class="detail-drawer__item">
+                <div v-if="!detailIsWebsite" class="detail-drawer__item">
                   <span class="detail-drawer__label">{{ categorySettings.authorText || '作者' }}</span>
                   <span class="detail-drawer__value">{{ (selectedDetailResource.authors ?? []).map((item: any) => item.name).join('、') || '暂无' }}</span>
                 </div>
@@ -7131,7 +8273,7 @@ const handleToggleCompleted = async (resource: any) => {
                     </div>
                     <span v-else class="detail-drawer__value">暂无</span>
                   </div>
-                <div class="detail-drawer__item detail-drawer__item--full">
+                <div v-if="!detailIsWebsite" class="detail-drawer__item detail-drawer__item--full">
                   <span class="detail-drawer__label">路径</span>
                     <div class="detail-drawer__path-row">
                     <span class="detail-drawer__value detail-drawer__value--path">{{ detailDisplayPath || '暂无' }}</span>
@@ -7142,7 +8284,7 @@ const handleToggleCompleted = async (resource: any) => {
                     </n-button>
                   </div>
                 </div>
-                <div v-if="!detailIsSoftware && !detailIsManga && detailStores.length" class="detail-drawer__item detail-drawer__item--full">
+                <div v-if="!detailIsWebsite && !detailIsSoftware && !detailIsManga && detailStores.length" class="detail-drawer__item detail-drawer__item--full">
                   <span class="detail-drawer__label">贩售网站</span>
                   <div class="detail-drawer__store-list">
                     <button
@@ -7168,16 +8310,37 @@ const handleToggleCompleted = async (resource: any) => {
                   v-for="metaItem in detailMetaItems"
                   :key="`${selectedDetailResource.id}-meta-${metaItem.label}`"
                   class="detail-drawer__item"
-                  :class="{ 'detail-drawer__item--full': detailIsSoftware }"
+                  :class="{ 'detail-drawer__item--full': detailIsSoftware || metaItem.full }"
                 >
                   <span class="detail-drawer__label">{{ metaItem.label }}</span>
+                  <div
+                    v-if="metaItem.copyValue"
+                    class="detail-drawer__path-row"
+                  >
+                    <span
+                      class="detail-drawer__value detail-drawer__value--path"
+                      :class="{ 'detail-drawer__value--clamp-3': metaItem.clampLines === 3 }"
+                    >
+                      {{ metaItem.value }}
+                    </span>
+                    <n-button
+                      type="primary"
+                      ghost
+                      class="detail-drawer__path-button"
+                      @click="handleCopyText(metaItem.copyValue, metaItem.label)"
+                    >
+                      <template #icon>
+                        <n-icon :component="CopyOutline" />
+                      </template>
+                    </n-button>
+                  </div>
                   <span
-                    v-if="metaItem.icon"
+                    v-else-if="metaItem.icon"
                     class="detail-drawer__value detail-drawer__meta-with-icon"
                     :class="{ 'detail-drawer__value--multiline': detailIsSoftware }"
                   >
                     <img :src="metaItem.icon" :alt="metaItem.value" class="detail-drawer__meta-icon" />
-                    <span>{{ metaItem.value }}</span>
+                    <span v-if="!(detailIsWebsite && metaItem.label === '站点图标')">{{ metaItem.value }}</span>
                   </span>
                   <span
                     v-else
@@ -7220,7 +8383,7 @@ const handleToggleCompleted = async (resource: any) => {
                   <span class="detail-drawer__label">{{ detailStatsText.accessCount }}</span>
                   <span class="detail-drawer__value">{{ Number(detailStats?.accessCount ?? 0) }}</span>
                 </div>
-                <div class="detail-drawer__item">
+                <div v-if="detailShowTotalRuntime" class="detail-drawer__item">
                   <span class="detail-drawer__label">{{ detailStatsText.totalRuntime }}</span>
                   <span class="detail-drawer__value">{{ formatDuration(detailStats?.totalRuntime) }}</span>
                 </div>
@@ -7232,7 +8395,7 @@ const handleToggleCompleted = async (resource: any) => {
                     <span class="detail-drawer__label">阅读进度</span>
                     <span class="detail-drawer__value">{{ detailReadingProgressText }}</span>
                   </div>
-                  <div v-if="detailIsAsmr || detailIsAudio || isVideoCategory" class="detail-drawer__item">
+                <div v-if="detailIsAsmr || detailIsAudio || isVideoCategory" class="detail-drawer__item">
                     <span class="detail-drawer__label">播放进度</span>
                     <span class="detail-drawer__value">{{ detailPlaybackProgressText }}</span>
                   </div>
@@ -7317,8 +8480,8 @@ const handleToggleCompleted = async (resource: any) => {
               </div>
 
               <div v-else-if="detailIsAsmr" class="detail-drawer__section">
-                <div class="detail-drawer__section-title">{{ detailGallerySectionTitle }}</div>
-                <n-empty v-if="!detailAudioTree.length" description="暂无音频文件" />
+                <div class="detail-drawer__section-title">{{ detailDirectorySectionTitle }}</div>
+                <n-empty v-if="!detailAudioTree.length" :description="detailDirectoryEmptyText" />
                 <template v-else>
                   <n-tree
                     block-line
@@ -7341,7 +8504,29 @@ const handleToggleCompleted = async (resource: any) => {
                 </template>
               </div>
 
-              <div v-else-if="!isSingleImageCategory && !detailIsManga && !detailIsAudio" class="detail-drawer__section">
+              <div v-else-if="isVideoFolderCategory" class="detail-drawer__section">
+                <div class="detail-drawer__section-title">{{ detailDirectorySectionTitle }}</div>
+                <n-empty v-if="!detailAudioTree.length" :description="detailDirectoryEmptyText" />
+                <template v-else>
+                  <BangumiDirectory
+                    :nodes="detailAudioTree"
+                    @play="handleAudioTreePlay"
+                    @item-contextmenu="handleOpenAudioTreeContextMenu"
+                  />
+                  <n-dropdown
+                    trigger="manual"
+                    :show="detailAudioContextMenuVisible"
+                    :x="detailAudioContextMenuPosition.x"
+                    :y="detailAudioContextMenuPosition.y"
+                    placement="bottom-start"
+                    :options="detailAudioContextMenuOptions"
+                    :on-clickoutside="closeDetailAudioContextMenu"
+                    @select="handleSelectDetailAudioContextMenu"
+                  />
+                </template>
+              </div>
+
+              <div v-else-if="detailShowLogs" class="detail-drawer__section">
                 <div class="detail-drawer__section-title">{{ detailGallerySectionTitle }}</div>
                 <n-empty v-if="!detailLogs.length" :description="detailEmptyLogDescription" />
                 <n-infinite-scroll
@@ -7397,6 +8582,13 @@ const handleToggleCompleted = async (resource: any) => {
             <n-space justify="start">
               <n-button :disabled="!selectedDetailResource" @click="handleEditResource(selectedDetailResource)">
                 编辑信息
+              </n-button>
+              <n-button
+                v-if="isVideoFolderCategory"
+                :disabled="!selectedDetailResource"
+                @click="handleOpenVideoOrderDialog(selectedDetailResource)"
+              >
+                修改顺序
               </n-button>
               <n-button :disabled="!selectedDetailResource" @click="handleOpenDetailResourcePath">
                 {{ detailOpenFolderText }}
@@ -7734,11 +8926,11 @@ const handleToggleCompleted = async (resource: any) => {
       </n-space>
     </n-modal>
 
-    <n-modal
-      v-model:show="showVideoCoverCandidateModal"
-      preset="card"
-      title="选择随机帧封面"
-      :style="{ width: '920px' }"
+      <n-modal
+        v-model:show="showVideoCoverCandidateModal"
+        preset="card"
+        title="选择随机帧封面"
+        :style="{ width: '920px' }"
       @after-leave="closeVideoCoverCandidateModal"
     >
       <n-space vertical :size="16">
@@ -7790,6 +8982,147 @@ const handleToggleCompleted = async (resource: any) => {
           <n-space justify="end">
             <n-button @click="closeVideoCoverCandidateModal">
               取消
+            </n-button>
+          </n-space>
+          </div>
+        </n-space>
+      </n-modal>
+
+      <n-modal
+        v-model:show="showVideoSubCoverCandidateModal"
+        preset="card"
+        title="选择番剧随机帧封面"
+        :style="{ width: '1080px', maxWidth: '94vw' }"
+        @after-leave="closeVideoSubCoverCandidateModal"
+      >
+        <n-space vertical :size="16">
+          <n-alert type="info" :show-icon="false">
+            已为番剧目录中的每个视频生成 3 张随机帧候选。点击任意一张后，将只更新当前番剧主封面，用于卡片和详情展示。
+          </n-alert>
+          <n-scrollbar style="max-height: 70vh;">
+            <div class="video-sub-cover-candidate-list">
+              <div
+                v-for="item in videoSubCoverCandidateItems"
+                :key="item.relativePath"
+                class="video-sub-cover-candidate-group"
+              >
+                <div class="video-sub-cover-candidate-group__header">
+                  <div class="video-sub-cover-candidate-group__title">{{ item.fileName }}</div>
+                  <div class="video-sub-cover-candidate-group__meta">{{ item.relativePath }}</div>
+                </div>
+                <div class="video-sub-cover-candidate-group__grid">
+                  <button
+                    v-for="candidate in item.candidates"
+                    :key="`${item.relativePath}-${candidate.coverPath}`"
+                    type="button"
+                    class="audio-cover-candidate"
+                    @click="handleUseVideoSubCoverCandidate(candidate.coverPath)"
+                  >
+                    <div class="audio-cover-candidate__preview video-cover-candidate__preview">
+                      <img :src="candidate.previewSrc" :alt="candidate.label" class="audio-cover-candidate__image" />
+                    </div>
+                    <div class="audio-cover-candidate__body">
+                      <div class="audio-cover-candidate__title">{{ candidate.label }}</div>
+                      <div class="audio-cover-candidate__query">时间点：{{ formatVideoFrameTime(candidate.time) }}</div>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </n-scrollbar>
+          <div class="batch-label-modal__footer">
+            <n-space justify="end">
+              <n-button @click="closeVideoSubCoverCandidateModal">
+                取消
+              </n-button>
+            </n-space>
+          </div>
+        </n-space>
+      </n-modal>
+
+      <n-modal
+        v-model:show="showVideoOrderModal"
+        preset="card"
+      title="修改番剧顺序"
+      :style="{ width: '760px', maxWidth: '92vw' }"
+      @after-leave="resetVideoOrderDialog"
+    >
+      <n-space vertical :size="16">
+        <n-alert type="info" :show-icon="false">
+          可调整番剧目录中视频文件的展示顺序，并控制是否在详情中显示。新扫描到的视频文件默认按文件名排序。
+        </n-alert>
+        <div class="video-order-modal__toolbar">
+          <div class="video-order-modal__summary">
+            共 {{ videoOrderItems.length }} 个视频文件
+          </div>
+          <n-button size="small" @click="handleResetVideoOrderItems">
+            按文件名排序
+          </n-button>
+        </div>
+        <n-scrollbar class="video-order-modal__scrollbar">
+          <div class="video-order-modal__list">
+            <div
+              v-for="(item, index) in videoOrderItems"
+              :key="item.id || item.relativePath"
+              class="video-order-item"
+              :class="{
+                'video-order-item--changed': isVideoOrderItemChanged(item, index),
+                'video-order-item--dragging': videoOrderDragIndex === index,
+                'video-order-item--drag-over': videoOrderDragOverIndex === index && videoOrderDragIndex !== index
+              }"
+              draggable="true"
+              @dragstart="handleVideoOrderDragStart(index, $event)"
+              @dragenter.prevent="handleVideoOrderDragEnter(index)"
+              @dragover.prevent
+              @drop.prevent="handleVideoOrderDrop(index)"
+              @dragend="handleVideoOrderDragEnd"
+            >
+              <div class="video-order-item__change-marker" :class="{ 'video-order-item__change-marker--active': isVideoOrderItemChanged(item, index) }" />
+              <div class="video-order-item__index" :title="'拖动调整顺序'">{{ index + 1 }}</div>
+              <img
+                v-if="getVideoSubCoverPreviewSrc(videoOrderResource, item.relativePath)"
+                :src="getVideoSubCoverPreviewSrc(videoOrderResource, item.relativePath)"
+                alt=""
+                class="video-order-item__cover"
+                draggable="false"
+              />
+              <div v-else class="video-order-item__cover video-order-item__cover--empty">VIDEO</div>
+              <div class="video-order-item__main">
+                <div class="video-order-item__title">{{ item.fileName || item.relativePath }}</div>
+              </div>
+              <n-checkbox
+                :checked="item.isVisible"
+                @update:checked="(value: boolean) => { videoOrderItems[index].isVisible = value }"
+              >
+                显示
+              </n-checkbox>
+              <div class="video-order-item__actions">
+                <n-button quaternary circle size="small" :disabled="index === 0" @click="moveVideoOrderItem(index, index - 1)">
+                  <template #icon>
+                    <n-icon :component="ChevronUpOutline" />
+                  </template>
+                </n-button>
+                <n-button
+                  quaternary
+                  circle
+                  size="small"
+                  :disabled="index === videoOrderItems.length - 1"
+                  @click="moveVideoOrderItem(index, index + 1)"
+                >
+                  <template #icon>
+                    <n-icon :component="ChevronDownOutline" />
+                  </template>
+                </n-button>
+                <span class="video-order-item__drag-hint">拖动排序</span>
+              </div>
+            </div>
+          </div>
+        </n-scrollbar>
+        <div class="batch-label-modal__footer">
+          <n-space justify="end">
+            <n-button @click="showVideoOrderModal = false">取消</n-button>
+            <n-button type="primary" :loading="isVideoOrderSubmitting" @click="handleSubmitVideoOrder">
+              保存
             </n-button>
           </n-space>
         </div>
@@ -7848,6 +9181,7 @@ const handleToggleCompleted = async (resource: any) => {
                 @update:actors="(value: string[]) => { formData.actors = value }"
                 @check-engine="handleCheckGameEngine"
                 @fetch-game-info="handleFetchGameInfo"
+                @fetch-website-info="handleFetchWebsiteInfo"
               />
               <n-form-item v-if="categorySettings.authorText && !isNovelCategory" :label="categorySettings.authorText" path="author">
                 <n-select
@@ -8052,13 +9386,16 @@ const handleToggleCompleted = async (resource: any) => {
       @update:show="handleEbookReaderShowUpdate"
       @progress-change="handleEbookReaderProgressChange"
     />
-    <VideoPlayer
-      v-model:show="showVideoPlayer"
-      :playlist="videoPlayerPlaylist"
-      :initial-path="videoPlayerInitialPath"
-      :initial-time="videoPlayerInitialTime"
-      :title="videoPlayerTitle"
-    />
+      <VideoPlayer
+        v-model:show="showVideoPlayer"
+        :playlist="videoPlayerPlaylist"
+        :initial-path="videoPlayerInitialPath"
+        :initial-time="videoPlayerInitialTime"
+        :resume-restart-threshold="videoPlaybackResumeRestartThreshold"
+        :title="videoPlayerTitle"
+        @update:playlist="handleVideoPlayerPlaylistUpdate"
+        @progress-persisted="handleVideoPlaybackProgressPersisted"
+      />
     <div v-if="isDragOver && categorySettings.resourcePathType === 'file'" class="drag-overlay">
       <div class="drag-overlay__panel">
         <div class="drag-overlay__title">拖拽文件到这里添加{{ categoryName }}</div>
@@ -8118,6 +9455,7 @@ const handleToggleCompleted = async (resource: any) => {
             @update:actors="(value: string[]) => { formData.actors = value }"
             @check-engine="handleCheckGameEngine"
             @fetch-game-info="handleFetchGameInfo"
+            @fetch-website-info="handleFetchWebsiteInfo"
           />
           <n-form-item v-if="categorySettings.authorText && !isNovelCategory" :label="categorySettings.authorText" path="author">
             <n-select
@@ -8465,6 +9803,47 @@ const handleToggleCompleted = async (resource: any) => {
   border: 1px dashed rgba(255, 255, 255, 0.12);
   border-radius: 8px;
   opacity: 0.68;
+}
+
+.video-sub-cover-candidate-list {
+  display: grid;
+  gap: 18px;
+  padding-right: 4px;
+}
+
+.video-sub-cover-candidate-group {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.video-sub-cover-candidate-group__header {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.video-sub-cover-candidate-group__title {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.video-sub-cover-candidate-group__meta {
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.5);
+  word-break: break-all;
+}
+
+.video-sub-cover-candidate-group__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
 }
 
 .audio-cover-candidate {
@@ -8904,6 +10283,126 @@ const handleToggleCompleted = async (resource: any) => {
   padding-right: 8px;
 }
 
+.video-order-modal__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.video-order-modal__summary {
+  font-size: 13px;
+  opacity: 0.72;
+}
+
+.video-order-modal__scrollbar {
+  max-height: 56vh;
+}
+
+.video-order-modal__list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.video-order-item {
+  display: grid;
+  grid-template-columns: 4px auto 72px minmax(0, 1fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(127, 127, 127, 0.06);
+  cursor: grab;
+  user-select: none;
+  transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, opacity 0.18s ease;
+  border: 1px solid transparent;
+}
+
+.video-order-item--changed {
+  border-color: rgba(99, 226, 183, 0.16);
+}
+
+.video-order-item:active {
+  cursor: grabbing;
+}
+
+.video-order-item--dragging {
+  opacity: 0.45;
+}
+
+.video-order-item--drag-over {
+  border-color: rgba(99, 226, 183, 0.34);
+  background: rgba(99, 226, 183, 0.08);
+  transform: translateY(-1px);
+}
+
+.video-order-item__index {
+  width: 28px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 700;
+  opacity: 0.7;
+}
+
+.video-order-item__change-marker {
+  align-self: stretch;
+  border-radius: 999px;
+  background: transparent;
+  transition: background-color 0.18s ease;
+}
+
+.video-order-item__change-marker--active {
+  background: rgb(99, 226, 183);
+}
+
+.video-order-item__main {
+  min-width: 0;
+}
+
+.video-order-item__cover {
+  width: 72px;
+  height: 44px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.video-order-item__cover--empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(216, 221, 229, 0.42);
+  font-size: 10px;
+}
+
+.video-order-item__title {
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.video-order-item__path {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0.58;
+  word-break: break-all;
+}
+
+.video-order-item__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  justify-self: end;
+}
+
+.video-order-item__drag-hint {
+  font-size: 12px;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+
 .batch-import-item {
   padding: 14px 16px;
   border: 1px solid rgba(128, 128, 128, 0.16);
@@ -9317,6 +10816,68 @@ const handleToggleCompleted = async (resource: any) => {
   font-size: 14px;
 }
 
+.detail-drawer__cover-placeholder--website {
+  opacity: 1;
+}
+
+.detail-drawer__website-cover {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: rgba(255, 255, 255, 0.92);
+  background:
+    radial-gradient(circle at center, rgba(255, 255, 255, 0.09), transparent 56%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
+}
+
+.detail-drawer__website-cover-glow {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 180px;
+  height: 180px;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.12), transparent 70%);
+  pointer-events: none;
+}
+
+.detail-drawer__website-cover-badge {
+  position: relative;
+  z-index: 1;
+  width: 72px;
+  height: 72px;
+  border-radius: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
+}
+
+.detail-drawer__website-cover-icon {
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+}
+
+.detail-drawer__website-cover-emoji {
+  font-size: 30px;
+  line-height: 1;
+}
+
+.detail-drawer__website-cover-text {
+  position: relative;
+  z-index: 1;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  opacity: 0.72;
+}
+
 .detail-drawer__section {
   display: flex;
   flex-direction: column;
@@ -9359,6 +10920,29 @@ const handleToggleCompleted = async (resource: any) => {
   line-height: 1.5;
 }
 
+.detail-drawer__header-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.detail-drawer__header-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex: 0 0 auto;
+}
+
+.detail-drawer__header-icon--emoji {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+}
+
 .detail-drawer__meta-with-icon {
   display: inline-flex;
   align-items: center;
@@ -9372,10 +10956,18 @@ const handleToggleCompleted = async (resource: any) => {
   flex: 0 0 auto;
 }
 
+
 .detail-drawer__value--path {
   word-break: break-all;
   flex: 1;
   min-width: 0;
+}
+
+.detail-drawer__value--clamp-3 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
 }
 
 .detail-drawer__value--multiline {
@@ -9571,6 +11163,8 @@ const handleToggleCompleted = async (resource: any) => {
 .detail-audio-tree__file {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -9580,10 +11174,58 @@ const handleToggleCompleted = async (resource: any) => {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  width: 100%;
   font-size: 13px;
   line-height: 1.5;
   word-break: break-word;
   white-space: normal;
+}
+
+.detail-audio-tree__video-cover {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  display: block;
+  flex: 0 0 auto;
+}
+
+.detail-audio-tree__video-cover--empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(216, 221, 229, 0.42);
+  font-size: 10px;
+}
+
+.detail-audio-tree__video-cover-shell {
+  position: relative;
+  width: 150px;
+  height: 60px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border-radius: 10px;
+}
+
+.detail-audio-tree__video-cover-index {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(16, 24, 40, 0.64);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
 }
 
 .detail-audio-tree__subtitle-badge {

@@ -93,6 +93,16 @@ export const videoMeta = sqliteTable('video_meta', {
   lastPlayTime: integer('last_play_time').default(0),
 });
 
+export const videoSub = sqliteTable('video_sub', {
+  id: text('id').primaryKey(),
+  resourceId: text('resource_id').notNull().references(() => resource.id),
+  fileName: text('file_name').notNull(),
+  relativePath: text('relative_path').notNull(),
+  coverPath: text('cover_path'),
+  sortOrder: integer('sort_order').default(0),
+  isVisible: integer('is_visible', { mode: 'boolean' }).default(true),
+});
+
 export const asmrMeta = sqliteTable('asmr_meta', {
   resourceId: text('resource_id').primaryKey().references(() => resource.id),
   cv: text('cv'),
@@ -124,7 +134,9 @@ export const novelMeta = sqliteTable('novel_meta', {
 
 export const websiteMeta = sqliteTable('website_meta', {
   resourceId: text('resource_id').primaryKey().references(() => resource.id),
+  url: text('url'),
   favicon: text('favicon'),
+  isDownloadLink: integer('is_download_link', { mode: 'boolean' }).default(false),
 });
 
 // --- 5. 关联与实体表 ---
@@ -236,9 +248,11 @@ export const resourceRelations = relations(resource, ({one, many}) => ({
   singleImageMeta: one(singleImageMeta, {fields: [resource.id], references: [singleImageMeta.resourceId]}),
   multiImageMeta: one(multiImageMeta, {fields: [resource.id], references: [multiImageMeta.resourceId]}),
   videoMeta: one(videoMeta, {fields: [resource.id], references: [videoMeta.resourceId]}),
+  videoSubs: many(videoSub),
   asmrMeta: one(asmrMeta, {fields: [resource.id], references: [asmrMeta.resourceId]}),
   audioMeta: one(audioMeta, {fields: [resource.id], references: [audioMeta.resourceId]}),
   novelMeta: one(novelMeta, {fields: [resource.id], references: [novelMeta.resourceId]}),
+  websiteMeta: one(websiteMeta, {fields: [resource.id], references: [websiteMeta.resourceId]}),
   // 列表关联
   actors: many(actor),
   authors: many(authorWork),
@@ -257,6 +271,10 @@ export const resourceStatRelations = relations(resourceStat, ({one}) => ({
 
 export const resourceLogRelations = relations(resourceLog, ({one}) => ({
   resource: one(resource, {fields: [resourceLog.resourceId], references: [resource.id]}),
+}));
+
+export const videoSubRelations = relations(videoSub, ({one}) => ({
+  resource: one(resource, {fields: [videoSub.resourceId], references: [resource.id]}),
 }));
 
 export const tagResourceRelations = relations(tagResource, ({one}) => ({

@@ -10,7 +10,7 @@ import {
   tagResource,
   typeResource,
   resourceType, dictType, author, authorWork, storeWork,
-  actor, gameMeta, softwareMeta, singleImageMeta, multiImageMeta, videoMeta, asmrMeta, audioMeta, novelMeta, websiteMeta,
+  actor, gameMeta, softwareMeta, singleImageMeta, multiImageMeta, videoMeta, videoSub, asmrMeta, audioMeta, novelMeta, websiteMeta,
 } from '../db/schema'
 import {and, asc, count, desc, eq, inArray, sql} from 'drizzle-orm'
 import {generateId} from '../util/id-generator'
@@ -299,6 +299,7 @@ export class DatabaseService {
         asmrMeta: true,
         audioMeta: true,
         novelMeta: true,
+        websiteMeta: true,
         actors: true,
         tags: {
           with: {
@@ -778,6 +779,33 @@ export class DatabaseService {
       .run()
   }
 
+  static getVideoSubsByResourceId(resourceId: string, tx?: DbExecutor) {
+    const executor = tx ?? db
+    return executor.query.videoSub.findMany({
+      where: eq(videoSub.resourceId, resourceId),
+      orderBy: [asc(videoSub.sortOrder), asc(videoSub.fileName)]
+    })
+  }
+
+  static deleteVideoSubsByResourceId(resourceId: string, tx?: DbExecutor) {
+    const executor = tx ?? db
+    executor.delete(videoSub).where(eq(videoSub.resourceId, resourceId)).run()
+  }
+
+  static insertVideoSubs(items: Array<typeof videoSub.$inferInsert>, tx?: DbExecutor) {
+    if (!items.length) {
+      return
+    }
+
+    const executor = tx ?? db
+    executor.insert(videoSub).values(items).run()
+  }
+
+  static replaceVideoSubs(resourceId: string, items: Array<typeof videoSub.$inferInsert>, tx?: DbExecutor) {
+    this.deleteVideoSubsByResourceId(resourceId, tx)
+    this.insertVideoSubs(items, tx)
+  }
+
   static updateVideoPlaybackProgress(resourceId: string, lastPlayFile: string, lastPlayTime: number, tx?: DbExecutor) {
     const executor = tx ?? db
     executor
@@ -960,7 +988,9 @@ export class DatabaseService {
       .onConflictDoUpdate({
         target: websiteMeta.resourceId,
         set: {
+          url: metaData.url ?? null,
           favicon: metaData.favicon ?? null,
+          isDownloadLink: metaData.isDownloadLink ?? false,
         }
       })
       .run()
@@ -1215,9 +1245,11 @@ export class DatabaseService {
           singleImageMeta: true,
           multiImageMeta: true,
           videoMeta: true,
+          videoSubs: true,
           asmrMeta: true,
           audioMeta: true,
           novelMeta: true,
+          websiteMeta: true,
           actors: true,
           stores: {
             with: {
@@ -1252,6 +1284,7 @@ export class DatabaseService {
         ? item.logs.some((logItem) => !logItem.isDeleted && !logItem.endTime)
         : false,
       actors: item.actors,
+      videoSubs: item.videoSubs,
       tags: item.tags.map((tagItem) => tagItem.tag),
       types: item.types.map((typeItem) => typeItem.type),
       authors: item.authors.map((authorItem) => authorItem.author)
@@ -1298,7 +1331,14 @@ export class DatabaseService {
       fileName: resource.fileName,
       missingStatus: resource.missingStatus,
     }).from(resource)
-      .where(eq(resource.isDeleted, false))
+      .where(and(
+        eq(resource.isDeleted, false),
+        sql`not exists (
+          select 1
+          from ${websiteMeta}
+          where ${websiteMeta.resourceId} = ${resource.id}
+        )`
+      ))
   }
 
   static async getDictTypeByName(name: string) {

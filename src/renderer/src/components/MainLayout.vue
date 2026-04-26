@@ -339,6 +339,7 @@ const handleClearAllNotifications = () => {
               :playlist="audioPlayerStore.playlist.value"
               :initial-path="audioPlayerStore.initialPath.value"
               :initial-time="audioPlayerStore.initialTime.value"
+              :resume-restart-threshold="audioPlayerStore.audioResumeRestartThreshold.value"
               :cover-src="audioPlayerStore.coverSrc.value"
               :title="audioPlayerStore.title.value"
               :artist="audioPlayerStore.artist.value"

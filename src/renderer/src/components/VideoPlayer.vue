@@ -36,15 +36,19 @@ const props = withDefaults(defineProps<{
   playlist: VideoTrack[]
   initialPath?: string
   initialTime?: number
+  resumeRestartThreshold?: number
   title?: string
 }>(), {
   initialPath: '',
   initialTime: 0,
+  resumeRestartThreshold: 95,
   title: ''
 })
 
 const emit = defineEmits<{
   (event: 'update:show', value: boolean): void
+  (event: 'update:playlist', value: VideoTrack[]): void
+  (event: 'progress-persisted', value: { resourceId: string; filePath: string; playbackTime: number }): void
 }>()
 
 const videoRef = ref<HTMLVideoElement | null>(null)
@@ -62,6 +66,10 @@ const isMuted = ref(false)
 const isPlaying = ref(false)
 const isLoading = ref(false)
 const isFullscreen = ref(false)
+const isCurrentSourceTranscoded = ref(false)
+const playbackTimeOffset = ref(0)
+const seekPreviewTime = ref<number | null>(null)
+const orderedPlaylist = ref<VideoTrack[]>([])
 const showPlaylist = ref(true)
 const showPlaybackRateMenu = ref(false)
 const fullscreenControlsVisible = ref(true)
@@ -69,11 +77,16 @@ const playbackRate = ref(1)
 const screenshotShortcut = ref(String(Settings.SHORTCUT_PRINT_SCREEN.default ?? 'f11'))
 const captureToast = ref('')
 const manualSubtitlePaths = ref<Record<string, string>>({})
+const draggingTrackIndex = ref<number | null>(null)
+const dragOverTrackIndex = ref<number | null>(null)
+const dragOverPosition = ref<'before' | 'after' | null>(null)
 let loadRequestId = 0
 let pendingStartTime = 0
 let pendingAutoplay = false
+let suppressPlaylistReload = false
 let fullscreenControlsTimer: number | null = null
 let captureToastTimer: number | null = null
+let seekPreviewTimer: number | null = null
 let playbackSessionResourceId = ''
 let removeVideoFrameCaptureShortcutListener: (() => void) | null = null
 
@@ -88,7 +101,7 @@ const playbackRateOptions = [
 ]
 
 const normalizedPlaylist = computed(() =>
-  props.playlist
+  orderedPlaylist.value
     .map((track) => ({
       ...track,
       path: String(track.path ?? '').trim(),
@@ -97,11 +110,12 @@ const normalizedPlaylist = computed(() =>
     .filter((track) => track.path)
 )
 const currentTrack = computed(() => normalizedPlaylist.value[currentIndex.value] ?? null)
+const displayCurrentTime = computed(() => seekPreviewTime.value ?? currentTime.value)
 const displayTitle = computed(() =>
   String(currentTrack.value?.resourceTitle ?? currentTrack.value?.label ?? props.title ?? '').trim() || '视频播放'
 )
 const currentSubtitleText = computed(() => {
-  const time = currentTime.value
+  const time = displayCurrentTime.value
   const cue = subtitleCueList.value.find((item) => time >= item.start && time <= item.end)
   return cue?.text ?? ''
 })
@@ -113,6 +127,121 @@ const shouldHideFullscreenControls = computed(() =>
 
 const getFileName = (filePath?: string) => String(filePath ?? '').replace(/\\/g, '/').split('/').pop() || '视频'
 
+const syncOrderedPlaylist = (playlist: VideoTrack[]) => {
+  const nextPlaylist = Array.isArray(playlist)
+    ? playlist
+      .map((track) => ({ ...track }))
+      .filter((track) => String(track?.path ?? '').trim())
+    : []
+
+  const activeTrackPath = String(currentTrack.value?.path ?? '').trim()
+  orderedPlaylist.value = nextPlaylist
+
+  if (!nextPlaylist.length) {
+    currentIndex.value = 0
+    return
+  }
+
+  const preservedIndex = activeTrackPath
+    ? nextPlaylist.findIndex((track) => String(track?.path ?? '').trim() === activeTrackPath)
+    : -1
+
+  if (preservedIndex >= 0) {
+    currentIndex.value = preservedIndex
+    return
+  }
+
+  const initialIndex = nextPlaylist.findIndex((track) => String(track?.path ?? '').trim() === String(props.initialPath ?? '').trim())
+  currentIndex.value = initialIndex >= 0 ? initialIndex : 0
+}
+
+const clearDragState = () => {
+  draggingTrackIndex.value = null
+  dragOverTrackIndex.value = null
+  dragOverPosition.value = null
+}
+
+const resolveDragPosition = (event: DragEvent) => {
+  const currentTarget = event.currentTarget
+  if (!(currentTarget instanceof HTMLElement)) {
+    return 'after' as const
+  }
+
+  const rect = currentTarget.getBoundingClientRect()
+  return event.clientY < rect.top + rect.height / 2 ? 'before' as const : 'after' as const
+}
+
+const reorderPlaylist = (fromIndex: number, targetIndex: number, position: 'before' | 'after') => {
+  if (fromIndex < 0 || targetIndex < 0 || fromIndex >= normalizedPlaylist.value.length || targetIndex >= normalizedPlaylist.value.length) {
+    clearDragState()
+    return
+  }
+
+  let insertIndex = position === 'after' ? targetIndex + 1 : targetIndex
+  if (fromIndex < insertIndex) {
+    insertIndex -= 1
+  }
+
+  if (insertIndex === fromIndex) {
+    clearDragState()
+    return
+  }
+
+  const nextPlaylist = [...orderedPlaylist.value]
+  const [movedTrack] = nextPlaylist.splice(fromIndex, 1)
+  nextPlaylist.splice(insertIndex, 0, movedTrack)
+  const activeTrackPath = String(currentTrack.value?.path ?? '').trim()
+
+  orderedPlaylist.value = nextPlaylist
+
+  if (activeTrackPath) {
+    const nextCurrentIndex = nextPlaylist.findIndex((track) => String(track?.path ?? '').trim() === activeTrackPath)
+    currentIndex.value = nextCurrentIndex >= 0 ? nextCurrentIndex : Math.max(0, Math.min(insertIndex, nextPlaylist.length - 1))
+  } else {
+    currentIndex.value = Math.max(0, Math.min(insertIndex, nextPlaylist.length - 1))
+  }
+
+  suppressPlaylistReload = true
+  emit('update:playlist', nextPlaylist.map((track) => ({ ...track })))
+  clearDragState()
+}
+
+const handleTrackDragStart = (index: number, event: DragEvent) => {
+  draggingTrackIndex.value = index
+  dragOverTrackIndex.value = index
+  dragOverPosition.value = 'after'
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(index))
+  }
+}
+
+const handleTrackDragOver = (index: number, event: DragEvent) => {
+  if (draggingTrackIndex.value === null) {
+    return
+  }
+
+  event.preventDefault()
+  dragOverTrackIndex.value = index
+  dragOverPosition.value = resolveDragPosition(event)
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move'
+  }
+}
+
+const handleTrackDrop = (index: number, event: DragEvent) => {
+  if (draggingTrackIndex.value === null) {
+    return
+  }
+
+  event.preventDefault()
+  reorderPlaylist(draggingTrackIndex.value, index, resolveDragPosition(event))
+}
+
+const handleTrackDragEnd = () => {
+  clearDragState()
+}
+
 const formatTime = (value?: number | null) => {
   const seconds = Math.max(0, Math.floor(Number(value ?? 0)))
   const hours = Math.floor(seconds / 3600)
@@ -121,6 +250,17 @@ const formatTime = (value?: number | null) => {
   const paddedMinutes = String(minutes).padStart(2, '0')
   const paddedSeconds = String(remainSeconds).padStart(2, '0')
   return hours > 0 ? `${hours}:${paddedMinutes}:${paddedSeconds}` : `${minutes}:${paddedSeconds}`
+}
+
+const normalizeResumeTime = (resumeTime: number, mediaDuration: number) => {
+  const normalizedResumeTime = Math.max(0, Number(resumeTime ?? 0))
+  const normalizedDuration = Math.max(0, Number(mediaDuration ?? 0))
+  const thresholdPercent = Math.max(0, Math.min(100, Number(props.resumeRestartThreshold ?? 95)))
+  if (!normalizedDuration) {
+    return normalizedResumeTime
+  }
+
+  return normalizedResumeTime / normalizedDuration >= thresholdPercent / 100 ? 0 : normalizedResumeTime
 }
 
 const timestampToSeconds = (value: string): number | null => {
@@ -248,8 +388,16 @@ const persistCurrentProgress = async () => {
     return
   }
 
-  const playbackTime = Math.max(0, Math.floor(videoRef.value?.currentTime ?? currentTime.value ?? 0))
+  const playbackTime = Math.max(
+    0,
+    Math.floor(isCurrentSourceTranscoded.value ? currentTime.value : (videoRef.value?.currentTime ?? currentTime.value ?? 0))
+  )
   await window.api.service.updateVideoPlaybackProgress(resourceId, filePath, playbackTime)
+  emit('progress-persisted', {
+    resourceId,
+    filePath,
+    playbackTime
+  })
 }
 
 const stopPlaybackSession = async (resourceId = playbackSessionResourceId) => {
@@ -315,25 +463,55 @@ const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
   sourceUrl.value = ''
   errorMessage.value = ''
   currentTime.value = 0
+  seekPreviewTime.value = null
   duration.value = 0
   isLoading.value = true
   isPlaying.value = false
+  isCurrentSourceTranscoded.value = false
+  playbackTimeOffset.value = 0
   pendingStartTime = Math.max(0, Number(startTime ?? 0))
   pendingAutoplay = autoplay
 
-  const fileUrl = await window.api.dialog.getFileUrl(nextPath)
+  const requestedStartTime = Math.max(0, Number(startTime ?? 0))
+  let playbackUrl = await window.api.dialog.getVideoPlaybackUrl(nextPath, requestedStartTime)
   if (requestId !== loadRequestId) {
     return
   }
 
-  if (!fileUrl) {
+  if (!playbackUrl?.url) {
     errorMessage.value = '视频文件不存在或无法读取'
     isLoading.value = false
     await loadSubtitleForTrack(playlist[nextIndex], requestId)
     return
   }
 
-  sourceUrl.value = fileUrl
+  const normalizedStartTime = normalizeResumeTime(
+    requestedStartTime,
+    Math.max(0, Number(playbackUrl.duration ?? 0))
+  )
+  if (playbackUrl.transcoded && normalizedStartTime !== requestedStartTime) {
+    playbackUrl = await window.api.dialog.getVideoPlaybackUrl(nextPath, normalizedStartTime)
+    if (requestId !== loadRequestId) {
+      return
+    }
+    if (!playbackUrl?.url) {
+      errorMessage.value = '视频文件不存在或无法读取'
+      isLoading.value = false
+      await loadSubtitleForTrack(playlist[nextIndex], requestId)
+      return
+    }
+  }
+
+  isCurrentSourceTranscoded.value = Boolean(playbackUrl.transcoded)
+  playbackTimeOffset.value = playbackUrl.transcoded ? normalizedStartTime : 0
+  duration.value = Math.max(0, Number(playbackUrl.duration ?? 0))
+  if (playbackUrl.transcoded) {
+    currentTime.value = playbackTimeOffset.value
+    pendingStartTime = 0
+  } else {
+    pendingStartTime = normalizedStartTime
+  }
+  sourceUrl.value = playbackUrl.url
   await loadSubtitleForTrack(playlist[nextIndex], requestId)
   await nextTick()
 
@@ -368,10 +546,14 @@ const applyPendingStartTime = () => {
     return
   }
 
+  if (isCurrentSourceTranscoded.value) {
+    currentTime.value = playbackTimeOffset.value
+    pendingStartTime = 0
+    return
+  }
+
   const mediaDuration = Math.max(0, Number(video.duration ?? duration.value ?? 0))
-  const nextStartTime = pendingStartTime > 0 && (!mediaDuration || pendingStartTime < mediaDuration - 1)
-    ? pendingStartTime
-    : 0
+  const nextStartTime = normalizeResumeTime(pendingStartTime, mediaDuration)
 
   if (nextStartTime > 0) {
     try {
@@ -422,22 +604,71 @@ const togglePlayback = async () => {
 
 const seekTo = (value: number) => {
   const video = videoRef.value
+  const absoluteDuration = duration.value || video?.duration || 0
+  const nextTime = Math.max(0, Math.min(Number(value ?? 0), Math.max(absoluteDuration, 0)))
+  seekPreviewTime.value = nextTime
+
   if (!video) {
     return
   }
 
-  const nextTime = Math.max(0, Math.min(Number(value ?? 0), duration.value || video.duration || 0))
-  video.currentTime = nextTime
-  currentTime.value = nextTime
+  if (!isCurrentSourceTranscoded.value) {
+    const localTargetTime = Math.max(0, nextTime - playbackTimeOffset.value)
+    video.currentTime = localTargetTime
+    currentTime.value = nextTime
+    return
+  }
+
+  if (seekPreviewTimer) {
+    window.clearTimeout(seekPreviewTimer)
+  }
+
+  seekPreviewTimer = window.setTimeout(() => {
+    seekPreviewTimer = null
+    void commitSeek(nextTime, true)
+  }, 180)
 }
 
-const seekBy = (delta: number) => {
-  seekTo((videoRef.value?.currentTime ?? currentTime.value) + delta)
+const commitSeek = async (value: number, keepPreviewTime = false) => {
+  const video = videoRef.value
+  if (seekPreviewTimer) {
+    window.clearTimeout(seekPreviewTimer)
+    seekPreviewTimer = null
+  }
+
+  if (!video) {
+    seekPreviewTime.value = null
+    return
+  }
+
+  const absoluteDuration = duration.value || video.duration || 0
+  const nextTime = Math.max(0, Math.min(Number(value ?? 0), absoluteDuration))
+  seekPreviewTime.value = nextTime
+
+  if (isCurrentSourceTranscoded.value) {
+    const shouldAutoplay = isPlaying.value
+    await syncTrack(currentIndex.value, shouldAutoplay, nextTime)
+    if (!keepPreviewTime) {
+      seekPreviewTime.value = null
+    }
+    return
+  }
+
+  const localTargetTime = Math.max(0, nextTime - playbackTimeOffset.value)
+  video.currentTime = localTargetTime
+  currentTime.value = nextTime
+  if (!keepPreviewTime) {
+    seekPreviewTime.value = null
+  }
+}
+
+const seekBy = async (delta: number) => {
+  await commitSeek(displayCurrentTime.value + delta)
 }
 
 const goPrevious = async () => {
   if (!canPrevious.value) {
-    seekTo(0)
+    await commitSeek(0)
     return
   }
   await syncTrack(currentIndex.value - 1, true, 0)
@@ -638,9 +869,16 @@ const isShortcutMatched = (event: KeyboardEvent, shortcut: string) => {
 
 const handleLoadedMetadata = () => {
   const video = videoRef.value
-  duration.value = Math.max(0, Number(video?.duration ?? 0))
+  const mediaDuration = Math.max(0, Number(video?.duration ?? 0))
+  if (!(duration.value > 0)) {
+    duration.value = isCurrentSourceTranscoded.value
+      ? Math.max(playbackTimeOffset.value, mediaDuration + playbackTimeOffset.value)
+      : mediaDuration
+  }
   applyPendingStartTime()
   isLoading.value = false
+  errorMessage.value = ''
+  seekPreviewTime.value = null
 
   if (pendingAutoplay) {
     pendingAutoplay = false
@@ -649,11 +887,17 @@ const handleLoadedMetadata = () => {
 }
 
 const handleTimeUpdate = () => {
-  currentTime.value = Math.max(0, Number(videoRef.value?.currentTime ?? 0))
+  if (seekPreviewTime.value !== null) {
+    return
+  }
+
+  const localTime = Math.max(0, Number(videoRef.value?.currentTime ?? 0))
+  currentTime.value = isCurrentSourceTranscoded.value ? playbackTimeOffset.value + localTime : localTime
 }
 
 const handlePlay = () => {
   isPlaying.value = true
+  errorMessage.value = ''
   void startCurrentPlaybackSession()
 }
 
@@ -666,6 +910,12 @@ const handleEnded = () => {
 }
 
 const handleVideoError = () => {
+  const isStartupPhase = isLoading.value && !isPlaying.value && currentTime.value <= playbackTimeOffset.value + 1
+  if (isStartupPhase) {
+    errorMessage.value = ''
+    return
+  }
+
   isLoading.value = false
   errorMessage.value = '视频加载失败'
 }
@@ -727,17 +977,26 @@ watch(() => props.show, (visible) => {
   }
 })
 
-watch(() => props.playlist, () => {
+watch(() => props.playlist, (playlist) => {
+  syncOrderedPlaylist(playlist)
+  if (suppressPlaylistReload) {
+    suppressPlaylistReload = false
+    return
+  }
   if (props.show) {
     void initializePlayer()
   }
-})
+}, { deep: true, immediate: true })
 
 onBeforeUnmount(() => {
   void finalizePlaybackSession()
   clearFullscreenControlsTimer()
   removeVideoFrameCaptureShortcutListener?.()
   removeVideoFrameCaptureShortcutListener = null
+  if (seekPreviewTimer) {
+    window.clearTimeout(seekPreviewTimer)
+    seekPreviewTimer = null
+  }
   if (captureToastTimer) {
     window.clearTimeout(captureToastTimer)
     captureToastTimer = null
@@ -767,7 +1026,7 @@ onBeforeUnmount(() => {
       <div class="video-player__header">
         <div class="video-player__title">
           <span>{{ displayTitle }}</span>
-          <span class="video-player__time">{{ formatTime(currentTime) }} / {{ formatTime(duration) }}</span>
+          <span class="video-player__time">{{ formatTime(displayCurrentTime) }} / {{ formatTime(duration) }}</span>
         </div>
         <div class="video-player__header-actions">
           <n-button quaternary circle @click="closePlayer">
@@ -808,8 +1067,18 @@ onBeforeUnmount(() => {
               :key="track.path"
               type="button"
               class="video-player__track"
-              :class="{ 'video-player__track--active': index === currentIndex }"
+              :class="{
+                'video-player__track--active': index === currentIndex,
+                'video-player__track--dragging': index === draggingTrackIndex,
+                'video-player__track--drop-before': index === dragOverTrackIndex && dragOverPosition === 'before' && index !== draggingTrackIndex,
+                'video-player__track--drop-after': index === dragOverTrackIndex && dragOverPosition === 'after' && index !== draggingTrackIndex
+              }"
+              draggable="true"
               @click="syncTrack(index, true)"
+              @dragstart="handleTrackDragStart(index, $event)"
+              @dragover="handleTrackDragOver(index, $event)"
+              @drop="handleTrackDrop(index, $event)"
+              @dragend="handleTrackDragEnd"
             >
               <img v-if="track.coverSrc" :src="track.coverSrc" alt="" class="video-player__track-cover" draggable="false" />
               <div v-else class="video-player__track-cover video-player__track-cover--empty">VIDEO</div>
@@ -824,11 +1093,12 @@ onBeforeUnmount(() => {
 
       <div class="video-player__footer">
         <n-slider
-          :value="currentTime"
+          :value="displayCurrentTime"
           :max="Math.max(duration, 1)"
           :step="0.1"
           :format-tooltip="(value: number) => formatTime(value)"
           @update:value="seekTo"
+          @change="commitSeek"
         />
         <div class="video-player__controls">
           <div class="video-player__control-group">
@@ -1135,12 +1405,38 @@ onBeforeUnmount(() => {
   color: inherit;
   text-align: left;
   cursor: pointer;
+  position: relative;
+  transition: background-color 0.18s ease, border-color 0.18s ease, opacity 0.18s ease;
 }
 
 .video-player__track:hover,
 .video-player__track--active {
   border-color: rgba(94, 234, 212, 0.45);
   background: rgba(94, 234, 212, 0.08);
+}
+
+.video-player__track--dragging {
+  opacity: 0.48;
+}
+
+.video-player__track--drop-before::before,
+.video-player__track--drop-after::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  height: 2px;
+  border-radius: 999px;
+  background: rgb(94, 234, 212);
+  box-shadow: 0 0 0 1px rgba(94, 234, 212, 0.18);
+}
+
+.video-player__track--drop-before::before {
+  top: -2px;
+}
+
+.video-player__track--drop-after::after {
+  bottom: -2px;
 }
 
 .video-player__track-cover {

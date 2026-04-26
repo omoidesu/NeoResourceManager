@@ -1,7 +1,8 @@
 import {DatabaseService} from './database.service'
-import {ResourceForm, ResourceMeta} from "../model/models";
+import {FetchResourceInfoResult, ResourceForm, ResourceMeta} from "../model/models";
 import {generateId} from "../util/id-generator"
-import {DictType, ResourceLaunchMode, Settings} from '../../common/constants'
+import {DictType, ResourceLaunchMode, Settings, WEBSITE_DIRECT_DOWNLOAD_EXTENSIONS} from '../../common/constants'
+import { BrowserWindow } from 'electron'
 import path from 'path'
 import sharp from "sharp";
 import {db} from '../db'
@@ -18,6 +19,7 @@ import { detectGameLaunchFile } from '../util/game-launch-file-detector'
 import { analyzeNovelFile } from '../util/novel-file-analyzer'
 import { parseFile } from 'music-metadata'
 import { execFile } from 'child_process'
+import crypto from 'crypto'
 
 const fs = require('fs-extra')
 const hidefile = require('hidefile')
@@ -32,9 +34,345 @@ const VIDEO_FIXED_COVER_FRAME_TIMES = [
   { label: '20 分钟', time: 20 * 60 },
   { label: '30 分钟', time: 30 * 60 },
 ]
+const WEBSITE_COVER_CAPTURE_WIDTH = 1440
+const WEBSITE_COVER_CAPTURE_HEIGHT = 900
+const WEBSITE_COVER_CAPTURE_TIMEOUT_MS = 20000
+const WEBSITE_COVER_STABILIZE_DELAY_MS = 1800
+const WEBSITE_DIRECT_DOWNLOAD_EXTENSION_SET = new Set(WEBSITE_DIRECT_DOWNLOAD_EXTENSIONS)
 
 export class ResourceService {
   static readonly logger = createLogger('ResourceService')
+  static normalizeVideoSubPath(targetPath: string) {
+    return String(targetPath ?? '').replace(/\\/g, '/').trim()
+  }
+
+  static compareVideoSubText(left: string, right: string) {
+    return String(left ?? '').localeCompare(String(right ?? ''), undefined, {
+      numeric: true,
+      sensitivity: 'base'
+    })
+  }
+
+  static getRelativeVideoSubPath(basePath: string, filePath: string) {
+    const normalizedBasePath = ResourceService.normalizeVideoSubPath(basePath).replace(/\/+$/, '')
+    const normalizedFilePath = ResourceService.normalizeVideoSubPath(filePath)
+
+    if (!normalizedBasePath || !normalizedFilePath) {
+      return normalizedFilePath
+    }
+
+    const normalizedBasePathLower = normalizedBasePath.toLowerCase()
+    const normalizedFilePathLower = normalizedFilePath.toLowerCase()
+    const basePrefix = `${normalizedBasePathLower}/`
+
+    if (normalizedFilePathLower === normalizedBasePathLower) {
+      return ''
+    }
+
+    if (!normalizedFilePathLower.startsWith(basePrefix)) {
+      return normalizedFilePath
+    }
+
+    return normalizedFilePath.slice(normalizedBasePath.length + 1)
+  }
+
+  static isVideoFolderCategory(categoryInfo: any) {
+    return getExtendTableName(categoryInfo) === 'video_meta'
+      && String(categoryInfo?.meta?.extra?.resourcePathType ?? '').trim() === 'folder'
+  }
+
+  static isVirtualResourceCategory(categoryInfo: any) {
+    return getExtendTableName(categoryInfo) === 'website_meta'
+  }
+
+  static collectVideoSubItems(nodes: any[], basePath: string) {
+    const items: Array<{ fileName: string; relativePath: string }> = []
+
+    const visit = (entries: any[]) => {
+      for (const entry of entries) {
+        if (!entry) {
+          continue
+        }
+
+        if (entry.kind === 'video' && entry.path) {
+          const relativePath = ResourceService.getRelativeVideoSubPath(basePath, String(entry.path))
+          if (relativePath) {
+            items.push({
+              fileName: String(entry.label ?? path.basename(String(entry.path))),
+              relativePath
+            })
+          }
+        }
+
+        if (Array.isArray(entry.children) && entry.children.length) {
+          visit(entry.children)
+        }
+      }
+    }
+
+    visit(nodes)
+    return items
+  }
+
+  static async buildVideoSubPayload(
+    resourceId: string,
+    basePath: string,
+    existingItems: any[] = []
+  ) {
+    const tree = await DialogService.getDirectoryAudioTree(basePath)
+    const scannedItems = ResourceService.collectVideoSubItems(tree, basePath)
+    const scannedMap = new Map(
+      scannedItems.map((item) => [ResourceService.normalizeVideoSubPath(item.relativePath).toLowerCase(), item] as const)
+    )
+    const preservedItems = [...existingItems]
+      .filter((item) => scannedMap.has(ResourceService.normalizeVideoSubPath(String(item?.relativePath ?? '')).toLowerCase()))
+      .sort((left, right) => {
+        const sortCompare = Number(left?.sortOrder ?? 0) - Number(right?.sortOrder ?? 0)
+        if (sortCompare !== 0) {
+          return sortCompare
+        }
+
+        return ResourceService.compareVideoSubText(String(left?.fileName ?? ''), String(right?.fileName ?? ''))
+      })
+
+    const usedPaths = new Set<string>()
+    const payload: Array<{
+      id: string
+      resourceId: string
+      fileName: string
+      relativePath: string
+      coverPath: string | null
+      sortOrder: number
+      isVisible: boolean
+    }> = []
+
+    for (const existingItem of preservedItems) {
+      const normalizedRelativePath = ResourceService.normalizeVideoSubPath(String(existingItem?.relativePath ?? '')).toLowerCase()
+      const scannedItem = scannedMap.get(normalizedRelativePath)
+      if (!scannedItem) {
+        continue
+      }
+
+      usedPaths.add(normalizedRelativePath)
+      const absoluteFilePath = path.join(basePath, scannedItem.relativePath)
+      payload.push({
+        id: String(existingItem?.id ?? generateId()),
+        resourceId,
+        fileName: scannedItem.fileName,
+        relativePath: scannedItem.relativePath,
+        coverPath: await ensureVideoSubCoverPath(
+          resourceId,
+          absoluteFilePath,
+          scannedItem.relativePath,
+          String(existingItem?.coverPath ?? '').trim()
+        ),
+        sortOrder: payload.length,
+        isVisible: existingItem?.isVisible !== false
+      })
+    }
+
+    for (const scannedItem of scannedItems) {
+      const normalizedRelativePath = ResourceService.normalizeVideoSubPath(scannedItem.relativePath).toLowerCase()
+      if (usedPaths.has(normalizedRelativePath)) {
+        continue
+      }
+
+      usedPaths.add(normalizedRelativePath)
+      const absoluteFilePath = path.join(basePath, scannedItem.relativePath)
+      payload.push({
+        id: generateId(),
+        resourceId,
+        fileName: scannedItem.fileName,
+        relativePath: scannedItem.relativePath,
+        coverPath: await ensureVideoSubCoverPath(resourceId, absoluteFilePath, scannedItem.relativePath),
+        sortOrder: payload.length,
+        isVisible: true
+      })
+    }
+
+    return payload
+  }
+
+  static async syncVideoSubItems(resourceId: string) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    if (!normalizedResourceId) {
+      return {
+        type: 'warning' as const,
+        message: '资源ID无效'
+      }
+    }
+
+    const existingResource = await DatabaseService.getResourceById(normalizedResourceId)
+    if (!existingResource) {
+      return {
+        type: 'warning' as const,
+        message: '资源不存在或已被删除'
+      }
+    }
+
+    const categoryInfo = await DatabaseService.getCategoryById(String(existingResource.categoryId ?? '').trim())
+    if (!ResourceService.isVideoFolderCategory(categoryInfo)) {
+      return {
+        type: 'success' as const,
+        message: '当前资源无需同步番剧目录',
+        data: []
+      }
+    }
+
+    const basePath = String(existingResource.basePath ?? '').trim()
+    if (!basePath) {
+      return {
+        type: 'warning' as const,
+        message: '番剧目录路径无效'
+      }
+    }
+
+    const existingItems = await DatabaseService.getVideoSubsByResourceId(normalizedResourceId)
+    const nextItems = await ResourceService.buildVideoSubPayload(normalizedResourceId, basePath, existingItems)
+
+    db.transaction((tx) => {
+      DatabaseService.replaceVideoSubs(normalizedResourceId, nextItems, tx)
+    })
+
+    return {
+      type: 'success' as const,
+      message: '番剧目录同步成功',
+      data: nextItems
+    }
+  }
+
+  static async updateVideoSubItems(resourceId: string, items: any[]) {
+    const syncResult = await ResourceService.syncVideoSubItems(resourceId)
+    if (syncResult.type === 'warning') {
+      return syncResult
+    }
+
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    const currentItems = Array.isArray(syncResult.data)
+      ? syncResult.data
+      : await DatabaseService.getVideoSubsByResourceId(normalizedResourceId)
+    const currentItemMap = new Map(
+      currentItems.map((item: any) => [ResourceService.normalizeVideoSubPath(String(item?.relativePath ?? '')).toLowerCase(), item] as const)
+    )
+    const submittedItems = Array.isArray(items) ? items : []
+    const consumedPaths = new Set<string>()
+    const nextItems: typeof currentItems = []
+
+    for (const submittedItem of submittedItems) {
+      const normalizedRelativePath = ResourceService.normalizeVideoSubPath(String(submittedItem?.relativePath ?? '')).toLowerCase()
+      const currentItem = currentItemMap.get(normalizedRelativePath)
+      if (!currentItem || consumedPaths.has(normalizedRelativePath)) {
+        continue
+      }
+
+      consumedPaths.add(normalizedRelativePath)
+      nextItems.push({
+        ...currentItem,
+        sortOrder: nextItems.length,
+        isVisible: submittedItem?.isVisible !== false
+      })
+    }
+
+    for (const currentItem of currentItems) {
+      const normalizedRelativePath = ResourceService.normalizeVideoSubPath(String(currentItem?.relativePath ?? '')).toLowerCase()
+      if (consumedPaths.has(normalizedRelativePath)) {
+        continue
+      }
+
+      consumedPaths.add(normalizedRelativePath)
+      nextItems.push({
+        ...currentItem,
+        sortOrder: nextItems.length
+      })
+    }
+
+    db.transaction((tx) => {
+      DatabaseService.replaceVideoSubs(normalizedResourceId, nextItems, tx)
+    })
+
+      return {
+        type: 'success' as const,
+        message: '番剧顺序已更新',
+        data: nextItems
+      }
+    }
+
+  static async extractVideoSubCoverFrames(basePath: string) {
+      const normalizedBasePath = path.normalize(String(basePath ?? '').trim())
+
+      if (!normalizedBasePath) {
+        return {
+          type: 'warning',
+          message: '请先选择番剧目录',
+        }
+      }
+
+      try {
+        const exists = await fs.pathExists(normalizedBasePath)
+        if (!exists) {
+          return {
+            type: 'warning',
+            message: '番剧目录不存在',
+            data: {
+              items: []
+            }
+          }
+        }
+
+        const directoryTree = await DialogService.getDirectoryAudioTree(normalizedBasePath)
+        const scannedItems = ResourceService.collectVideoSubItems(directoryTree, normalizedBasePath)
+        if (!scannedItems.length) {
+          return {
+            type: 'warning',
+            message: '目录中未找到可用的视频文件',
+            data: {
+              items: []
+            }
+          }
+        }
+
+        const items = await Promise.all(scannedItems.map(async (item) => {
+          const videoPath = path.join(normalizedBasePath, item.relativePath)
+          try {
+            const coverCandidates = await extractRandomVideoSubCoverFrameCandidates(videoPath, item.relativePath, 3)
+            return {
+              fileName: item.fileName,
+              relativePath: item.relativePath,
+              coverCandidates
+            }
+          } catch (error) {
+            ResourceService.logger.warn('extractVideoSubCoverFrames candidate failed', {
+              basePath: normalizedBasePath,
+              relativePath: item.relativePath,
+              error: error instanceof Error ? error.message : String(error)
+            })
+            return {
+              fileName: item.fileName,
+              relativePath: item.relativePath,
+              coverCandidates: []
+            }
+          }
+        }))
+
+        return {
+          type: 'success',
+          message: '已生成番剧分集随机帧候选',
+          data: {
+            items
+          }
+        }
+      } catch (error) {
+        ResourceService.logger.error('extractVideoSubCoverFrames', error)
+        return {
+          type: 'error',
+          message: error instanceof Error ? error.message : '生成番剧分集随机帧失败',
+          data: {
+            items: []
+          }
+        }
+      }
+    }
+
   static async detectGameEngine(basePath: string, resourceId?: string | null) {
     const normalizedBasePath = String(basePath ?? '').trim()
     const normalizedResourceId = String(resourceId ?? '').trim()
@@ -793,6 +1131,228 @@ export class ResourceService {
     }
   }
 
+  static async fetchWebsiteInfo(url: string) {
+    const normalizedInputUrl = await resolveWebsiteFetchUrl(url, {
+      probeTimeoutMs: 5000,
+      allowGetFallback: true
+    })
+    if (!normalizedInputUrl) {
+      return {
+        type: 'warning',
+        message: '请先输入合法的网站地址',
+      }
+    }
+
+    try {
+      const data = new FetchResourceInfoResult()
+      let finalUrl = normalizedInputUrl
+      let contentType = ''
+      let contentDisposition = ''
+      let htmlText = ''
+
+      try {
+        const headResponse = await probeWebsiteResponse(normalizedInputUrl, 'head', 5000)
+        finalUrl = getAxiosResponseUrl(headResponse, normalizedInputUrl)
+        contentType = String(headResponse.headers?.['content-type'] ?? '').toLowerCase()
+        contentDisposition = String(headResponse.headers?.['content-disposition'] ?? '')
+      } catch (error) {
+        ResourceService.logger.debug('fetchWebsiteInfo head probe failed', {
+          url: normalizedInputUrl,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+
+      if (
+        isLikelyDirectDownloadUrl(finalUrl)
+        || hasAttachmentContentDisposition(contentDisposition)
+      ) {
+        const fallbackTitle = parseFileNameFromContentDisposition(contentDisposition)
+          || getFileNameFromUrl(finalUrl)
+          || getHostnameLabel(finalUrl)
+
+        data.website = finalUrl
+        data.name = fallbackTitle
+        data.favicon = ''
+        data.isDownloadLink = true
+
+        return {
+          type: 'success',
+          message: '已根据下载链接提取文件名',
+          data,
+        }
+      }
+
+      const htmlPreview = await fetchWebsiteHtmlPreview(normalizedInputUrl, 256 * 1024, 10000)
+      finalUrl = htmlPreview.finalUrl
+      contentType = htmlPreview.contentType
+      contentDisposition = htmlPreview.contentDisposition
+      htmlText = htmlPreview.htmlText
+
+      const fileNameFromHeader = parseFileNameFromContentDisposition(contentDisposition)
+      const fileNameFromUrl = getFileNameFromUrl(finalUrl)
+      const fallbackTitle = fileNameFromHeader || fileNameFromUrl || getHostnameLabel(finalUrl)
+
+      data.website = finalUrl
+
+      if (isHtmlContentType(contentType) || /<html[\s>]/i.test(htmlText)) {
+        data.name = extractHtmlTitle(htmlText) || fallbackTitle
+        data.favicon = extractFaviconUrl(htmlText, finalUrl) || buildFallbackFaviconUrl(finalUrl)
+        data.isDownloadLink = false
+      } else {
+        data.name = fallbackTitle
+        data.favicon = ''
+        data.isDownloadLink = true
+      }
+
+      if (data.favicon && !data.isDownloadLink) {
+        const faviconCacheKey = `website-fetch-${crypto
+          .createHash('sha1')
+          .update(`${finalUrl}::${String(data.favicon)}`)
+          .digest('hex')
+          .slice(0, 16)}`
+        data.favicon = await cacheWebsiteFaviconToCache(String(data.favicon), faviconCacheKey)
+      }
+
+      if (!hasUsefulFetchedData(data) && !data.favicon) {
+        return {
+          type: 'warning',
+          message: '已请求成功，但未获取到可回填的网站信息',
+          data,
+        }
+      }
+
+      return {
+        type: 'success',
+        message: isHtmlContentType(contentType) || /<html[\s>]/i.test(htmlText)
+          ? '已获取网站信息'
+          : '已根据下载链接提取文件名',
+        data,
+      }
+    } catch (error) {
+      ResourceService.logger.error('fetchWebsiteInfo failed', {
+        url: normalizedInputUrl,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return {
+        type: 'error',
+        message: error instanceof Error ? error.message : '获取网站信息失败',
+      }
+    }
+  }
+
+  private static scheduleWebsiteCoverRefresh(resourceId: string) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    if (!normalizedResourceId) {
+      return
+    }
+
+    setImmediate(() => {
+      void ResourceService.refreshWebsiteCover(normalizedResourceId).catch((error) => {
+        ResourceService.logger.warn('refreshWebsiteCover failed', {
+          resourceId: normalizedResourceId,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      })
+    })
+  }
+
+  private static async refreshWebsiteCover(resourceId: string) {
+    const detail = await DatabaseService.getResourceDetailById(resourceId)
+    if (!detail) {
+      return
+    }
+
+    const categoryInfo = await DatabaseService.getCategoryById(String(detail.categoryId ?? '').trim())
+    if (String(categoryInfo?.meta?.extra?.extendTable ?? '').trim() !== 'website_meta') {
+      return
+    }
+
+    const websiteUrl = normalizeWebsiteFetchUrl(String(detail?.websiteMeta?.url ?? detail?.basePath ?? '').trim())
+    if (!websiteUrl) {
+      return
+    }
+
+    const managedCoverPath = await getManagedWebsiteCoverPath(resourceId)
+    const currentCoverPath = String(detail?.coverPath ?? '').trim()
+    const currentCoverIsManaged = isSameManagedWebsiteCoverPath(currentCoverPath, managedCoverPath)
+
+    if (currentCoverPath && !currentCoverIsManaged) {
+      return
+    }
+
+    const probeResult = await inspectWebsiteScreenshotTarget(websiteUrl)
+    if (probeResult.url !== websiteUrl || detail?.websiteMeta?.isDownloadLink !== (probeResult.reason === 'download-url' || probeResult.reason === 'download-response')) {
+      DatabaseService.upsertWebsiteMeta({
+        resourceId,
+        url: String(probeResult.url || websiteUrl).trim() || websiteUrl,
+        favicon: probeResult.reason === 'download-url' || probeResult.reason === 'download-response'
+          ? ''
+          : String(detail?.websiteMeta?.favicon ?? '').trim() || null,
+        isDownloadLink: probeResult.reason === 'download-url' || probeResult.reason === 'download-response'
+      })
+    }
+
+    if (!probeResult.canCapture) {
+      if (currentCoverIsManaged) {
+        await removeManagedWebsiteCover(resourceId)
+        await DatabaseService.updateResource({
+          id: resourceId,
+          coverPath: ''
+        })
+        NotificationQueueService.getInstance().pushResourceStateChanged({
+          resourceId,
+          categoryId: String(detail.categoryId ?? '').trim(),
+          running: false,
+          missingStatus: Boolean(detail.missingStatus),
+          changedAt: Date.now(),
+        })
+      }
+      return
+    }
+
+    const screenshotBuffer = await captureWebsiteCoverBuffer(probeResult.url, resourceId)
+    const coverPath = await writeManagedWebsiteCover(resourceId, screenshotBuffer)
+    const currentFavicon = String(detail?.websiteMeta?.favicon ?? '').trim()
+    let nextFavicon = currentFavicon
+
+    if (!currentFavicon) {
+      try {
+        const htmlPreview = await fetchWebsiteHtmlPreview(probeResult.url, 64 * 1024, 5000)
+        nextFavicon = extractFaviconUrl(htmlPreview.htmlText, htmlPreview.finalUrl)
+          || buildFallbackFaviconUrl(htmlPreview.finalUrl)
+      } catch (error) {
+        ResourceService.logger.debug('refreshWebsiteCover favicon probe failed', {
+          resourceId,
+          url: probeResult.url,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+
+      if (nextFavicon) {
+        nextFavicon = await cacheWebsiteFaviconToCache(nextFavicon, resourceId)
+        DatabaseService.upsertWebsiteMeta({
+          resourceId,
+          url: String(probeResult.url || websiteUrl).trim() || websiteUrl,
+          favicon: nextFavicon || null,
+          isDownloadLink: false
+        })
+      }
+    }
+
+    await DatabaseService.updateResource({
+      id: resourceId,
+      coverPath
+    })
+
+    NotificationQueueService.getInstance().pushResourceStateChanged({
+      resourceId,
+      categoryId: String(detail.categoryId ?? '').trim(),
+      running: false,
+      missingStatus: Boolean(detail.missingStatus),
+      changedAt: Date.now(),
+    })
+  }
+
   static async launchResource(resourceId: string, basePath: string, fileName?: string | null) {
     const launchOptions = await resolveResourceLaunchOptions(resourceId, basePath, fileName ?? undefined)
     const launchResult = await DialogService.launchPath(basePath, fileName ?? undefined, launchOptions)
@@ -1017,6 +1577,22 @@ export class ResourceService {
       return {
         type: 'warning',
         message: '播放进度参数无效'
+      }
+    }
+
+    const normalizedBasePath = path.normalize(String(resource?.basePath ?? '').trim())
+    if (normalizedBasePath) {
+      const resolvedBasePath = path.resolve(normalizedBasePath)
+      const resolvedLastPlayFile = path.resolve(path.normalize(normalizedLastPlayFile))
+      const relativePath = path.relative(resolvedBasePath, resolvedLastPlayFile)
+      const isInsideResourcePath = relativePath === ''
+        || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
+
+      if (!isInsideResourcePath) {
+        return {
+          type: 'warning',
+          message: '播放进度文件不在当前资源目录内'
+        }
       }
     }
 
@@ -1862,6 +2438,16 @@ export class ResourceService {
    */
   static async saveResource(resourceForm: ResourceForm) {
     try {
+      const categoryInfo = await DatabaseService.getCategoryById(resourceForm.categoryId)
+      const normalizedResourceForm = {
+        ...resourceForm,
+        tags: Array.from(new Set(
+          (Array.isArray(resourceForm?.tags) ? resourceForm.tags : [])
+            .map((item) => String(item ?? '').trim())
+            .filter(Boolean)
+        ))
+      }
+
       ResourceService.logger.info('saveResource start', {
         categoryId: resourceForm.categoryId,
         name: String(resourceForm?.name ?? '').trim(),
@@ -1869,17 +2455,14 @@ export class ResourceService {
         coverPath: String(resourceForm?.coverPath ?? '').trim(),
         author: String(resourceForm?.author ?? '').trim(),
         authors: Array.isArray(resourceForm?.authors) ? resourceForm.authors : [],
-        tags: Array.isArray(resourceForm?.tags) ? resourceForm.tags : [],
+        tags: normalizedResourceForm.tags,
         types: Array.isArray(resourceForm?.types) ? resourceForm.types : [],
         meta: resourceForm?.meta ?? {}
       })
-      const pathDealResult = await dealPath(resourceForm.basePath)
-
-      // 获取分类信息
-      const categoryInfo = await DatabaseService.getCategoryById(resourceForm.categoryId)
-      const normalizedMeta = await normalizeResourceMeta(resourceForm.meta, categoryInfo, pathDealResult)
       // 资源id
       const resourceId = generateId()
+      const pathDealResult = await resolveResourcePathInfo(resourceForm, categoryInfo)
+      const normalizedMeta = await normalizeResourceMeta(resourceForm.meta, categoryInfo, pathDealResult, resourceId)
       // 处理封面图
       const realCoverPath = await resolveResourceCoverPath(resourceForm.coverPath, resourceId, categoryInfo, pathDealResult)
 
@@ -1895,13 +2478,13 @@ export class ResourceService {
         fileName: pathDealResult.fileName,
         size: normalizedMeta.resourceSize,
       }
-      const authorPayload = await buildAuthorPayload(resourceId, resourceForm, categoryInfo)
+      const authorPayload = await buildAuthorPayload(resourceId, normalizedResourceForm, categoryInfo)
 
       // 标签与关联表 newTags tagRefs
       const dbTagMap: Map<string, any> = new Map()
       const existingTags = await DatabaseService.getTagByCategoryIdWithName(
-        resourceForm.categoryId,
-        resourceForm.tags
+        normalizedResourceForm.categoryId,
+        normalizedResourceForm.tags
       )
       const existingTagList = existingTags ?? []
 
@@ -1912,7 +2495,7 @@ export class ResourceService {
       const newTags: any[] = []
       const tagRefs: any[] = []
 
-      resourceForm.tags.forEach((tagName) => {
+      normalizedResourceForm.tags.forEach((tagName) => {
         if (dbTagMap.has(tagName)) {
           tagRefs.push({
             resourceId: resourceId,
@@ -1934,8 +2517,8 @@ export class ResourceService {
       // 类型与关联 newTypes typeRefs
       const dbTypeMap: Map<string, any> = new Map()
       const existingTypes = await DatabaseService.getTypeByCategoryIdWithName(
-        resourceForm.categoryId,
-        resourceForm.types
+        normalizedResourceForm.categoryId,
+        normalizedResourceForm.types
       )
       const existingTypeList = existingTypes ?? []
 
@@ -1945,7 +2528,7 @@ export class ResourceService {
       const newTypes: any[] = []
       const typeRefs: any[] = []
 
-      resourceForm.types.forEach((typeName) => {
+      normalizedResourceForm.types.forEach((typeName) => {
         if (dbTypeMap.has(typeName)) {
           typeRefs.push({
             resourceId: resourceId,
@@ -1964,8 +2547,8 @@ export class ResourceService {
         }
       })
 
-      const actorPayload = buildActorPayload(resourceId, resourceForm)
-      const storeWorks = buildStoreWorkPayloads(resourceId, resourceForm, categoryInfo)
+      const actorPayload = buildActorPayload(resourceId, normalizedResourceForm)
+      const storeWorks = buildStoreWorkPayloads(resourceId, normalizedResourceForm, categoryInfo)
 
       let returnMsg: {
         type: 'success' | 'warning'
@@ -2005,6 +2588,21 @@ export class ResourceService {
         syncMeta(tx, categoryInfo, resourceId, withAudioArtistMeta(categoryInfo, normalizedMeta.meta, authorPayload.displayName))
       })
 
+      if (ResourceService.isVirtualResourceCategory(categoryInfo)) {
+        ResourceService.scheduleWebsiteCoverRefresh(resourceId)
+
+        ResourceService.logger.info('saveResource success', {
+          resourceId,
+          categoryId: resourceForm.categoryId,
+          basePath: resource.basePath,
+          fileName: resource.fileName,
+          returnMsg,
+          deferredTasks: ['website-cover-refresh']
+        })
+
+        return returnMsg
+      }
+
       const markerCreated = await writeResourceMarker({
         resourceId,
         basePath: resource.basePath,
@@ -2022,15 +2620,32 @@ export class ResourceService {
       }
 
       // 将新资源添加到资源目录的监听器
-      ResourceWatcher.getInstance().trackResource({
-        id: resourceId,
-        categoryId: resourceForm.categoryId,
-        basePath: resource.basePath,
-        fileName: resource.fileName ?? null,
-        missingStatus: false,
-      })
+      if (!ResourceService.isVirtualResourceCategory(categoryInfo)) {
+        ResourceWatcher.getInstance().trackResource({
+          id: resourceId,
+          categoryId: resourceForm.categoryId,
+          basePath: resource.basePath,
+          fileName: resource.fileName ?? null,
+          missingStatus: false,
+        })
+      }
 
       this.scheduleAsmrDurationRefresh(categoryInfo, resourceId, resource.basePath)
+
+      if (ResourceService.isVideoFolderCategory(categoryInfo)) {
+        try {
+          await ResourceService.syncVideoSubItems(resourceId)
+        } catch (error) {
+          ResourceService.logger.warn('saveResource syncVideoSubItems failed', {
+            resourceId,
+            error: error instanceof Error ? error.message : String(error)
+          })
+        }
+      }
+
+      if (ResourceService.isVirtualResourceCategory(categoryInfo)) {
+        ResourceService.scheduleWebsiteCoverRefresh(resourceId)
+      }
 
       ResourceService.logger.info('saveResource success', {
         resourceId,
@@ -2590,6 +3205,15 @@ export class ResourceService {
       }
     }
 
+    try {
+      await ResourceService.syncVideoSubItems(normalizedResourceId)
+    } catch (error) {
+      ResourceService.logger.warn('getResourceDetail syncVideoSubItems failed', {
+        resourceId: normalizedResourceId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+
     const detail = await DatabaseService.getResourceDetailById(normalizedResourceId)
     if (!detail) {
       return {
@@ -2630,9 +3254,17 @@ export class ResourceService {
     }
 
     try {
-      const pathDealResult = await dealPath(resourceForm.basePath)
       const categoryInfo = await DatabaseService.getCategoryById(resourceForm.categoryId)
-      const normalizedMeta = await normalizeResourceMeta(resourceForm.meta, categoryInfo, pathDealResult)
+      const normalizedResourceForm = {
+        ...resourceForm,
+        tags: Array.from(new Set(
+          (Array.isArray(resourceForm?.tags) ? resourceForm.tags : [])
+            .map((item) => String(item ?? '').trim())
+            .filter(Boolean)
+        ))
+      }
+      const pathDealResult = await resolveResourcePathInfo(resourceForm, categoryInfo)
+      const normalizedMeta = await normalizeResourceMeta(resourceForm.meta, categoryInfo, pathDealResult, normalizedResourceId)
       const currentCoverPath = String(resourceForm.coverPath ?? '').trim()
       const existingCoverPath = String(existingResource.coverPath ?? '').trim()
       const realCoverPath = isSameCoverPath(currentCoverPath, existingCoverPath)
@@ -2651,11 +3283,11 @@ export class ResourceService {
         missingStatus: false,
       }
 
-      const authorPayload = await buildAuthorPayload(normalizedResourceId, resourceForm, categoryInfo)
-      const actorPayload = buildActorPayload(normalizedResourceId, resourceForm)
-      const tagPayload = await buildTagPayload(normalizedResourceId, resourceForm)
-      const typePayload = await buildTypePayload(normalizedResourceId, resourceForm)
-      const storeWorks = buildStoreWorkPayloads(normalizedResourceId, resourceForm, categoryInfo)
+      const authorPayload = await buildAuthorPayload(normalizedResourceId, normalizedResourceForm, categoryInfo)
+      const actorPayload = buildActorPayload(normalizedResourceId, normalizedResourceForm)
+      const tagPayload = await buildTagPayload(normalizedResourceId, normalizedResourceForm)
+      const typePayload = await buildTypePayload(normalizedResourceId, normalizedResourceForm)
+      const storeWorks = buildStoreWorkPayloads(normalizedResourceId, normalizedResourceForm, categoryInfo)
 
       db.transaction((tx) => {
         DatabaseService.updateResource(resourceData, tx)
@@ -2697,13 +3329,15 @@ export class ResourceService {
       })
 
       await ResourceWatcher.getInstance().untrackResource(normalizedResourceId)
-      ResourceWatcher.getInstance().trackResource({
-        id: normalizedResourceId,
-        categoryId: resourceForm.categoryId,
-        basePath: resourceData.basePath,
-        fileName: resourceData.fileName ?? null,
-        missingStatus: false,
-      })
+      if (!ResourceService.isVirtualResourceCategory(categoryInfo)) {
+        ResourceWatcher.getInstance().trackResource({
+          id: normalizedResourceId,
+          categoryId: resourceForm.categoryId,
+          basePath: resourceData.basePath,
+          fileName: resourceData.fileName ?? null,
+          missingStatus: false,
+        })
+      }
 
       if (!options?.silent) {
         NotificationQueueService.getInstance().pushResourceStateChanged({
@@ -2716,6 +3350,21 @@ export class ResourceService {
       }
 
       this.scheduleAsmrDurationRefresh(categoryInfo, normalizedResourceId, resourceData.basePath)
+
+      if (ResourceService.isVideoFolderCategory(categoryInfo)) {
+        try {
+          await ResourceService.syncVideoSubItems(normalizedResourceId)
+        } catch (error) {
+          ResourceService.logger.warn('updateResource syncVideoSubItems failed', {
+            resourceId: normalizedResourceId,
+            error: error instanceof Error ? error.message : String(error)
+          })
+        }
+      }
+
+      if (ResourceService.isVirtualResourceCategory(categoryInfo)) {
+        ResourceService.scheduleWebsiteCoverRefresh(normalizedResourceId)
+      }
 
       return {
         type: 'success',
@@ -2798,6 +3447,8 @@ function hasUsefulFetchedData(data: Partial<{
   publisher: string
   year: number | null
   cover: string
+  website: string
+  favicon: string
   tag: string[]
   type: string[]
 }> | null | undefined) {
@@ -2813,14 +3464,532 @@ function hasUsefulFetchedData(data: Partial<{
     || String(data.publisher ?? '').trim()
     || Number.isFinite(Number(data.year))
     || String(data.cover ?? '').trim()
+    || String(data.website ?? '').trim()
+    || String(data.favicon ?? '').trim()
     || (Array.isArray(data.tag) && data.tag.length)
     || (Array.isArray(data.type) && data.type.length)
   )
 }
 
+function normalizeWebsiteFetchUrl(input: string, defaultScheme: 'http' | 'https' = 'https') {
+  const normalizedInput = String(input ?? '').trim()
+  if (!normalizedInput) {
+    return ''
+  }
+
+  const valueWithScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(normalizedInput)
+    ? normalizedInput
+    : `${defaultScheme}://${normalizedInput}`
+
+  try {
+    const parsedUrl = new URL(valueWithScheme)
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+      return ''
+    }
+
+    return parsedUrl.toString()
+  } catch {
+    return ''
+  }
+}
+
+function buildWebsiteFetchCandidates(input: string) {
+  const normalizedInput = String(input ?? '').trim()
+  if (!normalizedInput) {
+    return []
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(normalizedInput)) {
+    const normalizedUrl = normalizeWebsiteFetchUrl(normalizedInput)
+    return normalizedUrl ? [normalizedUrl] : []
+  }
+
+  return Array.from(new Set([
+    normalizeWebsiteFetchUrl(normalizedInput, 'https'),
+    normalizeWebsiteFetchUrl(normalizedInput, 'http'),
+  ].filter(Boolean)))
+}
+
+async function resolveWebsiteFetchUrl(
+  input: string,
+  options?: {
+    probeTimeoutMs?: number
+    allowGetFallback?: boolean
+  }
+) {
+  const candidates = buildWebsiteFetchCandidates(input)
+  if (!candidates.length) {
+    return ''
+  }
+
+  if (candidates.length === 1) {
+    return candidates[0]
+  }
+
+  const probeTimeoutMs = Number(options?.probeTimeoutMs) > 0 ? Number(options?.probeTimeoutMs) : 15000
+  const allowGetFallback = options?.allowGetFallback !== false
+
+  for (const candidate of candidates) {
+    try {
+      const headResponse = await probeWebsiteResponse(candidate, 'head', probeTimeoutMs)
+      return getAxiosResponseUrl(headResponse, candidate)
+    } catch {}
+
+    if (allowGetFallback) {
+      try {
+        const getResponse = await probeWebsiteResponse(candidate, 'get', probeTimeoutMs)
+        return getAxiosResponseUrl(getResponse, candidate)
+      } catch {}
+    }
+  }
+
+  return candidates[0]
+}
+
+function isLocalNetworkHostname(hostname: string) {
+  const normalizedHostname = String(hostname ?? '').trim().toLowerCase()
+  if (!normalizedHostname) {
+    return false
+  }
+
+  if (normalizedHostname === 'localhost' || normalizedHostname.endsWith('.local')) {
+    return true
+  }
+
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(normalizedHostname)) {
+    const segments = normalizedHostname.split('.').map((item) => Number(item))
+    if (segments.some((item) => !Number.isInteger(item) || item < 0 || item > 255)) {
+      return false
+    }
+
+    const [first, second] = segments
+    return first === 10
+      || first === 127
+      || (first === 192 && second === 168)
+      || (first === 172 && second >= 16 && second <= 31)
+      || (first === 169 && second === 254)
+  }
+
+  return normalizedHostname === '::1'
+    || normalizedHostname.startsWith('fc')
+    || normalizedHostname.startsWith('fd')
+    || normalizedHostname.startsWith('fe80:')
+}
+
+function shouldBypassProxyForUrl(targetUrl: string) {
+  const normalizedUrl = String(targetUrl ?? '').trim()
+  if (!normalizedUrl) {
+    return false
+  }
+
+  try {
+    const parsedUrl = new URL(normalizedUrl)
+    return isLocalNetworkHostname(parsedUrl.hostname)
+  } catch {
+    return false
+  }
+}
+
+function isHtmlContentType(contentType: string) {
+  const normalizedContentType = String(contentType ?? '').toLowerCase()
+  return normalizedContentType.includes('text/html') || normalizedContentType.includes('application/xhtml+xml')
+}
+
+function hasAttachmentContentDisposition(contentDisposition: string) {
+  return /attachment/i.test(String(contentDisposition ?? ''))
+}
+
+function isLikelyDirectDownloadUrl(input: string) {
+  const normalizedInput = String(input ?? '').trim()
+  if (!normalizedInput) {
+    return false
+  }
+
+  try {
+    const parsedUrl = new URL(normalizedInput)
+    const pathname = decodeURIComponent(parsedUrl.pathname || '').toLowerCase()
+    const extension = path.extname(pathname)
+    return WEBSITE_DIRECT_DOWNLOAD_EXTENSION_SET.has(extension)
+  } catch {
+    return false
+  }
+}
+
+function isLikelyDownloadLinkByUrlMetadata(input: string) {
+  const normalizedInput = String(input ?? '').trim()
+  if (!normalizedInput) {
+    return false
+  }
+
+  if (isLikelyDirectDownloadUrl(normalizedInput)) {
+    return true
+  }
+
+  try {
+    const parsedUrl = new URL(normalizedInput)
+    const contentDisposition = decodeURIComponent(
+      String(
+        parsedUrl.searchParams.get('response-content-disposition')
+        ?? parsedUrl.searchParams.get('content-disposition')
+        ?? parsedUrl.searchParams.get('rscd')
+        ?? ''
+      )
+    )
+    const responseContentType = String(
+      parsedUrl.searchParams.get('response-content-type')
+      ?? parsedUrl.searchParams.get('rsct')
+      ?? ''
+    ).toLowerCase()
+
+    if (hasAttachmentContentDisposition(contentDisposition) || isLikelyDirectDownloadUrl(contentDisposition)) {
+      return true
+    }
+
+    if (responseContentType && !isHtmlContentType(responseContentType)) {
+      return true
+    }
+  } catch {
+    return false
+  }
+
+  return false
+}
+
+async function probeWebsiteResponse(url: string, method: 'head' | 'get', timeoutMs = 15000) {
+  const requestConfig = {
+    timeout: timeoutMs,
+    maxRedirects: 5,
+    validateStatus: (status: number) => status >= 200 && status < 400,
+    headers: {
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.7',
+      'User-Agent': 'NeoResourceManager/1.0'
+    },
+    ...(await getAxiosProxyConfig(url)),
+  }
+
+  if (method === 'head') {
+    return axios.head(url, requestConfig)
+  }
+
+  return axios.get<NodeJS.ReadableStream>(url, {
+    ...requestConfig,
+    responseType: 'stream',
+    headers: {
+      ...requestConfig.headers,
+      Range: 'bytes=0-0',
+    },
+  })
+}
+
+async function readStreamTextUpTo(stream: NodeJS.ReadableStream, maxBytes: number) {
+  const normalizedMaxBytes = Math.max(1, Number(maxBytes) || 0)
+
+  return await new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let totalBytes = 0
+    let settled = false
+
+    const cleanup = () => {
+      stream.removeListener('data', handleData)
+      stream.removeListener('end', handleEnd)
+      stream.removeListener('error', handleError)
+    }
+
+    const finish = () => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      cleanup()
+      if (typeof (stream as any).destroy === 'function') {
+        ;(stream as any).destroy()
+      }
+      resolve(Buffer.concat(chunks, totalBytes).toString('utf8'))
+    }
+
+    const handleError = (error: unknown) => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      cleanup()
+      if (typeof (stream as any).destroy === 'function') {
+        ;(stream as any).destroy()
+      }
+      reject(error)
+    }
+
+    const handleEnd = () => {
+      finish()
+    }
+
+    const handleData = (chunk: unknown) => {
+      if (settled) {
+        return
+      }
+
+      let buffer: Buffer
+      if (Buffer.isBuffer(chunk)) {
+        buffer = chunk
+      } else if (ArrayBuffer.isView(chunk)) {
+        buffer = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+      } else if (chunk instanceof ArrayBuffer) {
+        buffer = Buffer.from(chunk)
+      } else {
+        buffer = Buffer.from(String(chunk ?? ''))
+      }
+      const remainingBytes = normalizedMaxBytes - totalBytes
+
+      if (remainingBytes <= 0) {
+        finish()
+        return
+      }
+
+      if (buffer.length > remainingBytes) {
+        chunks.push(buffer.subarray(0, remainingBytes))
+        totalBytes += remainingBytes
+        finish()
+        return
+      }
+
+      chunks.push(buffer)
+      totalBytes += buffer.length
+      if (totalBytes >= normalizedMaxBytes) {
+        finish()
+      }
+    }
+
+    stream.on('data', handleData)
+    stream.once('end', handleEnd)
+    stream.once('error', handleError)
+  })
+}
+
+async function fetchWebsiteHtmlPreview(url: string, maxBytes = 256 * 1024, timeoutMs = 20000) {
+  const response = await axios.get<NodeJS.ReadableStream>(url, {
+    timeout: timeoutMs,
+    maxRedirects: 5,
+    validateStatus: (status) => status >= 200 && status < 400,
+    responseType: 'stream',
+    headers: {
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.7',
+      'User-Agent': 'NeoResourceManager/1.0'
+    },
+    ...(await getAxiosProxyConfig(url)),
+  })
+
+  const finalUrl = getAxiosResponseUrl(response, url)
+  const contentType = String(response.headers?.['content-type'] ?? '').toLowerCase()
+  const contentDisposition = String(response.headers?.['content-disposition'] ?? '')
+  const stream = response.data
+
+  if (
+    isLikelyDirectDownloadUrl(finalUrl)
+    || hasAttachmentContentDisposition(contentDisposition)
+    || !isHtmlContentType(contentType)
+  ) {
+    if (stream && typeof (stream as any).destroy === 'function') {
+      ;(stream as any).destroy()
+    }
+
+    return {
+      finalUrl,
+      contentType,
+      contentDisposition,
+      htmlText: '',
+    }
+  }
+
+  return {
+    finalUrl,
+    contentType,
+    contentDisposition,
+    htmlText: await readStreamTextUpTo(stream, maxBytes),
+  }
+}
+
+async function inspectWebsiteScreenshotTarget(url: string) {
+  const normalizedUrl = normalizeWebsiteFetchUrl(url)
+  if (!normalizedUrl) {
+    return {
+      canCapture: false,
+      url: '',
+      reason: 'invalid-url'
+    }
+  }
+
+  if (isLikelyDirectDownloadUrl(normalizedUrl)) {
+    return {
+      canCapture: false,
+      url: normalizedUrl,
+      reason: 'download-url'
+    }
+  }
+
+  const methods: Array<'head' | 'get'> = ['head', 'get']
+  for (const method of methods) {
+    try {
+      const response = await probeWebsiteResponse(normalizedUrl, method)
+      const finalUrl = getAxiosResponseUrl(response, normalizedUrl)
+      const contentType = String(response.headers?.['content-type'] ?? '').toLowerCase()
+      const contentDisposition = String(response.headers?.['content-disposition'] ?? '')
+
+      if (method === 'get' && response.data && typeof (response.data as any).destroy === 'function') {
+        ;(response.data as any).destroy()
+      }
+
+      if (isLikelyDirectDownloadUrl(finalUrl) || hasAttachmentContentDisposition(contentDisposition)) {
+        return {
+          canCapture: false,
+          url: finalUrl,
+          reason: 'download-response'
+        }
+      }
+
+      if (isHtmlContentType(contentType)) {
+        return {
+          canCapture: true,
+          url: finalUrl,
+          reason: 'html'
+        }
+      }
+    } catch (error) {
+      ResourceService.logger.debug('inspectWebsiteScreenshotTarget probe failed', {
+        url: normalizedUrl,
+        method,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
+  return {
+    canCapture: false,
+    url: normalizedUrl,
+    reason: 'non-html'
+  }
+}
+
+function getAxiosResponseUrl(response: any, fallbackUrl: string) {
+  return String(response?.request?.res?.responseUrl ?? response?.config?.url ?? fallbackUrl).trim() || fallbackUrl
+}
+
+function parseFileNameFromContentDisposition(contentDisposition: unknown) {
+  const normalizedValue = String(contentDisposition ?? '').trim()
+  if (!normalizedValue) {
+    return ''
+  }
+
+  const utf8Match = normalizedValue.match(/filename\*\s*=\s*UTF-8''([^;]+)/i)
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]).trim()
+    } catch {
+      return utf8Match[1].trim()
+    }
+  }
+
+  const plainMatch = normalizedValue.match(/filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;]+)/i)
+  return String(plainMatch?.[1] ?? plainMatch?.[2] ?? '').trim().replace(/^["']|["']$/g, '')
+}
+
+function getFileNameFromUrl(targetUrl: string) {
+  try {
+    const parsedUrl = new URL(targetUrl)
+    const pathName = String(parsedUrl.pathname ?? '').trim()
+    if (!pathName) {
+      return ''
+    }
+
+    const fileName = path.basename(decodeURIComponent(pathName))
+    return fileName === '/' ? '' : fileName.trim()
+  } catch {
+    return ''
+  }
+}
+
+function getHostnameLabel(targetUrl: string) {
+  try {
+    return String(new URL(targetUrl).hostname ?? '').trim()
+  } catch {
+    return ''
+  }
+}
+
+function decodeHtmlEntities(input: string) {
+  return String(input ?? '')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&nbsp;/gi, ' ')
+}
+
+function stripHtmlTags(input: string) {
+  return decodeHtmlEntities(String(input ?? '').replace(/<[^>]+>/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function extractHtmlTitle(htmlText: string) {
+  const match = String(htmlText ?? '').match(/<title[^>]*>([\s\S]*?)<\/title>/i)
+  return stripHtmlTags(match?.[1] ?? '')
+}
+
+function extractFaviconUrl(htmlText: string, pageUrl: string) {
+  const normalizedHtml = String(htmlText ?? '')
+  const linkPattern = /<link\b[^>]*rel=["'][^"']*(?:icon|shortcut icon|apple-touch-icon)[^"']*["'][^>]*>/gi
+  const linkMatches = normalizedHtml.match(linkPattern) ?? []
+
+  for (const linkTag of linkMatches) {
+    const hrefMatch = linkTag.match(/href=["']([^"']+)["']/i)
+    const href = String(hrefMatch?.[1] ?? '').trim()
+    if (!href) {
+      continue
+    }
+
+    try {
+      return new URL(href, pageUrl).toString()
+    } catch {
+      continue
+    }
+  }
+
+  return ''
+}
+
+function buildFallbackFaviconUrl(pageUrl: string) {
+  try {
+    const parsedUrl = new URL(pageUrl)
+    return new URL('/favicon.ico', parsedUrl.origin).toString()
+  } catch {
+    return ''
+  }
+}
+
 type ResourcePathInfo = {
   basePath: string
   fileName: string | null
+}
+
+async function resolveResourcePathInfo(resourceForm: ResourceForm, categoryInfo: any): Promise<ResourcePathInfo> {
+  if (getExtendTableName(categoryInfo) === 'website_meta') {
+    const websiteUrl = normalizeWebsiteFetchUrl(String(resourceForm?.meta?.website ?? '').trim(), 'https')
+    if (!websiteUrl) {
+      throw new Error('网站地址无效')
+    }
+
+    return {
+      basePath: websiteUrl,
+      fileName: null,
+    }
+  }
+
+  return dealPath(resourceForm.basePath)
 }
 
 function getGameSearchRoot(basePath: string) {
@@ -3141,6 +4310,10 @@ async function writeResourceMarker(resource: { resourceId: string; basePath: str
 }
 
 function shouldCreateResourceMarker(categoryInfo: any, pathInfo: ResourcePathInfo, meta: ResourceMeta) {
+  if (getExtendTableName(categoryInfo) === 'website_meta') {
+    return false
+  }
+
   if (getExtendTableName(categoryInfo) !== 'software_meta') {
     return true
   }
@@ -3310,8 +4483,18 @@ async function dealCover(coverPath: string, resourceId: string): Promise<string>
 
   await fs.ensureDir(cachePath)
 
-  const targetPath = path.join(cachePath, `${resourceId}.webp`)
-  const normalizedTargetPath = path.normalize(path.resolve(targetPath))
+  const createTargetPath = () => path.join(cachePath, `${resourceId}-${Date.now()}-${generateId()}.webp`)
+  const writeProcessedCover = async (input: string | Buffer) => {
+    const targetPath = createTargetPath()
+    const tempTargetPath = `${targetPath}.tmp`
+    await sharp(input, { limitInputPixels: MAX_COVER_PROCESS_PIXELS, animated: false })
+      .resize({width: 560, fit: 'contain', background: {r: 0, g: 0, b: 0, alpha: 0}})
+      .webp()
+      .toFile(tempTargetPath)
+
+    await fs.move(tempTargetPath, targetPath, { overwrite: true })
+    return targetPath
+  }
 
   const normalizedCoverPath = normalizeRemoteCoverPath(coverPath)
   const dataUrlMatch = normalizedCoverPath.match(/^data:([^;,]+)?;base64,(.+)$/i)
@@ -3322,12 +4505,7 @@ async function dealCover(coverPath: string, resourceId: string): Promise<string>
         return ''
       }
 
-      await sharp(imageBuffer, { limitInputPixels: MAX_COVER_PROCESS_PIXELS, animated: false })
-        .resize({width: 560, fit: 'contain', background: {r: 0, g: 0, b: 0, alpha: 0}})
-        .webp()
-        .toFile(targetPath)
-
-      return targetPath
+      return await writeProcessedCover(imageBuffer)
     } catch (error) {
       ResourceService.logger.warn('dealCover skipped invalid data url cover', {
         resourceId,
@@ -3339,8 +4517,10 @@ async function dealCover(coverPath: string, resourceId: string): Promise<string>
 
   if (!isRemoteCoverPath(normalizedCoverPath)) {
     const normalizedInputPath = path.normalize(path.resolve(normalizedCoverPath))
-    if (normalizedInputPath.toLowerCase() === normalizedTargetPath.toLowerCase()) {
-      return targetPath
+    const fileName = path.basename(normalizedInputPath)
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    if (fileName.toLowerCase().startsWith(`${normalizedResourceId.toLowerCase()}-`) && fileName.toLowerCase().endsWith('.webp')) {
+      return normalizedInputPath
     }
   }
 
@@ -3356,29 +4536,252 @@ async function dealCover(coverPath: string, resourceId: string): Promise<string>
       return ''
     }
 
-    await sharp(imageBuffer, { limitInputPixels: MAX_COVER_PROCESS_PIXELS, animated: false })
-      .resize({width: 560, fit: 'contain', background: {r: 0, g: 0, b: 0, alpha: 0}})
-      .webp()
-      .toFile(targetPath)
-
-    return targetPath
+    return await writeProcessedCover(imageBuffer)
   }
 
-  const exists = await fs.pathExists(normalizedCoverPath)
+  const normalizedInputPath = path.normalize(path.resolve(normalizedCoverPath))
+  const fileName = path.basename(normalizedInputPath)
+  const normalizedResourceId = String(resourceId ?? '').trim()
+  if (fileName.toLowerCase().startsWith(`${normalizedResourceId.toLowerCase()}-`) && fileName.toLowerCase().endsWith('.webp')) {
+    return normalizedInputPath
+  }
+
+  const exists = await fs.pathExists(normalizedInputPath)
   if (!exists) {
     throw new Error('封面图片不存在')
   }
 
-  if (await isImageTooLargeForCover(normalizedCoverPath)) {
+  if (await isImageTooLargeForCover(normalizedInputPath)) {
     return ''
   }
 
-  await sharp(normalizedCoverPath, { limitInputPixels: MAX_COVER_PROCESS_PIXELS, animated: false })
-    .resize({width: 560, fit: 'contain', background: {r: 0, g: 0, b: 0, alpha: 0}})
-    .webp()
-    .toFile(targetPath)
+  return await writeProcessedCover(normalizedInputPath)
+}
 
-  return targetPath
+async function cacheWebsiteFaviconToCache(faviconPath: string, resourceId: string) {
+  const normalizedFaviconPath = String(faviconPath ?? '').trim()
+  const normalizedResourceId = String(resourceId ?? '').trim()
+  if (!normalizedFaviconPath) {
+    return ''
+  }
+
+  if (!normalizedResourceId) {
+    return normalizedFaviconPath
+  }
+
+  try {
+    return await dealCover(normalizedFaviconPath, `${normalizedResourceId}-favicon`)
+  } catch (error) {
+    if (isRemoteCoverPath(normalizedFaviconPath)) {
+      const fallbackCachedPath = await cacheRawRemoteFaviconAsset(normalizedFaviconPath, normalizedResourceId)
+      if (fallbackCachedPath) {
+        return fallbackCachedPath
+      }
+    }
+
+    ResourceService.logger.warn('cacheWebsiteFaviconToCache skipped invalid favicon', {
+      resourceId: normalizedResourceId,
+      faviconPath: normalizedFaviconPath,
+      error: error instanceof Error ? error.message : String(error)
+    })
+    return normalizedFaviconPath
+  }
+}
+
+async function cacheRawRemoteFaviconAsset(faviconUrl: string, resourceId: string) {
+  try {
+    const cacheRoot = await getCacheRootDirectory()
+    const faviconCacheDirectory = path.join(cacheRoot, 'website-favicons')
+    await fs.ensureDir(faviconCacheDirectory)
+
+    const parsedUrl = new URL(faviconUrl)
+    const pathname = String(parsedUrl.pathname ?? '')
+    const extension = path.extname(pathname).trim().toLowerCase()
+    const safeExtension = extension && extension.length <= 8 ? extension : '.ico'
+    const targetPath = path.join(faviconCacheDirectory, `${resourceId}-${Date.now()}-${generateId()}${safeExtension}`)
+
+    const response = await axios.get<ArrayBuffer>(faviconUrl, {
+      responseType: 'arraybuffer',
+      timeout: 20000,
+      ...(await getAxiosProxyConfig()),
+    })
+
+    await fs.writeFile(targetPath, Buffer.from(response.data))
+    return targetPath
+  } catch (error) {
+    ResourceService.logger.warn('cacheRawRemoteFaviconAsset failed', {
+      resourceId,
+      faviconUrl,
+      error: error instanceof Error ? error.message : String(error)
+    })
+    return ''
+  }
+}
+
+async function getCacheRootDirectory() {
+  const cacheSetting = await DatabaseService.getSetting(Settings.CACHE_PATH)
+  const cacheRoot = String(cacheSetting?.value ?? Settings.CACHE_PATH.default).trim()
+
+  if (!cacheRoot || cacheRoot === '__CACHE_PATH__') {
+    throw new Error('未配置缓存目录')
+  }
+
+  return cacheRoot
+}
+
+async function getManagedWebsiteCoverPath(resourceId: string) {
+  const cacheRoot = await getCacheRootDirectory()
+  return path.join(cacheRoot, 'website-covers', `${String(resourceId ?? '').trim()}.webp`)
+}
+
+function normalizeCoverStoragePath(value: string) {
+  const normalizedValue = String(value ?? '').trim()
+  if (!normalizedValue || /^https?:\/\//i.test(normalizedValue) || /^data:/i.test(normalizedValue)) {
+    return normalizedValue
+  }
+
+  return path.normalize(path.resolve(normalizedValue)).toLowerCase()
+}
+
+function isSameManagedWebsiteCoverPath(currentCoverPath: string, managedCoverPath: string) {
+  const normalizedCurrentCoverPath = normalizeCoverStoragePath(currentCoverPath)
+  const normalizedManagedCoverPath = normalizeCoverStoragePath(managedCoverPath)
+  return Boolean(normalizedCurrentCoverPath) && normalizedCurrentCoverPath === normalizedManagedCoverPath
+}
+
+async function removeManagedWebsiteCover(resourceId: string) {
+  const managedCoverPath = await getManagedWebsiteCoverPath(resourceId)
+  if (await fs.pathExists(managedCoverPath)) {
+    await fs.remove(managedCoverPath)
+  }
+}
+
+async function writeManagedWebsiteCover(resourceId: string, imageBuffer: Buffer) {
+  const outputPath = await getManagedWebsiteCoverPath(resourceId)
+  const outputDirectory = path.dirname(outputPath)
+  const tempPath = `${outputPath}.tmp`
+  await fs.ensureDir(outputDirectory)
+  await sharp(imageBuffer, {
+    limitInputPixels: MAX_COVER_PROCESS_PIXELS,
+    animated: false,
+  })
+    .resize({
+      width: 1280,
+      height: 720,
+      fit: 'cover',
+      position: 'attention'
+    })
+    .webp({ quality: 84 })
+    .toFile(tempPath)
+
+  await fs.move(tempPath, outputPath, { overwrite: true })
+  return outputPath
+}
+
+async function applyWebsiteScreenshotWindowProxy(window: BrowserWindow, targetUrl: string) {
+  const proxyConfig = await getAxiosProxyConfig(targetUrl)
+  const proxy = (proxyConfig as any)?.proxy
+  if (!proxy?.host || !Number.isFinite(Number(proxy.port)) || Number(proxy.port) <= 0) {
+    return
+  }
+
+  await window.webContents.session.setProxy({
+    proxyRules: `${String(proxy.protocol ?? 'http')}://${proxy.host}:${proxy.port}`
+  })
+}
+
+function waitForTimeout(ms: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+async function captureWebsiteCoverBuffer(url: string, resourceId: string) {
+  const partition = `website-cover-${String(resourceId ?? '').trim()}-${Date.now()}`
+  const screenshotWindow = new BrowserWindow({
+    show: false,
+    width: WEBSITE_COVER_CAPTURE_WIDTH,
+    height: WEBSITE_COVER_CAPTURE_HEIGHT,
+    autoHideMenuBar: true,
+    backgroundColor: '#ffffff',
+    paintWhenInitiallyHidden: true,
+    webPreferences: {
+      partition,
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      spellcheck: false,
+    }
+  })
+
+  let downloadBlocked = false
+  const downloadHandler = (event: Electron.Event) => {
+    downloadBlocked = true
+    event.preventDefault()
+  }
+
+  try {
+    await applyWebsiteScreenshotWindowProxy(screenshotWindow, url)
+    screenshotWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    screenshotWindow.webContents.session.on('will-download', downloadHandler)
+    screenshotWindow.webContents.setAudioMuted(true)
+
+    await Promise.race([
+      screenshotWindow.loadURL(url, {
+        userAgent: 'NeoResourceManager/1.0'
+      }),
+      waitForTimeout(WEBSITE_COVER_CAPTURE_TIMEOUT_MS).then(() => {
+        throw new Error('网站封面截图超时')
+      })
+    ])
+
+    if (downloadBlocked) {
+      throw new Error('该链接指向下载内容，已跳过网页封面截图')
+    }
+
+    await screenshotWindow.webContents.insertCSS(`
+html, body {
+  background: #ffffff !important;
+}
+::-webkit-scrollbar {
+  display: none !important;
+}
+[class*="cookie"], [id*="cookie"], [class*="consent"], [id*="consent"], [aria-modal="true"] {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+    `)
+
+    await screenshotWindow.webContents.executeJavaScript(`
+(() => {
+  window.scrollTo(0, 0)
+  const selectors = ['[class*="cookie"]', '[id*="cookie"]', '[class*="consent"]', '[id*="consent"]', '[aria-modal="true"]']
+  for (const selector of selectors) {
+    document.querySelectorAll(selector).forEach((node) => {
+      if (node instanceof HTMLElement) {
+        node.style.display = 'none'
+      }
+    })
+  }
+  return true
+})()
+    `)
+
+    await waitForTimeout(WEBSITE_COVER_STABILIZE_DELAY_MS)
+    const capturedImage = await screenshotWindow.webContents.capturePage()
+    const screenshotBuffer = capturedImage.toPNG()
+
+    if (!screenshotBuffer.length) {
+      throw new Error('网站封面截图为空')
+    }
+
+    return screenshotBuffer
+  } finally {
+    screenshotWindow.webContents.session.removeListener('will-download', downloadHandler)
+    if (!screenshotWindow.isDestroyed()) {
+      screenshotWindow.destroy()
+    }
+  }
 }
 
 async function resolveResourceCoverPath(
@@ -3404,6 +4807,21 @@ async function resolveResourceCoverPath(
     }
   }
 
+  if (extendTableName === 'video_meta' && !String(coverPath ?? '').trim()) {
+    const resolvedVideoPath = getResolvedFilePath(pathInfo)
+    if (resolvedVideoPath) {
+      try {
+        return await ensureVideoCoverPath(resourceId, resolvedVideoPath)
+      } catch (error) {
+        ResourceService.logger.warn('resolveResourceCoverPath skipped default video cover', {
+          resourceId,
+          videoPath: resolvedVideoPath,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+  }
+
   try {
     return await dealCover(coverPath, resourceId)
   } catch (error) {
@@ -3425,7 +4843,8 @@ async function resolveResourceCoverPath(
 async function normalizeResourceMeta(
   meta: ResourceMeta,
   categoryInfo: any,
-  pathInfo: ResourcePathInfo
+  pathInfo: ResourcePathInfo,
+  resourceId?: string
 ) {
   const normalizedMeta: ResourceMeta = {
     ...meta,
@@ -3478,6 +4897,20 @@ async function normalizeResourceMeta(
         normalizedMeta.lyricsPath = await findMatchedLyricsPath(audioPath)
       }
     }
+  }
+
+  if (getExtendTableName(categoryInfo) === 'website_meta') {
+    normalizedMeta.website = String(pathInfo?.basePath ?? '').trim() || normalizeWebsiteFetchUrl(String(normalizedMeta.website ?? '').trim())
+    const websiteTarget = String(normalizedMeta.website ?? '').trim()
+    normalizedMeta.isDownloadLink = Boolean(normalizedMeta.isDownloadLink)
+      || isLikelyDownloadLinkByUrlMetadata(websiteTarget)
+
+    normalizedMeta.favicon = normalizedMeta.isDownloadLink
+      ? ''
+      : await cacheWebsiteFaviconToCache(
+        String(normalizedMeta.favicon ?? '').trim(),
+        String(resourceId ?? '').trim()
+      )
   }
 
   return {
@@ -3992,6 +5425,176 @@ async function extractVideoCoverFrameCandidates(videoPath: string) {
   return candidates
 }
 
+async function extractRandomVideoSubCoverFrameCandidates(videoPath: string, relativePath: string, count: number) {
+  const resolvedFfmpegPath = String(ffmpegPath ?? '').trim()
+  const resolvedFfprobePath = String(ffprobeStatic?.path ?? '').trim()
+
+  if (!resolvedFfmpegPath || !(await fs.pathExists(resolvedFfmpegPath))) {
+    throw new Error('未找到内置 ffmpeg，请重新安装依赖')
+  }
+
+  if (!resolvedFfprobePath || !(await fs.pathExists(resolvedFfprobePath))) {
+    throw new Error('未找到内置 ffprobe，请重新安装依赖')
+  }
+
+  const cacheSetting = await DatabaseService.getSetting(Settings.CACHE_PATH)
+  if (!cacheSetting) {
+    throw new Error('未配置缓存目录')
+  }
+
+  const duration = await readVideoDuration(resolvedFfprobePath, videoPath)
+  const randomFrameTimes = buildVideoFrameTimes(duration, Math.max(1, Math.floor(Number(count ?? 0)) || 3))
+  const relativePathHash = crypto.createHash('sha1').update(String(relativePath ?? '').trim() || videoPath).digest('hex')
+  const candidateDir = path.join(cacheSetting.value, 'video-sub-cover-frames', relativePathHash, generateId())
+  await fs.ensureDir(candidateDir)
+
+  const candidates: Array<{ label: string; coverPath: string; time: number; group: 'random' }> = []
+
+  for (let index = 0; index < randomFrameTimes.length; index += 1) {
+    const time = randomFrameTimes[index]
+    const coverPath = path.join(candidateDir, `random-frame-${String(index + 1).padStart(2, '0')}.jpg`)
+
+    await execFileChecked(
+      resolvedFfmpegPath,
+      [
+        '-y',
+        '-ss',
+        formatSecondsForFfmpeg(time),
+        '-i',
+        videoPath,
+        '-frames:v',
+        '1',
+        '-vf',
+        'scale=960:-1:force_original_aspect_ratio=decrease',
+        '-q:v',
+        '3',
+        coverPath
+      ],
+      45000
+    )
+
+    if (await fs.pathExists(coverPath)) {
+      candidates.push({
+        label: `随机帧 ${index + 1}`,
+        coverPath,
+        time,
+        group: 'random'
+      })
+    }
+  }
+
+  return candidates
+}
+
+async function ensureVideoSubCoverPath(
+  resourceId: string,
+  videoPath: string,
+  relativePath: string,
+  existingCoverPath = ''
+) {
+  const normalizedExistingCoverPath = String(existingCoverPath ?? '').trim()
+  if (normalizedExistingCoverPath && await fs.pathExists(normalizedExistingCoverPath)) {
+    return normalizedExistingCoverPath
+  }
+
+  const resolvedFfmpegPath = String(ffmpegPath ?? '').trim()
+  if (!resolvedFfmpegPath || !(await fs.pathExists(resolvedFfmpegPath))) {
+    throw new Error('未找到内置 ffmpeg，请重新安装依赖')
+  }
+
+  const cacheSetting = await DatabaseService.getSetting(Settings.CACHE_PATH)
+  if (!cacheSetting) {
+    throw new Error('未配置缓存目录')
+  }
+
+  const normalizedResourceId = String(resourceId ?? '').trim() || 'video-sub'
+  const normalizedRelativePath = String(relativePath ?? '').replace(/\\/g, '/').trim()
+  const relativePathHash = crypto.createHash('sha1').update(normalizedRelativePath || videoPath).digest('hex')
+  const coverDirectory = path.join(cacheSetting.value, 'video-sub-covers', normalizedResourceId)
+  const coverPath = path.join(coverDirectory, `${relativePathHash}.jpg`)
+  await fs.ensureDir(coverDirectory)
+
+  if (await fs.pathExists(coverPath)) {
+    return coverPath
+  }
+
+  await execFileChecked(
+    resolvedFfmpegPath,
+    [
+      '-y',
+      '-i',
+      videoPath,
+      '-frames:v',
+      '1',
+      '-vf',
+      'scale=640:-1:force_original_aspect_ratio=decrease',
+      '-q:v',
+      '3',
+      coverPath
+    ],
+    45000
+  )
+
+  if (!(await fs.pathExists(coverPath))) {
+    throw new Error('生成视频封面失败')
+  }
+
+  return coverPath
+}
+
+async function ensureVideoCoverPath(
+  resourceId: string,
+  videoPath: string,
+  existingCoverPath = ''
+) {
+  const normalizedExistingCoverPath = String(existingCoverPath ?? '').trim()
+  if (normalizedExistingCoverPath && await fs.pathExists(normalizedExistingCoverPath)) {
+    return normalizedExistingCoverPath
+  }
+
+  const resolvedFfmpegPath = String(ffmpegPath ?? '').trim()
+  if (!resolvedFfmpegPath || !(await fs.pathExists(resolvedFfmpegPath))) {
+    throw new Error('未找到内置 ffmpeg，请重新安装依赖')
+  }
+
+  const cacheSetting = await DatabaseService.getSetting(Settings.CACHE_PATH)
+  if (!cacheSetting) {
+    throw new Error('未配置缓存目录')
+  }
+
+  const normalizedResourceId = String(resourceId ?? '').trim() || 'video'
+  const coverDirectory = path.join(cacheSetting.value, 'video-covers')
+  const coverPath = path.join(coverDirectory, `${normalizedResourceId}.jpg`)
+  await fs.ensureDir(coverDirectory)
+
+  if (await fs.pathExists(coverPath)) {
+    return coverPath
+  }
+
+  await execFileChecked(
+    resolvedFfmpegPath,
+    [
+      '-y',
+      '-i',
+      videoPath,
+      '-frames:v',
+      '1',
+      '-vf',
+      'scale=960:-1:force_original_aspect_ratio=decrease',
+      '-q:v',
+      '3',
+      coverPath
+    ],
+    45000
+  )
+
+  if (!(await fs.pathExists(coverPath))) {
+    throw new Error('生成视频封面失败')
+  }
+
+  return coverPath
+}
+
 async function readVideoDuration(ffprobePath: string, videoPath: string) {
   try {
     const output = await execFileChecked(
@@ -4138,12 +5741,20 @@ function pickMultiImageCoverPath(directoryPath: string, imagePaths: string[]) {
   return imagePaths[0] ?? ''
 }
 
-async function getAxiosProxyConfig() {
+async function getAxiosProxyConfig(targetUrl?: string) {
+  if (shouldBypassProxyForUrl(String(targetUrl ?? '').trim())) {
+    return {
+      proxy: false as const
+    }
+  }
+
   const enableProxySetting = await DatabaseService.getSetting(Settings.ENABLE_PROXY)
   const isEnabled = ['1', 'true', 'yes', 'on'].includes(String(enableProxySetting?.value ?? '').trim().toLowerCase())
 
   if (!isEnabled) {
-    return {}
+    return {
+      proxy: false as const
+    }
   }
 
   const hostSetting = await DatabaseService.getSetting(Settings.PROXY_HOST)
@@ -4266,6 +5877,9 @@ function syncMeta(tx: any, categoryInfo: any, resourceId: string, meta: Resource
     case 'website_meta':
       DatabaseService.upsertWebsiteMeta({
         resourceId,
+        url: String(meta.website ?? '').trim() || null,
+        favicon: String(meta.favicon ?? '').trim() || null,
+        isDownloadLink: Boolean(meta.isDownloadLink),
       }, tx)
       return
     default:

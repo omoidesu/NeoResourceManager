@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, onMounted, ref } from 'vue'
 import type { ComputedRef } from 'vue'
-import { NButton, NCard, NForm, NFormItem, NGrid, NGi, NInput, NScrollbar, NSelect, NSpace, NSwitch } from 'naive-ui'
+import { NButton, NCard, NForm, NFormItem, NGrid, NGi, NInput, NInputNumber, NScrollbar, NSelect, NSpace, NSwitch } from 'naive-ui'
 import { notify } from '../../utils/notification'
 import { PanicMode, PictureReadScrollMode, Settings } from '../../../../common/constants'
 
@@ -61,6 +61,11 @@ const proxySettings = [
   Settings.PROXY_PORT
 ]
 
+const playbackSettings = [
+  Settings.AUDIO_PLAYBACK_RESUME_RESTART_THRESHOLD,
+  Settings.VIDEO_PLAYBACK_RESUME_RESTART_THRESHOLD
+]
+
 const shortcutSettings = [
   Settings.SHORTCUT_PRINT_SCREEN,
   Settings.SHORTCUT_PANIC_KEY,
@@ -84,11 +89,20 @@ const groupedSections = [
   { title: '路径', items: pathSettings },
   { title: 'Everything', items: everythingSettings },
   { title: '代理', items: proxySettings },
+  { title: '播放', items: playbackSettings },
   { title: '快捷键与伪装', items: shortcutSettings }
 ]
 
 const isBooleanSetting = (setting: SettingItem) =>
   booleanSettingNames.includes(setting.name)
+
+const numberSettingNames = new Set<string>([
+  Settings.AUDIO_PLAYBACK_RESUME_RESTART_THRESHOLD.name,
+  Settings.VIDEO_PLAYBACK_RESUME_RESTART_THRESHOLD.name
+])
+
+const isNumberSetting = (setting: SettingItem) =>
+  numberSettingNames.has(setting.name)
 
 const getSelectOptions = (setting: SettingItem) => {
   switch (setting.name) {
@@ -133,6 +147,9 @@ const getSettingPlaceholder = (setting: SettingItem) => {
       return '例如 https://www.bilibili.com'
     case Settings.THEME_COLOR.name:
       return '例如 #63e2b7'
+    case Settings.AUDIO_PLAYBACK_RESUME_RESTART_THRESHOLD.name:
+    case Settings.VIDEO_PLAYBACK_RESUME_RESTART_THRESHOLD.name:
+      return '0 到 100，默认 95'
     default:
       return `请输入${setting.description}`
   }
@@ -236,7 +253,7 @@ onMounted(() => {
     <div class="settings-page__header">
       <div>
         <div class="settings-page__title">设置</div>
-        <div class="settings-page__subtitle">管理主题、路径、Everything、代理与快捷键。</div>
+        <div class="settings-page__subtitle">管理主题、路径、Everything、代理、播放与快捷键。</div>
       </div>
       <n-space>
         <n-button @click="handleReset">重置</n-button>
@@ -281,6 +298,18 @@ onMounted(() => {
                       />
                       <n-button @click="handlePickPath(setting)">选择</n-button>
                     </div>
+                  </template>
+
+                  <template v-else-if="isNumberSetting(setting)">
+                    <n-input-number
+                      :value="Number(getSettingValue(setting) || setting.default || 0)"
+                      :min="0"
+                      :max="100"
+                      :precision="0"
+                      :placeholder="getSettingPlaceholder(setting)"
+                      style="width: 100%;"
+                      @update:value="(value) => setSettingValue(setting, String(Math.max(0, Math.min(100, Number(value ?? setting.default ?? 0)))))"
+                    />
                   </template>
 
                   <template v-else>

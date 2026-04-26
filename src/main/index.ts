@@ -4,7 +4,7 @@ import { join, normalize } from 'path'
 import fs from 'fs'
 import { execFile, spawn } from 'child_process'
 import { electronApp, is } from '@electron-toolkit/utils'
-import icon from '../../resources/icon.png?asset'
+import icon from '../../resources/icon.jpg?asset'
 import registerIpcHandlers from "./service/ipcHandle";
 import {migrateDb} from './db'
 import {seedDatabase} from './db/seed';
@@ -16,13 +16,95 @@ import { FetchPluginService } from './service/fetch-plugin.service';
 import { WindowScreenshotService } from './service/window-screenshot.service';
 import { DatabaseService } from './service/database.service';
 
+type WindowState = {
+  bounds: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }
+  isMaximized: boolean
+}
+
 let isShuttingDown = false
 let isQuitApproved = false
 let isQuitCheckInProgress = false
 const logger = createLogger('main')
 const LOCAL_FILE_PROTOCOL = 'neo-resource-file'
 const AUDIO_TRANSCODE_PROTOCOL = 'neo-resource-audio'
+const VIDEO_TRANSCODE_PROTOCOL = 'neo-resource-video'
 const ffmpegPath = require('ffmpeg-static') as string | null
+const DEFAULT_MAIN_WINDOW_BOUNDS = {
+  width: 1024,
+  height: 768
+}
+const MAIN_WINDOW_MIN_BOUNDS = {
+  width: 1024,
+  height: 768
+}
+
+function getWindowStateFilePath() {
+  return join(app.getPath('userData'), 'main-window-state.json')
+}
+
+function readWindowState(): WindowState | null {
+  try {
+    const filePath = getWindowStateFilePath()
+
+    if (!fs.existsSync(filePath)) {
+      return null
+    }
+
+    const state = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Partial<WindowState>
+    const bounds = state?.bounds
+
+    if (
+      !bounds
+      || !Number.isFinite(bounds.x)
+      || !Number.isFinite(bounds.y)
+      || !Number.isFinite(bounds.width)
+      || !Number.isFinite(bounds.height)
+    ) {
+      logger.warn('window state file is invalid, ignoring saved state', { filePath, state })
+      return null
+    }
+
+    return {
+      bounds: {
+        x: Math.round(bounds.x),
+        y: Math.round(bounds.y),
+        width: Math.max(MAIN_WINDOW_MIN_BOUNDS.width, Math.round(bounds.width)),
+        height: Math.max(MAIN_WINDOW_MIN_BOUNDS.height, Math.round(bounds.height))
+      },
+      isMaximized: Boolean(state.isMaximized)
+    }
+  } catch (error) {
+    logger.error('failed to read saved window state', error)
+    return null
+  }
+}
+
+function writeWindowState(state: WindowState) {
+  try {
+    fs.writeFileSync(getWindowStateFilePath(), JSON.stringify(state, null, 2), 'utf8')
+  } catch (error) {
+    logger.error('failed to persist window state', error)
+  }
+}
+
+function getCurrentWindowState(window: BrowserWindow): WindowState {
+  const bounds = window.getNormalBounds()
+
+  return {
+    bounds: {
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height
+    },
+    isMaximized: window.isMaximized()
+  }
+}
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -38,6 +120,17 @@ protocol.registerSchemesAsPrivileged([
   },
   {
     scheme: AUDIO_TRANSCODE_PROTOCOL,
+    privileges: {
+      standard: true,
+      secure: true,
+      bypassCSP: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    }
+  },
+  {
+    scheme: VIDEO_TRANSCODE_PROTOCOL,
     privileges: {
       standard: true,
       secure: true,
@@ -103,12 +196,14 @@ function registerAudioTranscodeProtocol() {
           '-vn',
           '-map_metadata',
           '0',
-          '-codec:a',
-          'libmp3lame',
-          '-b:a',
-          '192k',
+          '-acodec',
+          'pcm_s16le',
+          '-ar',
+          '44100',
+          '-ac',
+          '2',
           '-f',
-          'mp3',
+          'wav',
           'pipe:1'
         ],
         {
@@ -131,7 +226,7 @@ function registerAudioTranscodeProtocol() {
       callback({
         statusCode: 200,
         headers: {
-          'Content-Type': 'audio/mpeg',
+          'Content-Type': 'audio/wav',
           'Cache-Control': 'no-store'
         },
         data: child.stdout
@@ -144,6 +239,93 @@ function registerAudioTranscodeProtocol() {
 
   if (!registered) {
     logger.error('failed to register audio transcode protocol')
+  }
+}
+
+function registerVideoTranscodeProtocol() {
+  const registered = protocol.registerStreamProtocol(VIDEO_TRANSCODE_PROTOCOL, (request, callback) => {
+    try {
+      const requestUrl = new URL(request.url)
+      const encodedPath = requestUrl.pathname.replace(/^\/+/, '')
+      const filePath = normalize(decodeBase64Url(encodedPath))
+      const resolvedFfmpegPath = String(ffmpegPath ?? '').trim()
+      const requestedStartTime = Math.max(0, Number(requestUrl.searchParams.get('start') ?? 0) || 0)
+
+      if (!filePath || !fs.existsSync(filePath) || !resolvedFfmpegPath || !fs.existsSync(resolvedFfmpegPath)) {
+        callback({ error: -6 })
+        return
+      }
+
+      const ffmpegArgs = [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+      ]
+
+      if (requestedStartTime > 0) {
+        ffmpegArgs.push('-ss', String(requestedStartTime))
+      }
+
+      ffmpegArgs.push(
+        '-i',
+        filePath,
+        '-map_metadata',
+        '0',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '23',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '192k',
+        '-movflags',
+        'frag_keyframe+empty_moov+default_base_moof',
+        '-f',
+        'mp4',
+        'pipe:1'
+      )
+
+      const child = spawn(
+        resolvedFfmpegPath,
+        ffmpegArgs,
+        {
+          detached: false,
+          stdio: ['ignore', 'pipe', 'ignore'],
+          windowsHide: true
+        }
+      )
+
+      child.stdout.on('close', () => {
+        if (!child.killed) {
+          child.kill('SIGTERM')
+        }
+      })
+
+      child.on('error', (error) => {
+        logger.error('failed to start video transcode stream', error)
+      })
+
+      callback({
+        statusCode: 200,
+        headers: {
+          'Content-Type': 'video/mp4',
+          'Cache-Control': 'no-store'
+        },
+        data: child.stdout
+      })
+    } catch (error) {
+      logger.error('failed to resolve video transcode protocol request', error)
+      callback({ error: -2 })
+    }
+  })
+
+  if (!registered) {
+    logger.error('failed to register video transcode protocol')
   }
 }
 
@@ -302,26 +484,23 @@ function ensureMainWindowVisible(window: BrowserWindow) {
     return
   }
 
-  const targetWidth = 1280
-  const targetHeight = 768
   const bounds = window.getBounds()
   const display = screen.getDisplayMatching(bounds)
   const workArea = display.workArea
 
-  const widthTooSmall = bounds.width < 1024 || bounds.height < 768
-  const outsideHorizontal = bounds.x + bounds.width < workArea.x || bounds.x > workArea.x + workArea.width
-  const outsideVertical = bounds.y + bounds.height < workArea.y || bounds.y > workArea.y + workArea.height
+  const outsideHorizontal = bounds.x + 80 < workArea.x || bounds.x > workArea.x + workArea.width - 80
+  const outsideVertical = bounds.y + 80 < workArea.y || bounds.y > workArea.y + workArea.height - 80
 
-  if (!widthTooSmall && !outsideHorizontal && !outsideVertical) {
+  if (!outsideHorizontal && !outsideVertical) {
     return
   }
 
-  const width = Math.min(targetWidth, workArea.width)
-  const height = Math.min(targetHeight, workArea.height)
-  const x = workArea.x + Math.max(0, Math.floor((workArea.width - width) / 2))
-  const y = workArea.y + Math.max(0, Math.floor((workArea.height - height) / 2))
+  const width = Math.min(Math.max(bounds.width, MAIN_WINDOW_MIN_BOUNDS.width), workArea.width)
+  const height = Math.min(Math.max(bounds.height, MAIN_WINDOW_MIN_BOUNDS.height), workArea.height)
+  const x = Math.min(Math.max(bounds.x, workArea.x), workArea.x + Math.max(0, workArea.width - 80))
+  const y = Math.min(Math.max(bounds.y, workArea.y), workArea.y + Math.max(0, workArea.height - 80))
 
-  logger.warn('main window bounds invalid, resetting window placement', {
+  logger.warn('main window bounds outside visible area, correcting placement', {
     bounds,
     workArea,
     nextBounds: { x, y, width, height }
@@ -380,13 +559,13 @@ function forceNativeWindowShow(window: BrowserWindow, reason: string) {
   )
 }
 
-function createWindow(): void {
-  // Create the browser window.
-  const mainWindow = new BrowserWindow({
-    width: 1024,
-    height: 768,
-    minWidth: 1024,
-    minHeight: 768,
+function buildMainWindowOptions(savedState: WindowState | null) {
+  return {
+    ...(savedState ? { x: savedState.bounds.x, y: savedState.bounds.y } : {}),
+    width: savedState?.bounds.width ?? DEFAULT_MAIN_WINDOW_BOUNDS.width,
+    height: savedState?.bounds.height ?? DEFAULT_MAIN_WINDOW_BOUNDS.height,
+    minWidth: MAIN_WINDOW_MIN_BOUNDS.width,
+    minHeight: MAIN_WINDOW_MIN_BOUNDS.height,
     useContentSize: true,
     show: true,
     backgroundColor: '#1a1a1a',
@@ -396,7 +575,40 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false
     }
+  }
+}
+
+function createWindow(): void {
+  const savedWindowState = readWindowState()
+
+  // Create the browser window.
+  const mainWindow = new BrowserWindow(buildMainWindowOptions(savedWindowState))
+
+  logger.info('main window created', {
+    bounds: mainWindow.getBounds(),
+    savedWindowState,
+    backgroundColor: '#1a1a1a',
+    isDev: is.dev,
+    rendererUrl: process.env['ELECTRON_RENDERER_URL'] ?? '',
+    preloadPath: join(__dirname, '../preload/index.js')
   })
+
+  let persistWindowStateTimer: NodeJS.Timeout | null = null
+
+  const schedulePersistWindowState = () => {
+    if (mainWindow.isDestroyed()) {
+      return
+    }
+
+    if (persistWindowStateTimer) {
+      clearTimeout(persistWindowStateTimer)
+    }
+
+    persistWindowStateTimer = setTimeout(() => {
+      persistWindowStateTimer = null
+      writeWindowState(getCurrentWindowState(mainWindow))
+    }, 200)
+  }
 
   const forceShowMainWindow = (reason: string) => {
     if (mainWindow.isDestroyed()) {
@@ -429,6 +641,92 @@ function createWindow(): void {
 
   mainWindow.once('ready-to-show', () => forceShowMainWindow('ready-to-show'))
   mainWindow.webContents.once('did-finish-load', () => forceShowMainWindow('did-finish-load'))
+  mainWindow.on('move', schedulePersistWindowState)
+  mainWindow.on('resize', schedulePersistWindowState)
+  mainWindow.on('maximize', schedulePersistWindowState)
+  mainWindow.on('unmaximize', schedulePersistWindowState)
+  mainWindow.on('close', () => {
+    if (persistWindowStateTimer) {
+      clearTimeout(persistWindowStateTimer)
+      persistWindowStateTimer = null
+    }
+
+    if (!mainWindow.isDestroyed()) {
+      writeWindowState(getCurrentWindowState(mainWindow))
+    }
+  })
+  mainWindow.on('show', () => {
+    logger.info('main window show event', {
+      visible: mainWindow.isVisible(),
+      focused: mainWindow.isFocused(),
+      bounds: mainWindow.getBounds()
+    })
+  })
+  mainWindow.on('unresponsive', () => {
+    logger.error('main window unresponsive', {
+      url: mainWindow.webContents.getURL(),
+      isLoading: mainWindow.webContents.isLoading(),
+      readyState: mainWindow.webContents.isLoadingMainFrame()
+    })
+  })
+  mainWindow.on('responsive', () => {
+    logger.info('main window responsive again', {
+      url: mainWindow.webContents.getURL()
+    })
+  })
+  mainWindow.webContents.on('did-start-loading', () => {
+    logger.info('renderer did-start-loading', {
+      url: mainWindow.webContents.getURL()
+    })
+  })
+  mainWindow.webContents.on('dom-ready', () => {
+    logger.info('renderer dom-ready', {
+      url: mainWindow.webContents.getURL(),
+      title: mainWindow.webContents.getTitle()
+    })
+  })
+  mainWindow.webContents.on('did-stop-loading', () => {
+    logger.info('renderer did-stop-loading', {
+      url: mainWindow.webContents.getURL(),
+      title: mainWindow.webContents.getTitle()
+    })
+  })
+  mainWindow.webContents.on('did-frame-finish-load', (_event, isMainFrame, frameProcessId, frameRoutingId) => {
+    logger.info('renderer did-frame-finish-load', {
+      isMainFrame,
+      frameProcessId,
+      frameRoutingId,
+      url: mainWindow.webContents.getURL()
+    })
+  })
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    const payload = {
+      level,
+      message,
+      line,
+      sourceId,
+      url: mainWindow.webContents.getURL()
+    }
+
+    if (level >= 2) {
+      logger.error('renderer console-message', payload)
+      return
+    }
+
+    if (level === 1) {
+      logger.warn('renderer console-message', payload)
+      return
+    }
+
+    logger.info('renderer console-message', payload)
+  })
+  mainWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
+    logger.error('renderer preload-error', {
+      preloadPath,
+      error: error?.message ?? String(error),
+      stack: error?.stack ?? ''
+    })
+  })
   setTimeout(() => {
     if (!mainWindow.isDestroyed()) {
       logger.warn('forcing main window show after timeout')
@@ -437,6 +735,10 @@ function createWindow(): void {
   }, 2000)
   scheduleForceShow('timeout-3500ms', 3500)
   scheduleForceShow('timeout-5000ms', 5000)
+
+  if (savedWindowState?.isMaximized) {
+    mainWindow.maximize()
+  }
 
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     logger.error('renderer process gone', details)
@@ -467,8 +769,10 @@ function createWindow(): void {
   // HMR for renderer base on electron-vite cli.
   // Load the remote URL for development or the local html file for production.
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+    logger.info('loading renderer url', { target: process.env['ELECTRON_RENDERER_URL'] })
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
+    logger.info('loading renderer file', { target: join(__dirname, '../renderer/index.html') })
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
@@ -481,6 +785,7 @@ app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.electron')
   registerLocalFileProtocol()
   registerAudioTranscodeProtocol()
+  registerVideoTranscodeProtocol()
 
   app.on('browser-window-created', (_, window) => {
     window.webContents.on('before-input-event', (event, input) => {
@@ -512,6 +817,28 @@ app.whenReady().then(async () => {
 
   // IPC test
   ipcMain.on('ping', () => logger.debug('pong'))
+  ipcMain.on('renderer:log', (_event, payload) => {
+    const level = String((payload as any)?.level ?? 'info').trim()
+    const message = String((payload as any)?.message ?? 'renderer log').trim() || 'renderer log'
+    const meta = (payload as any)?.meta
+
+    switch (level) {
+      case 'error':
+        logger.error(message, meta)
+        return
+      case 'warn':
+        logger.warn(message, meta)
+        return
+      case 'debug':
+        logger.debug(message, meta)
+        return
+      default:
+        logger.info(message, meta)
+    }
+  })
+  app.on('child-process-gone', (_event, details) => {
+    logger.error('electron child-process-gone', details)
+  })
 
   await migrateDb()
   await seedDatabase()
@@ -570,6 +897,24 @@ process.on('SIGTERM', () => {
   void shutdownApp('SIGTERM').finally(() => {
     destroyAllWindows()
     app.exit(0)
+  })
+})
+
+process.on('uncaughtException', (error) => {
+  logger.error('main process uncaughtException', {
+    message: error?.message ?? String(error),
+    stack: error?.stack ?? ''
+  })
+})
+
+process.on('unhandledRejection', (reason) => {
+  logger.error('main process unhandledRejection', {
+    reason: reason instanceof Error
+      ? {
+          message: reason.message,
+          stack: reason.stack ?? ''
+        }
+      : String(reason)
   })
 })
 

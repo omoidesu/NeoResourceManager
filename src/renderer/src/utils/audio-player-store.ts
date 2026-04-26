@@ -29,6 +29,7 @@ const isVisible = ref(false)
 const resourceId = ref('')
 const initialPath = ref('')
 const initialTime = ref(0)
+const audioResumeRestartThreshold = ref(95)
 const title = ref('音频播放器')
 const artist = ref('')
 const displayMode = ref<'default' | 'music'>('default')
@@ -46,6 +47,7 @@ export const useAudioPlayerStore = () => ({
   resourceId,
   initialPath,
   initialTime,
+  audioResumeRestartThreshold,
   title,
   artist,
   displayMode,
@@ -64,6 +66,7 @@ export const setAudioPlayerSession = (payload: {
   resourceId?: string
   initialPath?: string
   initialTime?: number
+  audioResumeRestartThreshold?: number
   title?: string
   artist?: string
   displayMode?: 'default' | 'music'
@@ -80,6 +83,10 @@ export const setAudioPlayerSession = (payload: {
 
   if (typeof payload.initialTime === 'number') {
     initialTime.value = payload.initialTime
+  }
+
+  if (typeof payload.audioResumeRestartThreshold === 'number') {
+    audioResumeRestartThreshold.value = payload.audioResumeRestartThreshold
   }
 
   if (typeof payload.title === 'string') {
