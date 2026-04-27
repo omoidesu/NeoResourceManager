@@ -2,6 +2,7 @@ import {DatabaseService} from './database.service'
 import {FetchResourceInfoResult, ResourceForm, ResourceMeta} from "../model/models";
 import {generateId} from "../util/id-generator"
 import {DictType, ResourceLaunchMode, Settings, WEBSITE_DIRECT_DOWNLOAD_EXTENSIONS} from '../../common/constants'
+import type { ResourceLaunchModeKey } from '../../common/constants'
 import { BrowserWindow } from 'electron'
 import path from 'path'
 import sharp from "sharp";
@@ -1689,6 +1690,50 @@ export class ResourceService {
 
   static async stopVideoPlayback(resourceId: string) {
     return this.stopAsmrPlayback(resourceId)
+  }
+
+  static async recordResourceAccess(resourceId: string, launchMode: ResourceLaunchModeKey = ResourceLaunchMode.NORMAL) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    if (!normalizedResourceId) {
+      return {
+        type: 'warning',
+        message: '资源ID无效',
+      }
+    }
+
+    const resource = await DatabaseService.getResourceById(normalizedResourceId)
+    if (!resource) {
+      return {
+        type: 'warning',
+        message: '资源不存在或已被删除',
+      }
+    }
+
+    const accessTime = new Date()
+
+    await DatabaseService.bumpResourceStatOnLaunch(normalizedResourceId, accessTime)
+    await DatabaseService.insertResourceLog({
+      resourceId: normalizedResourceId,
+      startTime: accessTime,
+      endTime: accessTime,
+      duration: 0,
+      pid: null,
+      launchMode,
+      isDeleted: false,
+    })
+
+    NotificationQueueService.getInstance().pushResourceStateChanged({
+      resourceId: normalizedResourceId,
+      categoryId: resource.categoryId,
+      running: false,
+      missingStatus: Boolean(resource.missingStatus),
+      changedAt: Date.now(),
+    })
+
+    return {
+      type: 'success',
+      message: '访问记录已保存',
+    }
   }
 
   static async launchResourceAsAdmin(resourceId: string, basePath: string, fileName?: string | null) {

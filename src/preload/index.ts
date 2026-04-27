@@ -153,6 +153,8 @@ const api = {
         ipcRenderer.invoke('service:extract-video-sub-cover-frames', basePath),
       launchResource: (resourceId: string, basePath: string, fileName?: string | null) =>
         ipcRenderer.invoke('service:launch-resource', resourceId, basePath, fileName),
+    recordResourceAccess: (resourceId: string, launchMode?: string) =>
+      ipcRenderer.invoke('service:record-resource-access', resourceId, launchMode),
     startReadingResource: (resourceId: string) =>
       ipcRenderer.invoke('service:start-reading-resource', resourceId),
     getMultiImageReadingProgress: (resourceId: string) =>

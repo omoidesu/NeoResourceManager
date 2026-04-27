@@ -108,6 +108,8 @@ const pictureViewerScrollMode = ref(String(Settings.PICTURE_READ_SCROLL_MODE.def
 const pictureViewerImagePaths = ref<string[]>([])
 const pictureViewerInitialIndex = ref(0)
 const pictureViewerAllowDelete = ref(true)
+const pictureViewerResourceIds = ref<string[]>([])
+const currentPictureViewerResourceId = ref('')
 const comicReaderImagePaths = ref<string[]>([])
 const comicReaderInitialIndex = ref(0)
 const currentComicReaderResourceId = ref('')
@@ -1785,6 +1787,7 @@ const handleOpenAudioTreeImage = async (imagePath: string) => {
   }
 
   pictureViewerImagePaths.value = [...imagePaths]
+  pictureViewerResourceIds.value = []
   pictureViewerInitialIndex.value = initialIndex
   pictureViewerAllowDelete.value = false
   await loadPictureViewerScrollMode()
@@ -1894,6 +1897,21 @@ const handleSelectDetailAudioContextMenu = (key: string) => {
   if (key === 'play' && (option?.kind === 'audio' || option?.kind === 'video')) {
     handleAudioTreePlay(option)
   }
+}
+
+const recordResourceAccessIfPossible = async (resource: any, title: string) => {
+  const resourceId = String(resource?.id ?? '').trim()
+  if (!resourceId) {
+    return
+  }
+
+  const result = await window.api.service.recordResourceAccess(resourceId)
+  if (result?.type === 'error') {
+    showNotifyByType('error', title, result?.message ?? '记录访问日志失败')
+    return
+  }
+
+  await fetchData()
 }
 
 const renderAudioTreeFileLabel = (option: any, icon: string, label: string) => h('div', {
@@ -2712,6 +2730,52 @@ const startComicReadingSession = async (resource: any) => {
   }
 
   return true
+}
+
+const stopPictureViewingSession = async () => {
+  const resourceId = String(currentPictureViewerResourceId.value ?? '').trim()
+  if (!resourceId) {
+    return
+  }
+
+  currentPictureViewerResourceId.value = ''
+  const result = await window.api.service.stopResource(resourceId)
+  if (result?.type === 'error') {
+    showNotifyByType('error', '结束查看图片', result?.message ?? '结束查看图片失败')
+    return
+  }
+
+  await fetchData()
+}
+
+const handlePictureViewerIndexChange = async (index: number) => {
+  const nextResourceId = String(pictureViewerResourceIds.value[Math.max(0, Math.floor(Number(index ?? 0)))] ?? '').trim()
+  if (!nextResourceId) {
+    return
+  }
+
+  const currentResourceId = String(currentPictureViewerResourceId.value ?? '').trim()
+  if (!currentResourceId || currentResourceId === nextResourceId) {
+    currentPictureViewerResourceId.value = nextResourceId
+    return
+  }
+
+  const stopResult = await window.api.service.stopResource(currentResourceId)
+  if (stopResult?.type === 'error') {
+    showNotifyByType('error', '切换图片', stopResult?.message ?? '结束上一张图片浏览失败')
+    return
+  }
+
+  currentPictureViewerResourceId.value = ''
+  const startResult = await window.api.service.startReadingResource(nextResourceId)
+  const startResultType = startResult?.type ?? 'info'
+  if (startResultType === 'error' || startResultType === 'warning') {
+    showNotifyByType(startResultType, '切换图片', startResult?.message ?? '开始浏览下一张图片失败')
+    return
+  }
+
+  currentPictureViewerResourceId.value = nextResourceId
+  await fetchData()
 }
 
 const stopComicReadingSession = async () => {
@@ -3876,6 +3940,14 @@ watch(showEditModal, (visible) => {
     editingResourceId.value = ''
     editInitialFormData.value = null
   }
+})
+
+watch(showPictureViewer, (visible, previousVisible) => {
+  if (visible || !previousVisible || !currentPictureViewerResourceId.value) {
+    return
+  }
+
+  void stopPictureViewingSession()
 })
 
 watch(showComicReader, (visible, previousVisible) => {
@@ -6437,6 +6509,11 @@ const handlePreviewSingleImageResource = async (resource: any) => {
   }
 
   try {
+    if (showPictureViewer.value && currentPictureViewerResourceId.value && currentPictureViewerResourceId.value !== resourceId) {
+      showPictureViewer.value = false
+      await nextTick()
+    }
+
     const pageSize = Math.max(totalResources.value, resourceList.value.length, 1)
     const result = await window.api.db.getResourceByCategoryId(categoryId.value, {
       page: 1,
@@ -6458,10 +6535,20 @@ const handlePreviewSingleImageResource = async (resource: any) => {
     }
 
     pictureViewerImagePaths.value = imagePaths
+    pictureViewerResourceIds.value = imageResources.map((item: any) => String(item?.id ?? '').trim())
     pictureViewerInitialIndex.value = Math.max(0, initialIndex)
     pictureViewerAllowDelete.value = false
+    const startResult = await window.api.service.startReadingResource(resourceId)
+    const startResultType = startResult?.type ?? 'info'
+    if (startResultType === 'error' || startResultType === 'warning') {
+      showNotifyByType(startResultType, '查看图片', startResult?.message ?? '打开图片预览失败')
+      return
+    }
+
+    currentPictureViewerResourceId.value = resourceId
     await loadPictureViewerScrollMode()
     showPictureViewer.value = true
+    await fetchData()
   } catch (error) {
     showNotifyByType('error', '查看图片', error instanceof Error ? error.message : '打开图片预览失败')
   }
@@ -6489,6 +6576,10 @@ const handleStopResource = async (resource: any) => {
     showNotifyByType(resultType, '停止资源', resultMessage)
 
     if (resultType !== 'error') {
+      if (String(resource?.id ?? '') === String(currentPictureViewerResourceId.value ?? '')) {
+        currentPictureViewerResourceId.value = ''
+        showPictureViewer.value = false
+      }
       if (String(resource?.id ?? '') === String(currentComicReaderResourceId.value ?? '')) {
         currentComicReaderResourceId.value = ''
         showComicReader.value = false
@@ -6641,6 +6732,7 @@ const handleOpenPictureViewer = async (index: number = currentScreenshotIndex.va
   }
 
   pictureViewerImagePaths.value = [...detailScreenshotPaths.value]
+  pictureViewerResourceIds.value = []
   pictureViewerInitialIndex.value = currentScreenshotIndex.value
   pictureViewerAllowDelete.value = !detailIsManga.value
   await loadPictureViewerScrollMode()
@@ -6733,7 +6825,24 @@ const handleOpenResourceFolder = async (resource: any) => {
 
 const handleDefaultAppPlayResource = async (resource: any) => {
   const targetPath = getResourceFilePath(resource)
-  await handleOpenPathWithDefaultApp(targetPath, '使用默认应用打开')
+  const normalizedPath = String(targetPath ?? '').trim()
+  if (!normalizedPath) {
+    showNotifyByType('warning', '使用默认应用打开', '当前文件路径无效')
+    return
+  }
+
+  try {
+    const message = await window.api.dialog.openPath(normalizedPath)
+    if (message) {
+      showNotifyByType('error', '使用默认应用打开', message)
+      return
+    }
+
+    await recordResourceAccessIfPossible(resource, '使用默认应用打开')
+    showNotifyByType('success', '使用默认应用打开', '已使用默认应用打开文件')
+  } catch (error) {
+    showNotifyByType('error', '使用默认应用打开', error instanceof Error ? error.message : '打开文件失败')
+  }
 }
 
 const handleOpenScreenshotFolder = async (resource: any) => {
@@ -6790,6 +6899,7 @@ const handleOpenWebsiteResource = async (resource: any) => {
       return
     }
 
+    await recordResourceAccessIfPossible(resource, '打开网站')
     showNotifyByType('success', '打开网站', `已打开“${resource?.title ?? categoryName.value}”`)
   } catch (error) {
     showNotifyByType('error', '打开网站', error instanceof Error ? error.message : '打开网站失败')
@@ -9348,6 +9458,7 @@ const handleToggleCompleted = async (resource: any) => {
       :initial-index="pictureViewerInitialIndex"
       :scroll-mode="pictureViewerScrollMode"
       :allow-delete="pictureViewerAllowDelete"
+      @index-change="handlePictureViewerIndexChange"
       @delete-image="handleDeleteViewerScreenshot"
     />
 

@@ -1,8 +1,12 @@
 # NeoResourceManager
 
+<p align="center">
+  <img src="https://stone.professorlee.work/api/stone/omoidesu/NeoResourceManager" alt="Stone Badge" />
+</p>
+
 NeoResourceManager 是一个面向本地资源整理与启动管理的桌面应用，适合管理游戏、软件、图集等资源，并为 Galgame / 同人游戏场景补充引擎识别、启动辅助和信息整理能力。
 
-当前版本：`0.7.0`
+当前版本：`0.7.1`
 
 ## 项目简介
 

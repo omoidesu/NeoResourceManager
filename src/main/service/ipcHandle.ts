@@ -335,6 +335,10 @@ function registerService() {
     return ResourceService.startReadingResource(resourceId)
   })
 
+  ipcMain.handle('service:record-resource-access', async (_event, resourceId: string, launchMode?: string) => {
+    return ResourceService.recordResourceAccess(resourceId, launchMode as any)
+  })
+
   ipcMain.handle('service:get-multi-image-reading-progress', async (_event, resourceId: string) => {
     return ResourceService.getMultiImageReadingProgress(resourceId)
   })

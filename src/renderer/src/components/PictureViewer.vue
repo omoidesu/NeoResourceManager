@@ -18,6 +18,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (event: 'update:show', value: boolean): void
   (event: 'delete-image', payload: { filePath: string; index: number }): void
+  (event: 'index-change', index: number): void
 }>()
 
 const currentIndex = ref(0)
@@ -514,6 +515,7 @@ watch(
 )
 
 watch(currentIndex, () => {
+  emit('index-change', currentIndex.value)
   void loadMainImage(currentImagePath.value)
   void preloadThumbsAroundCurrent()
   void scrollActiveThumbIntoView()

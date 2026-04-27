@@ -111,6 +111,7 @@ declare global {
         extractVideoCoverFrames: (basePath: string) => Promise<any>,
         extractVideoSubCoverFrames: (basePath: string) => Promise<any>,
         launchResource: (resourceId: string, basePath: string, fileName?: string | null) => Promise<any>,
+        recordResourceAccess: (resourceId: string, launchMode?: string) => Promise<any>,
         startReadingResource: (resourceId: string) => Promise<any>,
         getMultiImageReadingProgress: (resourceId: string) => Promise<any>,
         updateMultiImageReadingProgress: (resourceId: string, lastReadPage: number) => Promise<any>,
