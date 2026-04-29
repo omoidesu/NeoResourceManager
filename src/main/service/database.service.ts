@@ -12,9 +12,9 @@ import {
   resourceType, dictType, author, authorWork, storeWork,
   actor, gameMeta, softwareMeta, singleImageMeta, multiImageMeta, videoMeta, videoSub, asmrMeta, audioMeta, novelMeta, websiteMeta,
 } from '../db/schema'
-import {and, asc, count, desc, eq, inArray, sql} from 'drizzle-orm'
+import {and, asc, count, desc, eq, inArray, not, or, sql} from 'drizzle-orm'
 import {generateId} from '../util/id-generator'
-import { ResourceLogSpecialTime, SettingDetail } from "../../common/constants";
+import { ResourceLogSpecialTime, SettingDetail, Settings } from "../../common/constants";
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0]
 type DbExecutor = typeof db | DbTransaction
@@ -36,7 +36,53 @@ type ResourceQueryParams = {
   sortBy?: string
 }
 
+const MIN_LONG_UNVISITED_DAYS = 30
+const MAX_LONG_UNVISITED_DAYS = 365
+
+const DEFAULT_CATEGORY_PILL_COLORS: Record<string, string> = {
+  游戏: '#9333ea',
+  软件: '#0891b2',
+  图片: '#d97706',
+  漫画: '#ea580c',
+  电影: '#e11d48',
+  番剧: '#db2777',
+  音声: '#65a30d',
+  音乐: '#0284c7',
+  小说: '#16a34a',
+  网站: '#737373'
+}
+
 export class DatabaseService {
+  private static categoryPillColorColumnReady = false
+
+  private static async ensureCategoryPillColorColumn() {
+    if (this.categoryPillColorColumnReady) {
+      return
+    }
+
+    const rows = await db.all(sql`PRAGMA table_info('category')`) as Array<{ name?: string }>
+    if (!rows.some((row) => row.name === 'pill_color')) {
+      await db.run(sql`ALTER TABLE category ADD pill_color text`)
+    }
+
+    for (const [name, pillColor] of Object.entries(DEFAULT_CATEGORY_PILL_COLORS)) {
+      await db
+        .update(category)
+        .set({ pillColor })
+        .where(and(
+          eq(category.name, name),
+          sql`${category.pillColor} is null`
+        ))
+    }
+
+    this.categoryPillColorColumnReady = true
+  }
+
+  private static isMissingCategoryPillColorError(error: unknown) {
+    const message = String((error as { message?: unknown })?.message ?? error ?? '')
+    return message.includes('no such column: category.pill_color')
+  }
+
   private static buildResourceFilterConditions(
     categoryId: string,
     query: ResourceQueryParams = {}
@@ -140,21 +186,37 @@ export class DatabaseService {
   }
 
   static async getCategory() {
-    return db
-      .select({
-        id: category.id,
-        name: category.name,
-        emoji: category.emoji,
-        sort: category.sort,
-        extra: dictData.extra,
-      })
-      .from(category)
-      .leftJoin(dictData, eq(category.referenceId, dictData.id))
-      .where(eq(category.isDeleted, false))
-      .orderBy(asc(category.sort))
+    await this.ensureCategoryPillColorColumn()
+
+    const queryCategory = () => db
+        .select({
+          id: category.id,
+          name: category.name,
+          emoji: category.emoji,
+          pillColor: category.pillColor,
+          sort: category.sort,
+          extra: dictData.extra,
+        })
+        .from(category)
+        .leftJoin(dictData, eq(category.referenceId, dictData.id))
+        .where(eq(category.isDeleted, false))
+        .orderBy(asc(category.sort))
+
+    try {
+      return await queryCategory()
+    } catch (error) {
+      if (!this.isMissingCategoryPillColorError(error)) {
+        throw error
+      }
+
+      await this.ensureCategoryPillColorColumn()
+      return await queryCategory()
+    }
   }
 
   static async getCategoryById(id: string) {
+    await this.ensureCategoryPillColorColumn()
+
     return await db.query.category.findFirst({
       where: and(
         eq(category.id, id),
@@ -167,6 +229,8 @@ export class DatabaseService {
   }
 
   static async getCategoryByName(name: string) {
+    await this.ensureCategoryPillColorColumn()
+
     return await db.query.category.findFirst({
       where: and(
         eq(category.name, name),
@@ -338,6 +402,660 @@ export class DatabaseService {
       total,
       page,
       pageSize
+    }
+  }
+
+  static async getRecentlyAddedResources(days = 7, limit = 10) {
+    const normalizedDays = Math.max(1, Math.min(365, Math.floor(Number(days) || 7)))
+    const normalizedLimit = Math.max(1, Math.min(50, Math.floor(Number(limit) || 10)))
+
+    return db
+      .select({
+        id: resource.id,
+        title: resource.title,
+        categoryId: resource.categoryId,
+        coverPath: resource.coverPath,
+        createTime: resource.createTime,
+        categoryName: category.name,
+        categoryEmoji: category.emoji
+      })
+      .from(resource)
+      .leftJoin(category, eq(resource.categoryId, category.id))
+      .where(and(
+        eq(resource.isDeleted, false),
+        sql`${resource.createTime} >= strftime('%s', 'now', ${`-${normalizedDays} days`})`
+      ))
+      .orderBy(desc(resource.createTime), asc(resource.title))
+      .limit(normalizedLimit)
+  }
+
+  static async getHomeNextPlayResources(limit = 9) {
+    await this.ensureCategoryPillColorColumn()
+
+    const normalizedLimit = Math.max(1, Math.min(12, Math.floor(Number(limit) || 9)))
+    const recentLogRows = await db
+      .select({ resourceId: resourceLog.resourceId })
+      .from(resourceLog)
+      .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+      .where(and(
+        eq(resourceLog.isDeleted, false),
+        eq(resource.isDeleted, false),
+        sql`${resourceLog.startTime} is not null`
+      ))
+      .groupBy(resourceLog.resourceId)
+      .orderBy(desc(sql`max(${resourceLog.startTime})`))
+      .limit(12)
+
+    const excludedIds = recentLogRows.map((item) => String(item.resourceId ?? '')).filter(Boolean)
+    const baseConditions = [
+      eq(resource.isDeleted, false),
+      eq(category.isDeleted, false),
+      excludedIds.length ? not(inArray(resource.id, excludedIds)) : undefined
+    ].filter(Boolean) as any[]
+
+    const selectFields = {
+      id: resource.id,
+      title: resource.title,
+      categoryId: resource.categoryId,
+      categoryName: category.name,
+      categoryEmoji: category.emoji,
+      categoryPillColor: category.pillColor,
+      coverPath: resource.coverPath,
+      basePath: resource.basePath,
+      fileName: resource.fileName,
+      ifFavorite: resource.ifFavorite,
+      rating: resource.rating,
+      createTime: resource.createTime,
+      accessCount: sql<number>`coalesce(${resourceStat.accessCount}, 0)`
+    }
+
+    const [recentUnopenedRows, favoriteDormantRows, highRatingRows, activeCategoryRows, randomRows] = await Promise.all([
+      db
+        .select(selectFields)
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(
+          ...baseConditions,
+          sql`coalesce(${resourceStat.accessCount}, 0) = 0`,
+          sql`${resource.createTime} >= strftime('%s', 'now', '-60 days')`
+        ))
+        .orderBy(sql`random()`)
+        .limit(12),
+      db
+        .select(selectFields)
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(
+          ...baseConditions,
+          eq(resource.ifFavorite, true),
+          or(
+            sql`${resourceStat.lastAccessTime} is null and ${resource.createTime} < strftime('%s', 'now', '-90 days')`,
+            sql`${resourceStat.lastAccessTime} < strftime('%s', 'now', '-90 days')`
+          )
+        ))
+        .orderBy(sql`random()`)
+        .limit(12),
+      db
+        .select(selectFields)
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(
+          ...baseConditions,
+          sql`coalesce(${resource.rating}, -1) >= 8`
+        ))
+        .orderBy(desc(resource.rating), desc(resource.createTime), asc(resource.title))
+        .limit(12),
+      db
+        .select(selectFields)
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(
+          ...baseConditions,
+          inArray(resource.categoryId, db
+            .select({ categoryId: resource.categoryId })
+            .from(resourceLog)
+            .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+            .where(and(
+              eq(resourceLog.isDeleted, false),
+              eq(resource.isDeleted, false),
+              sql`${resourceLog.startTime} >= strftime('%s', 'now', '-30 days')`
+            ))
+            .groupBy(resource.categoryId)
+            .orderBy(desc(count(resourceLog.resourceId)))
+            .limit(3))
+        ))
+        .orderBy(sql`random()`)
+        .limit(12),
+      db
+        .select(selectFields)
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(...baseConditions))
+        .orderBy(sql`random()`)
+        .limit(18)
+    ])
+
+    const selected = new Map<string, any>()
+    const addLimitedPool = (rows: any[], limitForPool: number, reason: string) => {
+      let added = 0
+      for (const row of rows) {
+        const id = String(row?.id ?? '')
+        if (!id || selected.has(id)) {
+          continue
+        }
+        selected.set(id, { ...row, reason })
+        added += 1
+        if (selected.size >= normalizedLimit || added >= limitForPool) {
+          break
+        }
+      }
+    }
+
+    addLimitedPool(recentUnopenedRows, 2, '最近添加，还没真正打开过')
+    addLimitedPool(favoriteDormantRows, 2, '收藏已久，适合重新翻出来')
+    addLimitedPool(highRatingRows, 2, '高评分资源，值得优先体验')
+    addLimitedPool(activeCategoryRows, 2, '最近活跃类型，顺手接着玩')
+    addLimitedPool(randomRows, normalizedLimit, '随机补位，也许正合胃口')
+
+    return [...selected.values()].slice(0, normalizedLimit)
+  }
+
+  static async getHomeFavoriteOverview() {
+    const favoriteBase = and(
+      eq(resource.isDeleted, false),
+      eq(resource.ifFavorite, true)
+    )
+
+    const [frequentResult, recentResult, dormantResult] = await Promise.all([
+      db
+        .select({ total: count(resource.id) })
+        .from(resource)
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(
+          favoriteBase,
+          sql`coalesce(${resourceStat.accessCount}, 0) >= 3`,
+          sql`${resourceStat.lastAccessTime} >= strftime('%s', 'now', '-30 days')`
+        )),
+      db
+        .select({ total: count(resource.id) })
+        .from(resource)
+        .where(and(
+          favoriteBase,
+          sql`${resource.createTime} >= strftime('%s', 'now', '-14 days')`
+        )),
+      db
+        .select({ total: count(resource.id) })
+        .from(resource)
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(
+          favoriteBase,
+          or(
+            sql`${resourceStat.lastAccessTime} is null and ${resource.createTime} < strftime('%s', 'now', '-90 days')`,
+            sql`${resourceStat.lastAccessTime} < strftime('%s', 'now', '-90 days')`
+          )
+        ))
+    ])
+
+    return [
+      {
+        key: 'frequent',
+        title: '常用收藏',
+        value: Number(frequentResult[0]?.total ?? 0),
+        meta: '近 30 天打开 3 次以上'
+      },
+      {
+        key: 'recent',
+        title: '最近收藏',
+        value: Number(recentResult[0]?.total ?? 0),
+        meta: '近 14 天新增资源'
+      },
+      {
+        key: 'dormant',
+        title: '沉睡收藏',
+        value: Number(dormantResult[0]?.total ?? 0),
+        meta: '超过 90 天未打开'
+      }
+    ]
+  }
+
+  static async getHomeCoverWallData(limit = 15) {
+    await this.ensureCategoryPillColorColumn()
+
+    const normalizedLimit = Math.max(1, Math.min(30, Math.floor(Number(limit) || 15)))
+    const coverExistsCondition = sql`(${resource.coverPath} is not null and trim(${resource.coverPath}) != '')`
+    const activeRecentCategoryIds = await db
+      .select({ categoryId: resource.categoryId })
+      .from(resourceLog)
+      .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+      .where(and(
+        eq(resourceLog.isDeleted, false),
+        eq(resource.isDeleted, false),
+        sql`${resourceLog.startTime} >= strftime('%s', 'now', '-30 days')`
+      ))
+      .groupBy(resource.categoryId)
+      .orderBy(desc(count(resourceLog.resourceId)))
+      .limit(3)
+
+    const recentCategoryIdList = activeRecentCategoryIds.map((item) => String(item.categoryId ?? '')).filter(Boolean)
+    const selectFields = {
+      id: resource.id,
+      title: resource.title,
+      categoryId: resource.categoryId,
+      categoryName: category.name,
+      categoryEmoji: category.emoji,
+      categoryPillColor: category.pillColor,
+      coverPath: resource.coverPath,
+      createTime: resource.createTime,
+      lastAccessTime: resourceStat.lastAccessTime
+    }
+    const sharedWhere = and(
+      eq(resource.isDeleted, false),
+      eq(category.isDeleted, false),
+      coverExistsCondition
+    )
+
+    const [allCount, recentRunCount, favoriteCount, gameCount, recentAccessCount, allItems, recentRunItems, favoriteItems, gameItems, recentAccessItems] = await Promise.all([
+      db.select({ total: count(resource.id) })
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .where(sharedWhere),
+      db.select({ total: count(sql`distinct ${resource.id}`) })
+        .from(resourceLog)
+        .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .where(and(
+          sharedWhere,
+          eq(resourceLog.isDeleted, false),
+          sql`${resourceLog.startTime} >= strftime('%s', 'now', '-30 days')`
+        )),
+      db.select({ total: count(resource.id) })
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .where(and(sharedWhere, eq(resource.ifFavorite, true))),
+      db.select({ total: count(resource.id) })
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .where(and(
+          sharedWhere,
+          sql`(lower(${category.name}) like '%游戏%' or lower(${category.name}) like '%game%' or lower(${category.name}) like '%galgame%')`
+        )),
+      db.select({ total: count(resource.id) })
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(
+          sharedWhere,
+          sql`${resourceStat.lastAccessTime} is not null`
+        )),
+      db.select(selectFields)
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(sharedWhere)
+        .orderBy(desc(resource.createTime), asc(resource.title))
+        .limit(normalizedLimit),
+      db.select({
+        ...selectFields,
+        latestStartTime: sql<number>`max(${resourceLog.startTime})`
+      })
+        .from(resourceLog)
+        .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(
+          sharedWhere,
+          eq(resourceLog.isDeleted, false),
+          sql`${resourceLog.startTime} >= strftime('%s', 'now', '-30 days')`
+        ))
+        .groupBy(resource.id, category.id, resourceStat.lastAccessTime)
+        .orderBy(desc(sql`max(${resourceLog.startTime})`), asc(resource.title))
+        .limit(normalizedLimit),
+      db.select(selectFields)
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(sharedWhere, eq(resource.ifFavorite, true)))
+        .orderBy(desc(resource.createTime), asc(resource.title))
+        .limit(normalizedLimit),
+      db.select(selectFields)
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(
+          sharedWhere,
+          sql`(lower(${category.name}) like '%游戏%' or lower(${category.name}) like '%game%' or lower(${category.name}) like '%galgame%')`
+        ))
+        .orderBy(desc(resource.createTime), asc(resource.title))
+        .limit(normalizedLimit),
+      db.select(selectFields)
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(
+          sharedWhere,
+          sql`${resourceStat.lastAccessTime} is not null`
+        ))
+        .orderBy(desc(resourceStat.lastAccessTime), desc(resource.createTime), asc(resource.title))
+        .limit(normalizedLimit)
+    ])
+
+    const recentCategoryItems = recentCategoryIdList.length
+      ? await db.select(selectFields)
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(
+          sharedWhere,
+          inArray(resource.categoryId, recentCategoryIdList)
+        ))
+        .orderBy(desc(resource.createTime), asc(resource.title))
+        .limit(normalizedLimit)
+      : []
+
+    return {
+      counts: {
+        all: Number(allCount[0]?.total ?? 0),
+        recentRun: Number(recentRunCount[0]?.total ?? 0),
+        favorite: Number(favoriteCount[0]?.total ?? 0),
+        game: Number(gameCount[0]?.total ?? 0),
+        recentAccess: Number(recentAccessCount[0]?.total ?? 0)
+      },
+      items: {
+        all: allItems,
+        recentRun: recentRunItems,
+        favorite: favoriteItems,
+        game: gameItems,
+        recentAccess: recentAccessItems,
+        activeCategory: recentCategoryItems
+      }
+    }
+  }
+
+  static async getRandomResource() {
+    const rows = await db
+      .select({
+        id: resource.id,
+        title: resource.title,
+        categoryId: resource.categoryId,
+        createTime: resource.createTime,
+        categoryName: category.name,
+        categoryEmoji: category.emoji
+      })
+      .from(resource)
+      .innerJoin(category, eq(resource.categoryId, category.id))
+      .where(and(
+        eq(resource.isDeleted, false),
+        eq(category.isDeleted, false)
+      ))
+      .orderBy(sql`random()`)
+      .limit(1)
+
+    return rows[0] ?? null
+  }
+
+  static async getFavoriteResources(page = 1, pageSize = 10) {
+    const normalizedPage = Math.max(1, Math.floor(Number(page) || 1))
+    const normalizedPageSize = Math.max(1, Math.min(50, Math.floor(Number(pageSize) || 10)))
+    const whereClause = and(
+      eq(resource.isDeleted, false),
+      eq(resource.ifFavorite, true),
+      eq(category.isDeleted, false)
+    )
+
+    const totalResult = await db
+      .select({ total: count(resource.id) })
+      .from(resource)
+      .innerJoin(category, eq(resource.categoryId, category.id))
+      .where(whereClause)
+
+    const items = await db
+      .select({
+        id: resource.id,
+        title: resource.title,
+        categoryId: resource.categoryId,
+        categoryName: category.name,
+        categoryEmoji: category.emoji,
+        categoryPillColor: category.pillColor,
+        coverPath: resource.coverPath,
+        createTime: resource.createTime,
+        basePath: resource.basePath,
+        fileName: resource.fileName
+      })
+      .from(resource)
+      .innerJoin(category, eq(resource.categoryId, category.id))
+      .where(whereClause)
+      .orderBy(desc(resource.createTime), asc(resource.title))
+      .limit(normalizedPageSize)
+      .offset((normalizedPage - 1) * normalizedPageSize)
+
+    return {
+      items,
+      total: Number(totalResult[0]?.total ?? 0),
+      page: normalizedPage,
+      pageSize: normalizedPageSize
+    }
+  }
+
+  static async getDashboardStats() {
+    const longUnvisitedSetting = await this.getSetting(Settings.DASHBOARD_LONG_UNVISITED_DAYS)
+    const configuredLongUnvisitedDays = Math.max(
+      MIN_LONG_UNVISITED_DAYS,
+      Math.min(
+        MAX_LONG_UNVISITED_DAYS,
+        Math.floor(Number(longUnvisitedSetting?.value ?? Settings.DASHBOARD_LONG_UNVISITED_DAYS.default) || MIN_LONG_UNVISITED_DAYS)
+      )
+    )
+
+    const [
+      totalResult,
+      favoriteResult,
+      completedResult,
+      missingResult,
+      missingCoverResult,
+      longUnvisitedResult,
+      recentActivityResult
+    ] = await Promise.all([
+      db
+        .select({ total: count(resource.id) })
+        .from(resource)
+        .where(eq(resource.isDeleted, false)),
+      db
+        .select({ total: count(resource.id) })
+        .from(resource)
+        .where(and(
+          eq(resource.isDeleted, false),
+          eq(resource.ifFavorite, true)
+        )),
+      db
+        .select({ total: count(resource.id) })
+        .from(resource)
+        .where(and(
+          eq(resource.isDeleted, false),
+          eq(resource.isCompleted, true)
+        )),
+      db
+        .select({ total: count(resource.id) })
+        .from(resource)
+        .where(and(
+          eq(resource.isDeleted, false),
+          eq(resource.missingStatus, true)
+        )),
+      db
+        .select({ total: count(resource.id) })
+        .from(resource)
+        .where(and(
+          eq(resource.isDeleted, false),
+          sql`(${resource.coverPath} is null or trim(${resource.coverPath}) = '')`
+        )),
+      db
+        .select({ total: count(resource.id) })
+        .from(resource)
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(
+          eq(resource.isDeleted, false),
+          sql`(
+            (${resourceStat.lastAccessTime} is not null and ${resourceStat.lastAccessTime} < strftime('%s', 'now', ${`-${configuredLongUnvisitedDays} days`}))
+            or
+            (${resourceStat.lastAccessTime} is null and ${resource.createTime} < strftime('%s', 'now', ${`-${configuredLongUnvisitedDays} days`}))
+          )`
+        )),
+      db
+        .select({
+          launchCount: count(resourceLog.resourceId),
+          totalRuntime: sql<number>`coalesce(sum(coalesce(${resourceLog.duration}, 0)), 0)`
+        })
+        .from(resourceLog)
+        .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+        .where(and(
+          eq(resourceLog.isDeleted, false),
+          eq(resource.isDeleted, false),
+          sql`${resourceLog.startTime} >= strftime('%s', 'now', '-30 days')`
+        ))
+    ])
+
+    return {
+      totalResources: Number(totalResult[0]?.total ?? 0),
+      favoriteResources: Number(favoriteResult[0]?.total ?? 0),
+      completedResources: Number(completedResult[0]?.total ?? 0),
+      missingResources: Number(missingResult[0]?.total ?? 0),
+      missingCovers: Number(missingCoverResult[0]?.total ?? 0),
+      longUnvisitedResources: Number(longUnvisitedResult[0]?.total ?? 0),
+      recentLaunchCount: Number(recentActivityResult[0]?.launchCount ?? 0),
+      recentRuntimeSeconds: Number(recentActivityResult[0]?.totalRuntime ?? 0)
+    }
+  }
+
+  static async getActivityHeatmap(days = 365) {
+    const normalizedDays = Math.max(1, Math.min(730, Math.floor(Number(days) || 365)))
+    const startTimeCondition = sql`${resourceLog.startTime} >= strftime('%s', 'now', ${`-${normalizedDays} days`})`
+    const baseWhereClause = and(
+      eq(resourceLog.isDeleted, false),
+      eq(resource.isDeleted, false),
+      startTimeCondition
+    )
+    const hourExpression = sql<number>`cast(strftime('%H', ${resourceLog.startTime}, 'unixepoch', 'localtime') as integer)`
+    const weekdayExpression = sql<number>`cast(strftime('%w', ${resourceLog.startTime}, 'unixepoch', 'localtime') as integer)`
+
+    const [daysResult, hourResult, weekdayResult, categoryResult] = await Promise.all([
+      db
+      .select({
+        date: sql<string>`strftime('%Y-%m-%d', ${resourceLog.startTime}, 'unixepoch', 'localtime')`,
+        launchCount: count(resourceLog.resourceId),
+        totalRuntime: sql<number>`coalesce(sum(coalesce(${resourceLog.duration}, 0)), 0)`
+      })
+      .from(resourceLog)
+      .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+      .where(baseWhereClause)
+      .groupBy(sql`strftime('%Y-%m-%d', ${resourceLog.startTime}, 'unixepoch', 'localtime')`)
+      .orderBy(sql`strftime('%Y-%m-%d', ${resourceLog.startTime}, 'unixepoch', 'localtime')`),
+      db
+      .select({
+        hour: hourExpression,
+        launchCount: count(resourceLog.resourceId)
+      })
+      .from(resourceLog)
+      .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+      .where(baseWhereClause)
+      .groupBy(hourExpression)
+      .orderBy(desc(sql`count(${resourceLog.resourceId})`), asc(hourExpression))
+      .limit(1),
+      db
+      .select({
+        weekday: weekdayExpression,
+        launchCount: count(resourceLog.resourceId)
+      })
+      .from(resourceLog)
+      .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+      .where(baseWhereClause)
+      .groupBy(weekdayExpression)
+      .orderBy(desc(sql`count(${resourceLog.resourceId})`), asc(weekdayExpression))
+      .limit(1),
+      db
+      .select({
+        categoryName: category.name,
+        categoryEmoji: category.emoji,
+        launchCount: count(resourceLog.resourceId)
+      })
+      .from(resourceLog)
+      .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+      .innerJoin(category, eq(resource.categoryId, category.id))
+      .where(and(
+        baseWhereClause,
+        eq(category.isDeleted, false)
+      ))
+      .groupBy(category.id, category.name, category.emoji)
+      .orderBy(desc(sql`count(${resourceLog.resourceId})`), asc(category.name))
+      .limit(1)
+    ])
+
+    const peakHour = Number(hourResult[0]?.hour)
+    const peakWeekday = Number(weekdayResult[0]?.weekday)
+    const peakCategory = categoryResult[0]
+    const weekdayLabels = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+    const formatHourLabel = (hour: number) => `${String(hour).padStart(2, '0')}:00 - ${String(hour).padStart(2, '0')}:59`
+
+    return {
+      days: daysResult,
+      summary: {
+        mostActiveHour: Number.isFinite(peakHour) ? formatHourLabel(peakHour) : '暂无',
+        mostActiveWeekday: weekdayLabels[peakWeekday] ?? '暂无',
+        mostUsedCategory: peakCategory?.categoryName
+          ? `${peakCategory.categoryEmoji ? `${peakCategory.categoryEmoji} ` : ''}${peakCategory.categoryName}`
+          : '暂无'
+      }
+    }
+  }
+
+  static async getRecentResourceLogs(page = 1, pageSize = 10) {
+    await this.ensureCategoryPillColorColumn()
+
+    const normalizedPage = Math.max(1, Math.floor(Number(page) || 1))
+    const normalizedPageSize = Math.max(1, Math.min(50, Math.floor(Number(pageSize) || 10)))
+    const whereClause = and(
+      eq(resourceLog.isDeleted, false),
+      eq(resource.isDeleted, false),
+      eq(category.isDeleted, false),
+      sql`${resourceLog.startTime} is not null`
+    )
+
+    const totalResult = await db
+      .select({ total: count(resourceLog.resourceId) })
+      .from(resourceLog)
+      .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+      .innerJoin(category, eq(resource.categoryId, category.id))
+      .where(whereClause)
+
+    const items = await db
+      .select({
+        resourceId: resource.id,
+        title: resource.title,
+        categoryId: resource.categoryId,
+        categoryName: category.name,
+        categoryEmoji: category.emoji,
+        categoryPillColor: category.pillColor,
+        startTime: resourceLog.startTime,
+        endTime: resourceLog.endTime,
+        duration: resourceLog.duration,
+        launchMode: resourceLog.launchMode
+      })
+      .from(resourceLog)
+      .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+      .innerJoin(category, eq(resource.categoryId, category.id))
+      .where(whereClause)
+      .orderBy(desc(resourceLog.startTime), asc(resource.title))
+      .limit(normalizedPageSize)
+      .offset((normalizedPage - 1) * normalizedPageSize)
+
+    return {
+      items,
+      total: Number(totalResult[0]?.total ?? 0),
+      page: normalizedPage,
+      pageSize: normalizedPageSize
     }
   }
 

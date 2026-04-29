@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, h, onMounted, provide, ref, watch } from 'vue'
-import {darkTheme} from 'naive-ui'
+import {darkTheme, dateZhCN, zhCN} from 'naive-ui'
 import {commonThemeOverrides} from '../theme/common'
 import {baseDarkThemeOverrides} from '../theme/dark'
 import {baseLightThemeOverrides} from "../theme/light";
+import { getAppPrimaryColor } from '../theme/primary'
 import type {MenuOption} from "naive-ui";
 import { useRoute, useRouter } from 'vue-router'
 import { createLogger } from '../../../main/util/logger'
@@ -34,7 +35,7 @@ import packageJson from '../../../../package.json'
 
 const router = useRouter()
 const route = useRoute()
-const primaryColor = '#764ba2'
+const primaryColor = computed(() => getAppPrimaryColor(props.isDark))
 const logger = createLogger('main-layout')
 const APP_VERSION = packageJson.version
 
@@ -118,13 +119,14 @@ const playbackModeLabel = computed(() => {
 
 // 动态合并主题
 const currentThemeOverrides = computed(() => {
-  const common = commonThemeOverrides(primaryColor)
-  const dark = baseDarkThemeOverrides(primaryColor)
-  const light = baseLightThemeOverrides(primaryColor)
+  const common = commonThemeOverrides(primaryColor.value)
+  const dark = baseDarkThemeOverrides(primaryColor.value)
+  const light = baseLightThemeOverrides(primaryColor.value)
   return props.isDark ? {...common, ...dark} : {...common, ...light}
 })
 
 provide('appIsDark', computed(() => props.isDark))
+provide('appPrimaryColor', primaryColor)
 
 const activeKey = ref('dashboard')
 const menuOptions = ref<MenuOption[]>([])
@@ -158,7 +160,13 @@ const handleMenuClick = (key: string) => {
 }
 
 onMounted(async () => {
-  const category = await window.api.db.getCategory();
+  let category: Array<{ emoji: any; name: any; id: any }> = []
+  try {
+    category = await window.api.db.getCategory()
+  } catch (error) {
+    logger.error('failed to load category menu', error)
+  }
+
   menuOptions.value = [
     {
       label: renderMenuLabel('主页', '总览与最近活动'),
@@ -283,6 +291,8 @@ const handleClearAllNotifications = () => {
   <n-config-provider
     :theme="isDark ? darkTheme : null"
     :theme-overrides="currentThemeOverrides"
+    :locale="zhCN"
+    :date-locale="dateZhCN"
   >
     <n-layout has-sider class="app-container">
 
@@ -780,7 +790,7 @@ body {
 }
 
 .mini-audio-player {
-  position: absolute;
+  position: fixed;
   right: 18px;
   bottom: 78px;
   z-index: 12;

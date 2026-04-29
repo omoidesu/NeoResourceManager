@@ -54,6 +54,42 @@ function registerResource() {
     return await DatabaseService.getResourceByCategoryId(categoryId, query)
   })
 
+  ipcMain.handle('db:get-recently-added-resources', async (_event, days?: number, limit?: number) => {
+    return await DatabaseService.getRecentlyAddedResources(days, limit)
+  })
+
+  ipcMain.handle('db:get-random-resource', async () => {
+    return await DatabaseService.getRandomResource()
+  })
+
+  ipcMain.handle('db:get-favorite-resources', async (_event, limit?: number) => {
+    return await DatabaseService.getFavoriteResources(limit)
+  })
+
+  ipcMain.handle('db:get-dashboard-stats', async () => {
+    return await DatabaseService.getDashboardStats()
+  })
+
+  ipcMain.handle('db:get-activity-heatmap', async (_event, days?: number) => {
+    return await DatabaseService.getActivityHeatmap(days)
+  })
+
+  ipcMain.handle('db:get-home-next-play-resources', async (_event, limit?: number) => {
+    return await DatabaseService.getHomeNextPlayResources(limit)
+  })
+
+  ipcMain.handle('db:get-home-favorite-overview', async () => {
+    return await DatabaseService.getHomeFavoriteOverview()
+  })
+
+  ipcMain.handle('db:get-home-cover-wall-data', async (_event, limit?: number) => {
+    return await DatabaseService.getHomeCoverWallData(limit)
+  })
+
+  ipcMain.handle('db:get-recent-resource-logs', async (_event, page?: number, pageSize?: number) => {
+    return await DatabaseService.getRecentResourceLogs(page, pageSize)
+  })
+
   ipcMain.handle('db:get-author-by-category-id', async (_event, categoryId: string) => {
     return await DatabaseService.getAuthorByCategoryId(categoryId)
   })

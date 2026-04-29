@@ -8,6 +8,7 @@ export const category = sqliteTable('category', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
   emoji: text('emoji'),
+  pillColor: text('pill_color'),
   referenceId: text('reference_id'),
   sort: integer('sort'),
   isDeleted: integer('is_deleted', {mode: 'boolean'}).default(false),

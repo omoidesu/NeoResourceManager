@@ -1,6 +1,6 @@
 {
   "name": "neoresourcemanager",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "An Electron application with Vue and TypeScript",
   "main": "./out/main/index.js",
   "author": "example.com",

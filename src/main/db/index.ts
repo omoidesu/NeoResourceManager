@@ -30,6 +30,8 @@ type ReconcileMigrationRule = {
   }>
 }
 
+type IdempotentColumnMigrationRule = ReconcileMigrationRule
+
 const RECONCILE_MIGRATION_RULES: ReconcileMigrationRule[] = [
   {
     tag: '0005_add_asmr_meta_creaters',
@@ -98,6 +100,16 @@ const RECONCILE_MIGRATION_RULES: ReconcileMigrationRule[] = [
   }
 ]
 
+const IDEMPOTENT_COLUMN_MIGRATION_RULES: IdempotentColumnMigrationRule[] = [
+  {
+    tag: '0015_add_category_pill_color',
+    table: 'category',
+    columns: [
+      { name: 'pill_color', type: 'text' }
+    ]
+  }
+]
+
 function ensureMigrationsTable() {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (
@@ -121,6 +133,28 @@ function markMigrationApplied(hash: string, createdAt: number) {
   sqlite
     .prepare('INSERT INTO "__drizzle_migrations" ("hash", "created_at") VALUES (?, ?)')
     .run(hash, createdAt)
+}
+
+function isMigrationApplied(createdAt: number) {
+  const row = sqlite
+    .prepare('SELECT 1 FROM "__drizzle_migrations" WHERE "created_at" = ? LIMIT 1')
+    .get(createdAt)
+
+  return Boolean(row)
+}
+
+function getMigrationSqlHash(migrationsPath: string, tag: string) {
+  const migrationSqlPath = path.join(migrationsPath, `${tag}.sql`)
+  if (!fs.existsSync(migrationSqlPath)) {
+    logger.warn('skip migration hash because migration file is missing', {
+      migration: tag,
+      migrationSqlPath
+    })
+    return ''
+  }
+
+  const migrationSql = fs.readFileSync(migrationSqlPath, 'utf8')
+  return crypto.createHash('sha256').update(migrationSql).digest('hex')
 }
 
 function reconcileSchemaMigrations(migrationsPath: string) {
@@ -167,21 +201,61 @@ function reconcileSchemaMigrations(migrationsPath: string) {
       })
     }
 
-    const migrationSqlPath = path.join(migrationsPath, `${rule.tag}.sql`)
-    if (!fs.existsSync(migrationSqlPath)) {
-      logger.warn('skip reconciliation because migration file is missing', {
-        migration: rule.tag,
-        migrationSqlPath
-      })
+    const hash = getMigrationSqlHash(migrationsPath, rule.tag)
+    if (!hash) {
       continue
     }
 
-    const migrationSql = fs.readFileSync(migrationSqlPath, 'utf8')
-    const hash = crypto.createHash('sha256').update(migrationSql).digest('hex')
     markMigrationApplied(hash, journalEntry.when)
     appliedCreatedAt.add(journalEntry.when)
 
     logger.warn('marked migration as applied after schema reconciliation', {
+      migration: rule.tag,
+      table: rule.table,
+      columns: rule.columns.map((column) => column.name)
+    })
+  }
+}
+
+function applyIdempotentColumnMigrations(migrationsPath: string) {
+  ensureMigrationsTable()
+
+  const journalPath = path.join(migrationsPath, 'meta', '_journal.json')
+  if (!fs.existsSync(journalPath)) {
+    return
+  }
+
+  const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8')) as {
+    entries: Array<{ tag: string; when: number }>
+  }
+
+  for (const rule of IDEMPOTENT_COLUMN_MIGRATION_RULES) {
+    const journalEntry = journal.entries.find((entry) => entry.tag === rule.tag)
+    if (!journalEntry || isMigrationApplied(journalEntry.when)) {
+      continue
+    }
+
+    const existingColumns = getTableColumns(rule.table)
+    for (const column of rule.columns) {
+      if (existingColumns.has(column.name)) {
+        continue
+      }
+
+      addMissingColumn(rule.table, column.name, column.type)
+      logger.warn('added missing column through idempotent migration guard', {
+        table: rule.table,
+        column: column.name,
+        migration: rule.tag
+      })
+    }
+
+    const hash = getMigrationSqlHash(migrationsPath, rule.tag)
+    if (!hash) {
+      continue
+    }
+
+    markMigrationApplied(hash, journalEntry.when)
+    logger.warn('marked idempotent column migration as applied', {
       migration: rule.tag,
       table: rule.table,
       columns: rule.columns.map((column) => column.name)
@@ -201,6 +275,7 @@ export const migrateDb = async () => {
 
   try {
     reconcileSchemaMigrations(migrationsPath)
+    applyIdempotentColumnMigrations(migrationsPath)
     migrate(db, {migrationsFolder: migrationsPath});
     logger.info('migrations completed successfully')
   } catch (err) {

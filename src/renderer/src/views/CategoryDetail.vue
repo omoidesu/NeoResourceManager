@@ -586,6 +586,7 @@ const localeEmulatorPath = ref('')
 const mtoolPath = ref('')
 const suppressAutoFetch = ref(false)
 let fetchDataRequestId = 0
+let handledAutoOpenResourceKey = ''
 let hasOpenedVideoPlayer = false
 
 const showBatchImportButton = computed(() => {
@@ -3463,6 +3464,40 @@ const addResourceRule = computed(() => ({
   }
 }))
 
+const getRouteQueryText = (value: unknown) => {
+  const rawValue = Array.isArray(value) ? value[0] : value
+  return String(rawValue ?? '').trim()
+}
+
+const getRouteKeyword = () => getRouteQueryText(route.query.keyword)
+const getRouteAutoOpenResourceId = () => getRouteQueryText(route.query.resourceId)
+const shouldAutoOpenRouteDetail = () => getRouteQueryText(route.query.openDetail) === '1'
+
+const getAutoOpenResourceKey = () => {
+  const targetResourceId = getRouteAutoOpenResourceId()
+  if (!categoryId.value || !targetResourceId || !shouldAutoOpenRouteDetail()) {
+    return ''
+  }
+
+  return `${categoryId.value}:${targetResourceId}:${getRouteKeyword()}`
+}
+
+const openRouteRequestedResourceDetail = () => {
+  const autoOpenKey = getAutoOpenResourceKey()
+  if (!autoOpenKey || autoOpenKey === handledAutoOpenResourceKey) {
+    return
+  }
+
+  const targetResourceId = getRouteAutoOpenResourceId()
+  const targetResource = resourceList.value.find((item) => String(item?.id ?? '') === targetResourceId)
+  if (!targetResource) {
+    return
+  }
+
+  handledAutoOpenResourceKey = autoOpenKey
+  handleShowResourceDetail(targetResource)
+}
+
 const fetchData = async () => {
   if (!categoryId.value) return
   const requestId = ++fetchDataRequestId
@@ -3517,6 +3552,7 @@ const fetchData = async () => {
       }
       resourceList.value = resourceResponse?.items ?? []
       totalResources.value = Number(resourceResponse?.total ?? 0)
+      openRouteRequestedResourceDetail()
       if (selectedDetailResource.value?.id) {
         const matchedDetailResource = resourceList.value.find((item) => item.id === selectedDetailResource.value.id)
         if (matchedDetailResource) {
@@ -3610,7 +3646,7 @@ watch(categoryId, (nextCategoryId, previousCategoryId) => {
 
   suppressAutoFetch.value = true
   syncBatchImportRefsFromState(String(nextCategoryId ?? ''))
-  keyword.value = ''
+  keyword.value = getRouteKeyword()
   resetSelected()
   selectionModeManuallyEnabled.value = false
   selectedResourceIds.value = []
@@ -3626,6 +3662,21 @@ watch(categoryId, (nextCategoryId, previousCategoryId) => {
   suppressAutoFetch.value = false
   fetchData()
 }, { immediate: true })
+
+watch(
+  () => [route.query.keyword, route.query.resourceId, route.query.openDetail],
+  () => {
+    if (!categoryId.value) {
+      return
+    }
+
+    suppressAutoFetch.value = true
+    keyword.value = getRouteKeyword()
+    currentPage.value = 1
+    suppressAutoFetch.value = false
+    fetchData()
+  }
+)
 
 watch(
   [keyword, missingFile, favoriteOnly, completedOnly, runningOnly, selectedAuthorList, selectedActorList, selectedAlbumList, selectedEngineList, selectedTagList, selectedTypeList, pageSize, sortBy],
@@ -6659,7 +6710,7 @@ const handleMtoolLaunchResource = async (resource: any) => {
   }
 }
 
-const handleShowResourceDetail = (resource: any) => {
+function handleShowResourceDetail(resource: any) {
   void (async () => {
     try {
       const detail = await window.api.service.getResourceDetail(String(resource?.id ?? ''))

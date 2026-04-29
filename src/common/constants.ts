@@ -128,6 +128,11 @@ export const Settings = {
     description: '电影续播完成阈值（百分比）',
     default: '95'
   },
+  DASHBOARD_LONG_UNVISITED_DAYS: {
+    name: 'dashboardLongUnvisitedDays',
+    description: '首页长期未访问资源统计阈值（天）',
+    default: '30'
+  },
   VERSION: {
     name: 'version',
     description: '版本号',

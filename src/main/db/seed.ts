@@ -5,6 +5,7 @@ import {generateId} from '../util/id-generator'
 import {Settings, DictType} from "../../common/constants";
 import path from 'path'
 import {app} from 'electron'
+import semver from 'semver'
 import { createLogger } from '../util/logger';
 
 const logger = createLogger('db-seed')
@@ -27,29 +28,33 @@ function resolveCurrentAppVersion() {
   return appVersion || '0.0.0'
 }
 
-function compareVersion(left: string, right: string) {
-  const normalize = (input: string) => String(input ?? '')
-    .trim()
-    .replace(/^[^0-9]*/, '')
-    .split('.')
-    .map((part) => {
-      const matched = part.match(/\d+/)
-      return matched ? Number(matched[0]) : 0
-    })
-
-  const leftParts = normalize(left)
-  const rightParts = normalize(right)
-  const maxLength = Math.max(leftParts.length, rightParts.length)
-
-  for (let index = 0; index < maxLength; index += 1) {
-    const leftValue = leftParts[index] ?? 0
-    const rightValue = rightParts[index] ?? 0
-
-    if (leftValue > rightValue) return 1
-    if (leftValue < rightValue) return -1
+function normalizeSemver(input: string) {
+  const trimmed = String(input ?? '').trim()
+  if (!trimmed) {
+    return '0.0.0'
   }
 
-  return 0
+  const withoutPrefix = trimmed.replace(/^[=vV\s]+/, '')
+  const directVersion = semver.valid(withoutPrefix)
+  if (directVersion) {
+    return directVersion
+  }
+
+  const numericStartVersion = semver.valid(withoutPrefix.replace(/^[^0-9]*/, ''))
+  if (numericStartVersion) {
+    return numericStartVersion
+  }
+
+  const coercedVersion = semver.coerce(withoutPrefix)?.version
+  if (coercedVersion) {
+    return coercedVersion
+  }
+
+  return '0.0.0'
+}
+
+function compareVersion(left: string, right: string) {
+  return semver.compare(normalizeSemver(left), normalizeSemver(right))
 }
 
 function upsertSetting(
@@ -172,6 +177,7 @@ function insertCategoryIfMissing(
     tx.update(category)
       .set({
         emoji: item.emoji ?? existing.emoji,
+        pillColor: existing.pillColor ?? item.pillColor,
         referenceId: item.referenceId ?? existing.referenceId,
         sort: item.sort ?? existing.sort,
         isDeleted: false
@@ -923,22 +929,23 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
   ]
 
   const categoryDefinitions = [
-    { name: '游戏', emoji: '🎮', value: 'games', sort: 1 },
-    { name: '软件', emoji: '💻', value: 'software', sort: 2 },
-    { name: '图片', emoji: '🖼️', value: 'single_image', sort: 3 },
-    { name: '漫画', emoji: '📚', value: 'multi_image', sort: 4 },
-    { name: '电影', emoji: '🎬', value: 'video', sort: 5 },
-    { name: '番剧', emoji: '📺', value: 'mulit_video', sort: 6 },
-    { name: '音声', emoji: '🎧', value: 'asmr', sort: 7 },
-    { name: '音乐', emoji: '🎶', value: 'music', sort: 8 },
-    { name: '小说', emoji: '📖', value: 'novel', sort: 9 },
-    { name: '网站', emoji: '🌐', value: 'website', sort: 10 }
+    { name: '游戏', emoji: '🎮', value: 'games', sort: 1, pillColor: '#9333ea' },
+    { name: '软件', emoji: '💻', value: 'software', sort: 2, pillColor: '#0891b2' },
+    { name: '图片', emoji: '🖼️', value: 'single_image', sort: 3, pillColor: '#d97706' },
+    { name: '漫画', emoji: '📚', value: 'multi_image', sort: 4, pillColor: '#ea580c' },
+    { name: '电影', emoji: '🎬', value: 'video', sort: 5, pillColor: '#e11d48' },
+    { name: '番剧', emoji: '📺', value: 'mulit_video', sort: 6, pillColor: '#db2777' },
+    { name: '音声', emoji: '🎧', value: 'asmr', sort: 7, pillColor: '#65a30d' },
+    { name: '音乐', emoji: '🎶', value: 'music', sort: 8, pillColor: '#0284c7' },
+    { name: '小说', emoji: '📖', value: 'novel', sort: 9, pillColor: '#16a34a' },
+    { name: '网站', emoji: '🌐', value: 'website', sort: 10, pillColor: '#737373' }
   ]
 
   const categories = categoryDefinitions.map((item) => ({
     id: generateId(),
     name: item.name,
     emoji: item.emoji,
+    pillColor: item.pillColor,
     referenceId: dictDataList.find((dictItem) => dictItem.typeId === dictTypeIds.resource && dictItem.value === item.value)?.id,
     sort: item.sort
   }))

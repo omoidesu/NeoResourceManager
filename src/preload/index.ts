@@ -61,6 +61,15 @@ const api = {
 
     // resource
     getResourceByCategoryId: (categoryId: string, query?: any) => ipcRenderer.invoke('db:get-resource-by-category-id', categoryId, query),
+    getRecentlyAddedResources: (days?: number, limit?: number) => ipcRenderer.invoke('db:get-recently-added-resources', days, limit),
+    getRandomResource: () => ipcRenderer.invoke('db:get-random-resource'),
+    getFavoriteResources: (page?: number, pageSize?: number) => ipcRenderer.invoke('db:get-favorite-resources', page, pageSize),
+    getDashboardStats: () => ipcRenderer.invoke('db:get-dashboard-stats'),
+    getActivityHeatmap: (days?: number) => ipcRenderer.invoke('db:get-activity-heatmap', days),
+    getHomeNextPlayResources: (limit?: number) => ipcRenderer.invoke('db:get-home-next-play-resources', limit),
+    getHomeFavoriteOverview: () => ipcRenderer.invoke('db:get-home-favorite-overview'),
+    getHomeCoverWallData: (limit?: number) => ipcRenderer.invoke('db:get-home-cover-wall-data', limit),
+    getRecentResourceLogs: (page?: number, pageSize?: number) => ipcRenderer.invoke('db:get-recent-resource-logs', page, pageSize),
     getAuthorByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-author-by-category-id', categoryId),
     getActorByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-actor-by-category-id', categoryId),
     getAlbumByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-album-by-category-id', categoryId),

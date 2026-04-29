@@ -3,6 +3,7 @@ import { createDiscreteApi, darkTheme } from 'naive-ui'
 import { commonThemeOverrides } from '../theme/common'
 import { baseDarkThemeOverrides } from '../theme/dark'
 import { baseLightThemeOverrides } from '../theme/light'
+import { getAppPrimaryColor } from '../theme/primary'
 import { createLogger } from '../../../main/util/logger'
 import { pushNotificationCenterItem } from './notification-center'
 
@@ -12,7 +13,6 @@ type DiscreteApiInstance = {
   dialog: ReturnType<typeof createDiscreteApi>['dialog']
 }
 
-const PRIMARY_COLOR = '#764ba2'
 const NOTIFICATION_DURATION = 7500
 
 let isDarkTheme = true
@@ -104,9 +104,10 @@ function getNotificationApi() {
     return discreteApiCache
   }
 
-  const common = commonThemeOverrides(PRIMARY_COLOR)
-  const dark = baseDarkThemeOverrides(PRIMARY_COLOR)
-  const light = baseLightThemeOverrides(PRIMARY_COLOR)
+  const primaryColor = getAppPrimaryColor(isDarkTheme)
+  const common = commonThemeOverrides(primaryColor)
+  const dark = baseDarkThemeOverrides(primaryColor)
+  const light = baseLightThemeOverrides(primaryColor)
 
   discreteApiCache = createDiscreteApi(['notification', 'dialog'], {
     configProviderProps: {
@@ -129,7 +130,7 @@ function getProgressColor(type: NotifyType) {
       return '#f0a020'
     case 'info':
     default:
-      return PRIMARY_COLOR
+      return getAppPrimaryColor(isDarkTheme)
   }
 }
 
