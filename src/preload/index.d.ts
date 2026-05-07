@@ -4,10 +4,54 @@ import {settings, category} from "../main/db/schema";
 import { ResourceForm } from '../main/model/models'
 import type { AppNotificationMessage, BatchImportProgressMessage, ResourceStateChangedMessage } from '../main/service/notification-queue.service'
 
+type HomePinnedResource = {
+  id: string
+  title: string
+  categoryId: string
+  categoryName: string
+  categoryEmoji: string | null
+  categoryPillColor: string | null
+  coverPath: string | null
+  basePath: string | null
+  fileName: string | null
+  pinnedAt: string | number | Date | null
+  createTime: string | number | Date | null
+  accessCount: number
+  lastAccessTime: string | number | Date | null
+}
+
+type HomeNextPlayResource = {
+  id: string
+  title: string
+  categoryId: string
+  categoryName: string
+  categoryEmoji: string | null
+  categoryPillColor: string | null
+  coverPath: string | null
+  basePath: string | null
+  fileName: string | null
+  ifFavorite: boolean | null
+  rating: number | null
+  createTime: string | number | Date | null
+  accessCount: number
+  reason: string
+  order: number
+}
+
+type DashboardUsageDistributionItem = {
+  categoryName: string
+  categoryEmoji: string | null
+  categoryPillColor: string | null
+  launchCount: number
+}
+
 declare global {
   interface Window {
     electron: ElectronAPI
     api: {
+      diagnostics: {
+        logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>) => void,
+      },
       db: {
         getCategory: () => Promise<category[]>,
         getCategoryById: (id: string) => Promise<category>,
@@ -19,9 +63,13 @@ declare global {
         getFavoriteResources: (page?: number, pageSize?: number) => Promise<any>,
         getDashboardStats: () => Promise<any>,
         getActivityHeatmap: (days?: number) => Promise<any>,
-        getHomeNextPlayResources: (limit?: number) => Promise<any[]>,
+        getDashboardUsageDistribution: (days?: number) => Promise<DashboardUsageDistributionItem[]>,
+        getDashboardLongUnvisitedBuckets: () => Promise<Array<{ label: string; value: number }>>,
+        getDashboardAddedTrend: (days?: number) => Promise<Array<{ date: string; count: number }>>,
+        getHomeNextPlayResources: (limit?: number) => Promise<HomeNextPlayResource[]>,
         getHomeFavoriteOverview: () => Promise<any[]>,
-        getHomeCoverWallData: (limit?: number) => Promise<any>,
+        getHomePinnedResources: (limit?: number) => Promise<HomePinnedResource[]>,
+        getHomeCoverWallData: (query?: number | { filter?: string; limit?: number; offset?: number; keyword?: string }) => Promise<any>,
         getRecentResourceLogs: (page?: number, pageSize?: number) => Promise<any>,
         getAuthorByCategoryId: (categoryId: string) => Promise<any>,
         getActorByCategoryId: (categoryId: string) => Promise<any>,
@@ -91,7 +139,8 @@ declare global {
         getScreenshotImages: (resourceId: string) => Promise<string[]>,
         saveVideoFrameScreenshot: (resourceId: string, dataUrl: string, currentTime?: number) => Promise<any>,
         getDirectoryImages: (directoryPath: string) => Promise<string[]>,
-        getDirectoryAudioTree: (directoryPath: string) => Promise<any[]>,
+        getDirectoryAudioTree: (directoryPath: string, options?: { includeMetadata?: boolean }) => Promise<any[]>,
+        getMediaMetadata: (filePath: string) => Promise<any | null>,
         selectScreenshotImage: (resourceId: string) => Promise<string | null>,
         deleteImage: (filePath: string) => Promise<string>,
       },
@@ -116,6 +165,7 @@ declare global {
         importBatchAsmrDirectories: (categoryId: string, items: any[]) => Promise<any>,
         fetchResourceInfo: (websiteId: string, resourceId: string) => Promise<any>,
         fetchWebsiteInfo: (url: string) => Promise<any>,
+        fetchWebsiteCover: (url: string) => Promise<any>,
         captureCoverScreenshot: (basePath: string) => Promise<any>,
         extractVideoCoverFrames: (basePath: string) => Promise<any>,
         extractVideoSubCoverFrames: (basePath: string) => Promise<any>,
@@ -144,6 +194,8 @@ declare global {
         updateResourceRating: (resourceId: string, rating: number) => Promise<any>,
         updateResourceFavorite: (resourceId: string, favorite: boolean) => Promise<any>,
         updateResourceCompleted: (resourceId: string, completed: boolean) => Promise<any>,
+        updateResourceTop: (resourceId: string, top: boolean) => Promise<any>,
+        updateResourceHomePin: (resourceId: string, pinned: boolean) => Promise<any>,
         startNotificationPush: () => Promise<boolean>,
         onNotificationPush: (listener: (message: AppNotificationMessage) => void) => () => void,
         onResourceStateChanged: (listener: (message: ResourceStateChangedMessage) => void) => () => void,

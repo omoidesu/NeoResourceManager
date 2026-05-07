@@ -38,6 +38,11 @@ const route = useRoute()
 const primaryColor = computed(() => getAppPrimaryColor(props.isDark))
 const logger = createLogger('main-layout')
 const APP_VERSION = packageJson.version
+const emitRendererTiming = (message: string, meta?: Record<string, unknown>) => {
+  window.api?.diagnostics?.logRenderer('info', message, meta)
+}
+const previousRouteName = ref('')
+const previousRouteFullPath = ref('')
 
 const props = defineProps<{isDark: boolean}>()
 const emit = defineEmits(['update:isDark'])
@@ -142,18 +147,29 @@ const renderMenuLabel = (title: string, caption: string) => () => h(
 )
 
 const handleMenuClick = (key: string) => {
+  const normalizedKey = String(key ?? '').trim()
+  const currentRouteName = String(route.name ?? '').trim()
+  const currentCategoryId = String(route.params.id ?? '').trim()
   activeKey.value = key
 
   const systemKeys = ['dashboard', 'search', 'setting', 'about']
-  if (systemKeys.includes(key)) {
+  if (systemKeys.includes(normalizedKey)) {
+    if (currentRouteName === normalizedKey) {
+      logger.debug('skip same-route system navigation', { key: normalizedKey })
+      return
+    }
     logger.debug('navigate to system route', { key })
-    router.push({name: key})
+    router.push({name: normalizedKey})
   } else {
+    if (currentRouteName === 'category' && currentCategoryId === normalizedKey) {
+      logger.debug('skip same-route category navigation', { key: normalizedKey })
+      return
+    }
     logger.debug('navigate to category route', { key })
     router.push({
       name: 'category',
       params: {
-        id: key
+        id: normalizedKey
       }
     })
   }
@@ -212,6 +228,42 @@ watch(
     if (name === 'category') {
       activeKey.value = String(route.params.id ?? '')
     }
+  },
+  { immediate: true }
+)
+
+watch(
+  () => route.fullPath,
+  (nextPath) => {
+    const lastRouteName = previousRouteName.value
+    const lastRouteFullPath = previousRouteFullPath.value
+    const nextName = String(route.name ?? '')
+
+    emitRendererTiming('renderer route changed', {
+      fromName: lastRouteName || null,
+      fromPath: lastRouteFullPath || null,
+      toName: nextName || null,
+      toPath: nextPath
+    })
+
+    if (nextName === 'category' && lastRouteName === 'dashboard' && lastRouteFullPath) {
+      const startedAt = performance.now()
+      ;(window as any).__nrmCategoryRoutePerf = {
+        startedAt,
+        from: lastRouteFullPath,
+        to: nextPath,
+        categoryId: String(route.params.id ?? '')
+      }
+      emitRendererTiming('route transition start', {
+        from: lastRouteFullPath,
+        to: nextPath,
+        categoryId: String(route.params.id ?? ''),
+        startedAtMs: Math.round(startedAt)
+      })
+    }
+
+    previousRouteName.value = nextName
+    previousRouteFullPath.value = nextPath
   },
   { immediate: true }
 )
@@ -349,6 +401,7 @@ const handleClearAllNotifications = () => {
               :playlist="audioPlayerStore.playlist.value"
               :initial-path="audioPlayerStore.initialPath.value"
               :initial-time="audioPlayerStore.initialTime.value"
+              :session-version="audioPlayerStore.sessionVersion.value"
               :resume-restart-threshold="audioPlayerStore.audioResumeRestartThreshold.value"
               :cover-src="audioPlayerStore.coverSrc.value"
               :title="audioPlayerStore.title.value"

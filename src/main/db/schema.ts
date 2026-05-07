@@ -20,11 +20,13 @@ export const resource = sqliteTable('resource', {
   id: text('id').primaryKey(),
   title: text('title').notNull(),
   categoryId: text('category_id').notNull().references(() => category.id),
+  searchText: text('search_text'),
   coverPath: text('cover_path'),
   description: text('description'),
   basePath: text('base_path').notNull(),
   fileName: text('fileName'),
   ifFavorite: integer('if_favorite', {mode: 'boolean'}).default(false),
+  ifTop: integer('if_top', {mode: 'boolean'}).default(false),
   isCompleted: integer('is_completed', {mode: 'boolean'}).default(false),
   rating: real('rating').default(-1),
   size: integer('size'),
@@ -33,6 +35,12 @@ export const resource = sqliteTable('resource', {
   createTime: integer('create_time', {mode: 'timestamp'}).default(sql`(strftime('%s', 'now'))`),
   isDeleted: integer('is_deleted', {mode: 'boolean'}).default(false),
 });
+
+export const homePin = sqliteTable('home_pin', {
+  resourceId: text('resource_id').primaryKey().references(() => resource.id),
+  pinnedAt: integer('pinned_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
+  isDeleted: integer('is_deleted', { mode: 'boolean' }).default(false),
+})
 
 // --- 3. 统计信息 ---
 
@@ -94,14 +102,25 @@ export const videoMeta = sqliteTable('video_meta', {
   lastPlayTime: integer('last_play_time').default(0),
 });
 
-export const videoSub = sqliteTable('video_sub', {
+export const mediaSub = sqliteTable('media_sub', {
   id: text('id').primaryKey(),
   resourceId: text('resource_id').notNull().references(() => resource.id),
   fileName: text('file_name').notNull(),
   relativePath: text('relative_path').notNull(),
+  kind: text('kind').$type<'image' | 'audio' | 'video'>().notNull(),
   coverPath: text('cover_path'),
   sortOrder: integer('sort_order').default(0),
   isVisible: integer('is_visible', { mode: 'boolean' }).default(true),
+  hasSubtitle: integer('has_subtitle', { mode: 'boolean' }).default(false),
+  duration: integer('duration'),
+  bitrate: integer('bitrate'),
+  sampleRate: integer('sample_rate'),
+  frameRate: real('frame_rate'),
+  audioBitrate: integer('audio_bitrate'),
+  audioSampleRate: integer('audio_sample_rate'),
+  width: integer('width'),
+  height: integer('height'),
+  metadataUpdatedAt: integer('metadata_updated_at', { mode: 'timestamp_ms' }),
 });
 
 export const asmrMeta = sqliteTable('asmr_meta', {
@@ -249,7 +268,7 @@ export const resourceRelations = relations(resource, ({one, many}) => ({
   singleImageMeta: one(singleImageMeta, {fields: [resource.id], references: [singleImageMeta.resourceId]}),
   multiImageMeta: one(multiImageMeta, {fields: [resource.id], references: [multiImageMeta.resourceId]}),
   videoMeta: one(videoMeta, {fields: [resource.id], references: [videoMeta.resourceId]}),
-  videoSubs: many(videoSub),
+  mediaSubs: many(mediaSub),
   asmrMeta: one(asmrMeta, {fields: [resource.id], references: [asmrMeta.resourceId]}),
   audioMeta: one(audioMeta, {fields: [resource.id], references: [audioMeta.resourceId]}),
   novelMeta: one(novelMeta, {fields: [resource.id], references: [novelMeta.resourceId]}),
@@ -274,8 +293,8 @@ export const resourceLogRelations = relations(resourceLog, ({one}) => ({
   resource: one(resource, {fields: [resourceLog.resourceId], references: [resource.id]}),
 }));
 
-export const videoSubRelations = relations(videoSub, ({one}) => ({
-  resource: one(resource, {fields: [videoSub.resourceId], references: [resource.id]}),
+export const mediaSubRelations = relations(mediaSub, ({one}) => ({
+  resource: one(resource, {fields: [mediaSub.resourceId], references: [resource.id]}),
 }));
 
 export const tagResourceRelations = relations(tagResource, ({one}) => ({

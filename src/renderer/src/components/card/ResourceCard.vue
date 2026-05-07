@@ -1,26 +1,19 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { Icon, addCollection } from '@iconify/vue'
 import materialSymbolsLightIcons from '@iconify-json/material-symbols-light/icons.json'
-import { NIcon } from 'naive-ui'
-import { getWebsitePlaceholderEmoji } from '../../utils/website-placeholder-emoji'
+import { useResourceCardDisplayState } from './composables/useResourceCardDisplayState'
+import { useResourceCardActions } from './composables/useResourceCardActions'
+import { useResourceCardContextMenu } from './composables/useResourceCardContextMenu'
+import { useResourceCardPerformance } from './composables/useResourceCardPerformance'
+import { useResourceCardPreviewAssets } from './composables/useResourceCardPreviewAssets'
+import pinnedRibbonUrl from '../../assets/pinned-ribbon.svg'
 import {
-  CheckmarkCircleOutline,
-  CreateOutline,
-  FolderOpenOutline,
-  HeartDislikeOutline,
-  HeartOutline,
-  ImageOutline,
-  InformationCircleOutline,
   AlertCircleOutline,
-  CheckmarkDoneOutline,
-  SquareOutline,
-  BookOutline,
-  DocumentTextOutline,
+  CheckmarkCircleOutline,
+  HeartOutline,
   Play,
-  ReaderOutline,
   Stop,
-  TrashOutline
 } from '@vicons/ionicons5'
 
 addCollection(materialSymbolsLightIcons)
@@ -62,722 +55,159 @@ const emit = defineEmits<{
   (event: 'open-screenshot-folder', resource: any): void
   (event: 'toggle-favorite', resource: any): void
   (event: 'toggle-completed', resource: any): void
+  (event: 'toggle-top', resource: any): void
+  (event: 'toggle-home-pin', resource: any): void
   (event: 'toggle-select', resource: any): void
   (event: 'delete', resource: any): void
   (event: 'delete-files', resource: any): void
   (event: 'modify-order', resource: any): void
 }>()
 
-const resourceTags = computed(() => props.resource?.tags ?? [])
-const resourceTypes = computed(() => props.resource?.types ?? [])
-const resourceAuthors = computed(() => props.resource?.authors ?? [])
-const resourceActors = computed(() => props.resource?.actors ?? [])
-const resourceAlbum = computed(() => String(props.resource?.audioMeta?.album ?? '').trim())
-const showAlbumLine = computed(() => String(props.categoryName ?? '').trim() === '音乐' && Boolean(resourceAlbum.value))
-const coverPreviewSrc = ref('')
-const fileIconSrc = ref('')
-const websiteFaviconSrc = ref('')
-const showContextMenu = ref(false)
-const contextMenuX = ref(0)
-const contextMenuY = ref(0)
-const showStopConfirm = ref(false)
 const cardTriggerRef = ref<HTMLElement | null>(null)
-const shouldLoadCoverPreview = ref(props.showCover === false)
-let stopClickTimer: ReturnType<typeof setTimeout> | null = null
-let coverPreviewObserver: IntersectionObserver | null = null
-let coverPreviewTaskId = 0
-
-const isNovelCategory = computed(() => String(props.categoryName ?? '').trim() === '小说')
-const isMovieCategory = computed(() => String(props.categoryName ?? '').trim() === '电影')
-const isAnimeCategory = computed(() => String(props.categoryName ?? '').trim() === '番剧')
-const isWebsiteCategory = computed(() => String(props.categoryName ?? '').trim() === '网站')
-const isVideoLikeCategory = computed(() => isMovieCategory.value || isAnimeCategory.value)
-const completedLabel = computed(() => {
-  if (isNovelCategory.value) {
-    return '读完'
-  }
-
-  if (isMovieCategory.value) {
-    return '播完'
-  }
-
-  return '通关'
-})
-const completedStateLabel = computed(() => `已${completedLabel.value}`)
-const inactiveStatusIconColor = 'currentColor'
-const favoriteIconColor = computed(() => (props.resource?.ifFavorite ? '#f0a020' : inactiveStatusIconColor))
-const completedIconColor = computed(() => (props.resource?.isCompleted ? '#2080f0' : inactiveStatusIconColor))
-
-const normalizeCoverPreviewSource = (coverPath: string) => {
-  if (!coverPath) {
-    return ''
-  }
-
-  if (coverPath.startsWith('//')) {
-    return `https:${coverPath}`
-  }
-
-  return coverPath
-}
-
-const normalizeWebsiteIconSource = (iconPath: string) => {
-  const normalizedPath = String(iconPath ?? '').trim()
-  if (!normalizedPath) {
-    return ''
-  }
-
-  if (normalizedPath.startsWith('//')) {
-    return `https:${normalizedPath}`
-  }
-
-  return normalizedPath
-}
-
-const renderMenuIcon = (icon: any) => () => h(NIcon, null, { default: () => h(icon) })
-const renderDangerLabel = (label: string) => () => h('span', {
-  style: {
-    color: '#ff7875',
-    fontWeight: 700
-  }
-}, label)
-
-const contextMenuOptions = computed(() => ([
-  {
-    label: props.startText || '启动',
-    key: 'launch',
-    disabled: !canLaunch.value,
-    icon: renderMenuIcon(Play)
-  },
-  ...(props.showDefaultAppPlay ? [{
-    label: props.defaultAppActionText || '使用默认应用打开',
-    key: 'default-app-play',
-    disabled: !Boolean(props.resource?.basePath) || Boolean(props.resource?.missingStatus),
-    icon: renderMenuIcon(Play)
-  }] : []),
-  ...(props.showAddToPlaylist ? [{
-    label: '加入播放列表',
-    key: 'add-to-playlist',
-    disabled: !Boolean(props.resource?.basePath) || Boolean(props.resource?.missingStatus),
-    icon: renderMenuIcon(Play)
-  }] : []),
-  ...(props.showMtoolLaunch ? [{
-    label: '通过 MTool 启动',
-    key: 'mtool-launch',
-    disabled: !props.canMtoolLaunch || !canLaunch.value,
-    icon: renderMenuIcon(Play)
-  }] : []),
-  ...(props.showZoneLaunch ? [{
-    label: '转区启动',
-    key: 'zone-launch',
-    disabled: !props.canZoneLaunch || !canLaunch.value,
-    icon: renderMenuIcon(Play)
-  }] : []),
-  ...(props.showAdminLaunch ? [{
-    label: '以管理员身份运行',
-    key: 'admin-launch',
-    disabled: !canLaunch.value,
-    icon: renderMenuIcon(AlertCircleOutline)
-  }] : []),
-  {
-    label: '详细信息',
-    key: 'detail',
-    icon: renderMenuIcon(InformationCircleOutline)
-  },
-  {
-    label: '修改信息',
-    key: 'edit',
-    icon: renderMenuIcon(CreateOutline)
-  },
-  ...(props.showModifyOrder ? [{
-    label: '修改顺序',
-    key: 'modify-order',
-    disabled: !Boolean(props.resource?.basePath) || Boolean(props.resource?.missingStatus),
-    icon: renderMenuIcon(CreateOutline)
-  }] : []),
-  {
-    label: props.selected ? '取消多选' : '多选',
-    key: 'toggle-select',
-    icon: renderMenuIcon(props.selected ? CheckmarkDoneOutline : SquareOutline)
-  },
-  {
-    label: props.resource?.ifFavorite ? '取消收藏' : '收藏',
-    key: 'toggle-favorite',
-    disabled: !canToggleFavorite.value,
-    icon: renderMenuIcon(props.resource?.ifFavorite ? HeartDislikeOutline : HeartOutline)
-  },
-  ...(props.showCompletedToggle ? [{
-    label: props.resource?.isCompleted ? `取消${completedStateLabel.value}` : completedStateLabel.value,
-    key: 'toggle-completed',
-    disabled: !canToggleCompleted.value,
-    icon: renderMenuIcon(CheckmarkCircleOutline)
-  }] : []),
-  ...(!isWebsiteCategory.value ? [{
-    label: '打开文件夹',
-    key: 'open-folder',
-    disabled: !Boolean(props.resource?.basePath) || Boolean(props.resource?.missingStatus),
-    icon: renderMenuIcon(FolderOpenOutline)
-  }] : []),
-  ...(props.showScreenshotFolder ? [{
-    label: '打开截图文件夹',
-    key: 'open-screenshot-folder',
-    disabled: !Boolean(props.resource?.id),
-    icon: renderMenuIcon(ImageOutline)
-  }] : []),
-  {
-    type: 'divider',
-    key: 'danger-divider'
-  },
-  {
-    label: renderDangerLabel(`删除${props.categoryName || '资源'}`),
-    key: 'delete',
-    icon: renderMenuIcon(TrashOutline)
-  },
-  ...(!isWebsiteCategory.value ? [{
-    label: renderDangerLabel('删除本地文件'),
-    key: 'delete-files',
-    disabled: Boolean(props.resource?.missingStatus) || !Boolean(props.resource?.basePath),
-    icon: renderMenuIcon(TrashOutline)
-  }] : [])
-]))
-
-const displayBaseName = computed(() => {
-  const fileName = String(props.resource?.fileName ?? props.resource?.filename ?? '')
-  if (fileName) {
-    return fileName
-  }
-
-  const basePath = String(props.resource?.basePath ?? '')
-  if (!basePath) {
-    return ''
-  }
-
-  const normalizedPath = basePath.replace(/\\/g, '/')
-  return normalizedPath.split('/').pop() ?? normalizedPath
-})
-const websiteUrl = computed(() =>
-  String(
-    props.resource?.websiteMeta?.url
-    ?? props.resource?.websiteMeta?.website
-    ?? props.resource?.meta?.website
-    ?? props.resource?.website
-    ?? ''
-  ).trim()
-)
-const websiteIsDownloadLink = computed(() => Boolean(
-  props.resource?.websiteMeta?.isDownloadLink
-  ?? props.resource?.meta?.isDownloadLink
-))
-const cardSubtitle = computed(() => isWebsiteCategory.value ? websiteUrl.value : displayBaseName.value)
-const websitePlaceholderEmoji = computed(() =>
-  getWebsitePlaceholderEmoji(props.resource?.id, websiteUrl.value, websiteIsDownloadLink.value)
-)
-const showWebsiteCoverPlaceholder = computed(() =>
-  isWebsiteCategory.value && !coverPreviewSrc.value && Boolean(websiteFaviconSrc.value)
-)
-const showWebsiteEmojiCoverPlaceholder = computed(() =>
-  isWebsiteCategory.value && !coverPreviewSrc.value && !websiteFaviconSrc.value
-)
-
-const fileExtension = computed(() => {
-  const fileName = displayBaseName.value
-  const matched = fileName.match(/\.([^.\\/]+)$/)
-  return String(matched?.[1] ?? '').trim().toLowerCase()
+const { reportCardMounted, logCardTiming, previewLoadStrategy } = useResourceCardPerformance({
+  getResource: () => props.resource,
+  getCategoryName: () => String(props.categoryName ?? '').trim()
 })
 
-const showFileTypeIcon = computed(() => {
-  const normalizedCategoryName = String(props.categoryName ?? '').trim()
-  return normalizedCategoryName === '游戏' || normalizedCategoryName === '软件' || (isNovelCategory.value && Boolean(fileExtension.value))
+const {
+  resourceTags,
+  resourceTypes,
+  resourceAuthors,
+  resourceActors,
+  resourceAlbum,
+  showAlbumLine,
+  isWebsiteCategory,
+  completedLabel,
+  completedStateLabel,
+  favoriteIconColor,
+  completedIconColor,
+  displayBaseName,
+  websiteIsDownloadLink,
+  cardSubtitle,
+  websitePlaceholderEmoji,
+  showFileTypeIcon,
+  showNovelFileIcon,
+  showNovelMarkdownIcon,
+  showAsyncFileIcon,
+  novelFileIcon,
+  novelFileIconTitle,
+  novelPublishInfo,
+  videoYearInfo,
+  videoCoverProgressText,
+  launchActionText,
+  showActorLine,
+  actorLineLabel,
+  fallbackExecutableIcon,
+  normalizedRating,
+  isRunning
+} = useResourceCardDisplayState({
+  resource: computed(() => props.resource),
+  categoryName: computed(() => String(props.categoryName ?? '').trim()),
+  hideTypeLine: computed(() => Boolean(props.hideTypeLine)),
+  startText: computed(() => String(props.startText ?? '').trim())
 })
 
-const showNovelFileIcon = computed(() => isNovelCategory.value && Boolean(fileExtension.value))
-const showNovelMarkdownIcon = computed(() => ['md', 'markdown'].includes(fileExtension.value))
-const novelFileIcon = computed(() => {
-  if (fileExtension.value === 'txt') return ReaderOutline
-  if (fileExtension.value === 'pdf') return DocumentTextOutline
-  return BookOutline
+const {
+  coverPreviewSrc,
+  fileIconSrc,
+  websiteFaviconSrc,
+  showWebsiteCoverPlaceholder,
+  showWebsiteEmojiCoverPlaceholder
+} = useResourceCardPreviewAssets({
+  resource: computed(() => props.resource),
+  showCover: computed(() => props.showCover !== false),
+  isWebsiteCategory,
+  showAsyncFileIcon,
+  cardTriggerRef,
+  reportCardMounted,
+  logCardTiming,
+  ...previewLoadStrategy
 })
-const novelFileIconTitle = computed(() => `${fileExtension.value.toUpperCase()} 文件`)
-
-const novelPublishInfo = computed(() => {
-  if (!isNovelCategory.value) {
-    return ''
-  }
-
-  const rawYear = Number(props.resource?.novelMeta?.year ?? 0)
-  const year = Number.isFinite(rawYear) && rawYear >= 1000 ? String(Math.trunc(rawYear)) : ''
-  if (!year) {
-    return ''
-  }
-
-  const publisher = String(props.resource?.novelMeta?.publisher ?? '').trim()
-  return [year, publisher].filter(Boolean).join(' / ')
+const {
+  showStopConfirm,
+  launchButtonStyle,
+  canLaunch,
+  canStop,
+  stopNeedsConfirm,
+  canToggleFavorite,
+  canToggleCompleted,
+  handleLaunch,
+  handleStop,
+  handleStopButtonClick,
+  handleStopButtonDoubleClick,
+  handleConfirmStop,
+  handleToggleFavorite,
+  handleToggleCompleted,
+  handleToggleSelect,
+  handleShowDetail,
+  handleRunningStateChange
+} = useResourceCardActions({
+  resource: computed(() => props.resource),
+  selectionMode: computed(() => Boolean(props.selectionMode)),
+  stopNeedsConfirmProp: computed(() => Boolean(props.stopNeedsConfirm)),
+  isWebsiteCategory,
+  isRunning,
+  onLaunch: (resource) => emit('launch', resource),
+  onStop: (resource) => emit('stop', resource),
+  onToggleFavorite: (resource) => emit('toggle-favorite', resource),
+  onToggleCompleted: (resource) => emit('toggle-completed', resource),
+  onToggleSelect: (resource) => emit('toggle-select', resource),
+  onShowDetail: (resource) => emit('show-detail', resource)
 })
-
-const videoYearInfo = computed(() => {
-  if (!isVideoLikeCategory.value) {
-    return ''
-  }
-
-  const rawYear = Number(props.resource?.videoMeta?.year ?? 0)
-  return Number.isFinite(rawYear) && rawYear >= 1000 ? String(Math.trunc(rawYear)) : ''
+const {
+  showContextMenu,
+  contextMenuX,
+  contextMenuY,
+  contextMenuOptions,
+  handleContextMenu,
+  handleSelectMenu
+} = useResourceCardContextMenu({
+  resource: computed(() => props.resource),
+  categoryName: computed(() => String(props.categoryName ?? '').trim()),
+  startText: computed(() => String(props.startText ?? '')),
+  selected: computed(() => Boolean(props.selected)),
+  showDefaultAppPlay: computed(() => Boolean(props.showDefaultAppPlay)),
+  defaultAppActionText: computed(() => String(props.defaultAppActionText ?? '')),
+  showAddToPlaylist: computed(() => Boolean(props.showAddToPlaylist)),
+  showMtoolLaunch: computed(() => Boolean(props.showMtoolLaunch)),
+  canMtoolLaunch: computed(() => Boolean(props.canMtoolLaunch)),
+  showZoneLaunch: computed(() => Boolean(props.showZoneLaunch)),
+  canZoneLaunch: computed(() => Boolean(props.canZoneLaunch)),
+  showAdminLaunch: computed(() => Boolean(props.showAdminLaunch)),
+  showModifyOrder: computed(() => Boolean(props.showModifyOrder)),
+  showCompletedToggle: computed(() => Boolean(props.showCompletedToggle)),
+  showScreenshotFolder: computed(() => Boolean(props.showScreenshotFolder)),
+  isWebsiteCategory,
+  completedStateLabel,
+  canLaunch,
+  canToggleFavorite,
+  canToggleCompleted,
+  handleLaunch,
+  handleToggleFavorite,
+  handleToggleCompleted,
+  handleToggleTop: () => emit('toggle-top', props.resource),
+  handleToggleHomePin: () => emit('toggle-home-pin', props.resource),
+  handleToggleSelect,
+  onZoneLaunch: (resource) => emit('zone-launch', resource),
+  onAdminLaunch: (resource) => emit('admin-launch', resource),
+  onMtoolLaunch: (resource) => emit('mtool-launch', resource),
+  onShowDetail: (resource) => emit('show-detail', resource),
+  onEdit: (resource) => emit('edit', resource),
+  onOpenFolder: (resource) => emit('open-folder', resource),
+  onModifyOrder: (resource) => emit('modify-order', resource),
+  onDefaultAppPlay: (resource) => emit('default-app-play', resource),
+  onAddToPlaylist: (resource) => emit('add-to-playlist', resource),
+  onOpenScreenshotFolder: (resource) => emit('open-screenshot-folder', resource),
+  onDelete: (resource) => emit('delete', resource),
+  onDeleteFiles: (resource) => emit('delete-files', resource)
 })
-const normalizeResourcePath = (value: string | null | undefined) => String(value ?? '').trim().replace(/\\/g, '/').toLowerCase()
-const getFileNameFromPath = (value: string | null | undefined) => {
-  const normalizedValue = String(value ?? '').trim().replace(/\\/g, '/')
-  return normalizedValue.split('/').pop() ?? normalizedValue
-}
-const formatPlaybackTime = (value: number | null | undefined) => {
-  const totalSeconds = Math.max(0, Math.floor(Number(value ?? 0)))
-  const hours = Math.floor(totalSeconds / 3600)
-  const minutes = Math.floor((totalSeconds % 3600) / 60)
-  const seconds = totalSeconds % 60
-  const minuteSegment = String(minutes).padStart(hours > 0 ? 2 : 1, '0')
-  const secondSegment = String(seconds).padStart(2, '0')
-  return hours > 0
-    ? `${String(hours).padStart(2, '0')}:${minuteSegment}:${secondSegment}`
-    : `${minuteSegment}:${secondSegment}`
-}
-const inferEpisodeOrderFromName = (fileName: string) => {
-  const normalizedName = String(fileName ?? '').trim()
-  if (!normalizedName) {
-    return null
-  }
-
-  const patterns = [
-    /(?:^|[^a-z])ep(?:isode)?\s*0*([0-9]{1,3})(?:[^0-9]|$)/i,
-    /第\s*0*([0-9]{1,3})\s*[话話集回]/,
-    /(?:^|[^0-9])0*([0-9]{1,3})(?:v[0-9]+)?(?:[^0-9]|$)/
-  ]
-
-  for (const pattern of patterns) {
-    const matched = normalizedName.match(pattern)
-    if (!matched) {
-      continue
-    }
-
-    const order = Number(matched[1])
-    if (Number.isFinite(order) && order > 0) {
-      return order
-    }
-  }
-
-  return null
-}
-const animePlaybackProgressText = computed(() => {
-  if (!isAnimeCategory.value) {
-    return ''
-  }
-
-  const lastPlayFile = String(props.resource?.videoMeta?.lastPlayFile ?? '').trim()
-  const lastPlayTime = Math.max(0, Number(props.resource?.videoMeta?.lastPlayTime ?? 0))
-  if (!lastPlayFile || lastPlayTime <= 0) {
-    return ''
-  }
-
-  const normalizedLastPlayFile = normalizeResourcePath(lastPlayFile)
-  const fileName = getFileNameFromPath(lastPlayFile)
-  const videoSubs = Array.isArray(props.resource?.videoSubs) ? props.resource.videoSubs : []
-  const matchedVideoSub = videoSubs.find((item: any) => {
-    const relativePath = normalizeResourcePath(String(item?.relativePath ?? ''))
-    const subFileName = normalizeResourcePath(String(item?.fileName ?? ''))
-    return relativePath === normalizedLastPlayFile || subFileName === normalizeResourcePath(fileName)
-  })
-  const matchedOrder = Number(matchedVideoSub?.sortOrder ?? -1)
-  const episodeOrder = Number.isFinite(matchedOrder) && matchedOrder >= 0
-    ? matchedOrder + 1
-    : inferEpisodeOrderFromName(fileName)
-  const episodeLabel = episodeOrder
-    ? `第${String(episodeOrder).padStart(2, '0')}集`
-    : fileName
-
-  return `${episodeLabel} / ${formatPlaybackTime(lastPlayTime)}`
-})
-const moviePlaybackProgressText = computed(() => {
-  if (!isMovieCategory.value) {
-    return ''
-  }
-
-  const lastPlayTime = Math.max(0, Number(props.resource?.videoMeta?.lastPlayTime ?? 0))
-  return lastPlayTime > 0 ? formatPlaybackTime(lastPlayTime) : ''
-})
-const videoCoverProgressText = computed(() => animePlaybackProgressText.value || moviePlaybackProgressText.value)
-const showActorLine = computed(() => (props.hideTypeLine || isVideoLikeCategory.value) && resourceActors.value.length)
-const actorLineLabel = computed(() => (isVideoLikeCategory.value ? '声优/演员' : '声优'))
-
-const fallbackExecutableIcon = computed(() => {
-  const fileName = displayBaseName.value.toLowerCase()
-
-  if (fileName.endsWith('.exe')) return '🧩'
-  if (fileName.endsWith('.html') || fileName.endsWith('.htm')) return '🌐'
-  if (fileName.endsWith('.swf')) return '⚡'
-  if (fileName.endsWith('.apk')) return '📱'
-  if (fileName.endsWith('.bat') || fileName.endsWith('.cmd')) return '⚙'
-
-  return '📄'
-})
-
-const normalizedRating = computed(() => {
-  const rating = Number(props.resource?.rating ?? -1)
-
-  if (!Number.isFinite(rating) || rating < 0) {
-    return 0
-  }
-
-  return rating
-})
-
-const isRunning = computed(() => Boolean(props.resource?.isRunning))
-
-const launchButtonStyle = computed(() => {
-  if (isRunning.value) {
-    return {
-      '--n-color': '#d03050',
-      '--n-color-hover': '#de576d',
-      '--n-color-pressed': '#ab1f3f',
-      '--n-text-color': '#ffffff',
-      '--n-icon-color': '#ffffff'
-    }
-  }
-
-  return undefined
-})
-
-const canLaunch = computed(() => {
-  if (props.selectionMode) {
-    return false
-  }
-
-  if (isWebsiteCategory.value) {
-    return Boolean(props.resource?.websiteMeta?.url || props.resource?.websiteMeta?.website || props.resource?.meta?.website || props.resource?.website)
-  }
-
-  return Boolean(props.resource?.basePath) && !props.resource?.missingStatus && !isRunning.value
-})
-
-const canStop = computed(() => {
-  return !props.selectionMode && Boolean(props.resource?.isRunning)
-})
-const stopNeedsConfirm = computed(() => Boolean(props.stopNeedsConfirm))
-const canToggleFavorite = computed(() => !props.selectionMode)
-const canToggleCompleted = computed(() => !props.selectionMode)
-
-const handleLaunch = () => {
-  if (!canLaunch.value) {
-    return
-  }
-
-  emit('launch', props.resource)
-}
-
-const handleStop = () => {
-  if (!canStop.value) {
-    return
-  }
-
-  emit('stop', props.resource)
-}
-
-const clearStopClickTimer = () => {
-  if (stopClickTimer) {
-    clearTimeout(stopClickTimer)
-    stopClickTimer = null
-  }
-}
-
-const handleStopButtonClick = () => {
-  if (!canStop.value) {
-    return
-  }
-
-  if (!stopNeedsConfirm.value) {
-    handleStop()
-    return
-  }
-
-  clearStopClickTimer()
-  stopClickTimer = setTimeout(() => {
-    showStopConfirm.value = true
-    stopClickTimer = null
-  }, 220)
-}
-
-const handleStopButtonDoubleClick = () => {
-  if (!canStop.value) {
-    return
-  }
-
-  clearStopClickTimer()
-  showStopConfirm.value = false
-  handleStop()
-}
-
-const handleConfirmStop = () => {
-  showStopConfirm.value = false
-  handleStop()
-}
-
-const handleToggleFavorite = () => {
-  if (!canToggleFavorite.value) {
-    return
-  }
-
-  emit('toggle-favorite', props.resource)
-}
-
-const handleToggleCompleted = () => {
-  if (!canToggleCompleted.value) {
-    return
-  }
-
-  emit('toggle-completed', props.resource)
-}
-
-const handleShowDetail = () => {
-  if (props.selectionMode) {
-    emit('toggle-select', props.resource)
-    return
-  }
-
-  emit('show-detail', props.resource)
-}
-
-const handleContextMenu = (event: MouseEvent) => {
-  event.preventDefault()
-  showContextMenu.value = false
-  contextMenuX.value = event.clientX
-  contextMenuY.value = event.clientY
-  requestAnimationFrame(() => {
-    showContextMenu.value = true
-  })
-}
-
-const handleSelectMenu = (key: string) => {
-  showContextMenu.value = false
-
-  if (key === 'launch') {
-    handleLaunch()
-    return
-  }
-
-  if (key === 'zone-launch') {
-    emit('zone-launch', props.resource)
-    return
-  }
-
-  if (key === 'admin-launch') {
-    emit('admin-launch', props.resource)
-    return
-  }
-
-  if (key === 'mtool-launch') {
-    emit('mtool-launch', props.resource)
-    return
-  }
-
-  if (key === 'detail') {
-    emit('show-detail', props.resource)
-    return
-  }
-
-  if (key === 'edit') {
-    emit('edit', props.resource)
-    return
-  }
-
-  if (key === 'open-folder') {
-    emit('open-folder', props.resource)
-    return
-  }
-
-  if (key === 'modify-order') {
-    emit('modify-order', props.resource)
-    return
-  }
-
-  if (key === 'default-app-play') {
-    emit('default-app-play', props.resource)
-    return
-  }
-
-  if (key === 'add-to-playlist') {
-    emit('add-to-playlist', props.resource)
-    return
-  }
-
-  if (key === 'open-screenshot-folder') {
-    emit('open-screenshot-folder', props.resource)
-    return
-  }
-
-  if (key === 'toggle-favorite') {
-    handleToggleFavorite()
-    return
-  }
-
-  if (key === 'toggle-select') {
-    emit('toggle-select', props.resource)
-    return
-  }
-
-  if (key === 'toggle-completed') {
-    handleToggleCompleted()
-    return
-  }
-
-  if (key === 'delete') {
-    emit('delete', props.resource)
-    return
-  }
-
-  if (key === 'delete-files') {
-    emit('delete-files', props.resource)
-  }
-}
-
-watch(
-  () => [props.resource?.coverPath, shouldLoadCoverPreview.value, props.showCover] as const,
-  async ([coverPath, shouldLoadCover, showCover]) => {
-    const taskId = ++coverPreviewTaskId
-    if (showCover === false) {
-      coverPreviewSrc.value = ''
-      return
-    }
-
-    if (!shouldLoadCover) {
-      coverPreviewSrc.value = ''
-      return
-    }
-
-    if (!coverPath) {
-      coverPreviewSrc.value = ''
-      return
-    }
-
-    const normalizedCoverPath = normalizeCoverPreviewSource(coverPath)
-    if (/^https?:\/\//i.test(normalizedCoverPath) || /^data:/i.test(normalizedCoverPath)) {
-      coverPreviewSrc.value = normalizedCoverPath
-      return
-    }
-
-    try {
-      const previewUrl = await window.api.dialog.getImagePreviewUrl(coverPath, {
-        maxWidth: 520,
-        maxHeight: 340,
-        fit: 'cover',
-        quality: 78
-      })
-      if (taskId !== coverPreviewTaskId) {
-        return
-      }
-      coverPreviewSrc.value = previewUrl ?? ''
-    } catch {
-      if (taskId !== coverPreviewTaskId) {
-        return
-      }
-      coverPreviewSrc.value = ''
-    }
-  },
-  { immediate: true }
-)
-
-watch(
-  () => [props.resource?.basePath, props.resource?.fileName ?? props.resource?.filename ?? '', showNovelFileIcon.value],
-  async ([basePath, fileName]) => {
-    if (!showFileTypeIcon.value || showNovelFileIcon.value || !basePath) {
-      fileIconSrc.value = ''
-      return
-    }
-
-    try {
-      fileIconSrc.value = (await window.api.dialog.getFileIconAsDataUrl(String(basePath), String(fileName ?? ''))) ?? ''
-    } catch {
-      fileIconSrc.value = ''
-    }
-  },
-  { immediate: true }
-)
-
-watch(
-  () => [isWebsiteCategory.value, props.resource?.websiteMeta?.favicon] as const,
-  async ([isWebsite, favicon]) => {
-    if (!isWebsite || !favicon) {
-      websiteFaviconSrc.value = ''
-      return
-    }
-
-    const normalizedFavicon = normalizeWebsiteIconSource(String(favicon))
-    if (!normalizedFavicon) {
-      websiteFaviconSrc.value = ''
-      return
-    }
-
-    if (/^https?:\/\//i.test(normalizedFavicon) || /^data:/i.test(normalizedFavicon)) {
-      websiteFaviconSrc.value = normalizedFavicon
-      return
-    }
-
-    try {
-      websiteFaviconSrc.value = (await window.api.dialog.getImagePreviewUrl(normalizedFavicon, {
-        maxWidth: 64,
-        maxHeight: 64,
-        fit: 'cover',
-        quality: 80
-      })) ?? ''
-    } catch {
-      websiteFaviconSrc.value = ''
-    }
-  },
-  { immediate: true }
-)
 
 watch(
   () => props.resource?.isRunning,
   (isRunningNow) => {
-    if (!isRunningNow) {
-      clearStopClickTimer()
-      showStopConfirm.value = false
-    }
+    handleRunningStateChange(isRunningNow)
   }
 )
-
-onBeforeUnmount(() => {
-  clearStopClickTimer()
-  coverPreviewTaskId += 1
-  coverPreviewObserver?.disconnect()
-  coverPreviewObserver = null
-})
-
-onMounted(() => {
-  if (props.showCover === false) {
-    shouldLoadCoverPreview.value = false
-    return
-  }
-
-  if (typeof IntersectionObserver === 'undefined') {
-    shouldLoadCoverPreview.value = true
-    return
-  }
-
-  const target = cardTriggerRef.value
-  if (!target) {
-    shouldLoadCoverPreview.value = true
-    return
-  }
-
-  coverPreviewObserver = new IntersectionObserver((entries) => {
-    if (entries.some((entry) => entry.isIntersecting)) {
-      shouldLoadCoverPreview.value = true
-      coverPreviewObserver?.disconnect()
-      coverPreviewObserver = null
-    }
-  }, {
-    root: null,
-    rootMargin: '240px 0px',
-    threshold: 0.01
-  })
-
-  coverPreviewObserver.observe(target)
-})
 </script>
 
 <template>
@@ -796,6 +226,13 @@ onMounted(() => {
     </n-dropdown>
 
       <div ref="cardTriggerRef" class="resource-card-trigger" @contextmenu="handleContextMenu" @click="handleShowDetail">
+      <img
+        v-if="resource.ifTop"
+        :src="pinnedRibbonUrl"
+        alt="置顶"
+        class="resource-card__pinned-ribbon"
+        draggable="false"
+      />
       <n-card
         size="small"
         class="resource-card"
@@ -810,9 +247,9 @@ onMounted(() => {
               <img
                 v-if="coverPreviewSrc"
                 :src="coverPreviewSrc"
-              :alt="resource.title"
-              class="resource-card__cover-image"
-              draggable="false"
+                :alt="resource.title"
+                class="resource-card__cover-image"
+                draggable="false"
               />
               <div
                 v-else
@@ -1096,7 +533,7 @@ onMounted(() => {
           v-else
           type="primary"
           class="resource-card__launch"
-          description="启动"
+          :description="launchActionText"
           :disabled="!canLaunch"
           @click.stop="handleLaunch()"
         >
@@ -1127,6 +564,19 @@ onMounted(() => {
   min-width: 0;
   position: relative;
   cursor: pointer;
+}
+
+.resource-card__pinned-ribbon {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 3;
+  width: 72px;
+  height: 72px;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .resource-card {

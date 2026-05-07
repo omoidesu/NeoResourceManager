@@ -107,6 +107,30 @@ const IDEMPOTENT_COLUMN_MIGRATION_RULES: IdempotentColumnMigrationRule[] = [
     columns: [
       { name: 'pill_color', type: 'text' }
     ]
+  },
+  {
+    tag: '0016_replace_video_sub_with_media_sub',
+    table: 'media_sub',
+    columns: [
+      { name: 'kind', type: 'text NOT NULL DEFAULT \'video\'' },
+      { name: 'has_subtitle', type: 'integer DEFAULT 0' },
+      { name: 'duration', type: 'integer' },
+      { name: 'bitrate', type: 'integer' },
+      { name: 'sample_rate', type: 'integer' },
+      { name: 'frame_rate', type: 'real' },
+      { name: 'audio_bitrate', type: 'integer' },
+      { name: 'audio_sample_rate', type: 'integer' },
+      { name: 'width', type: 'integer' },
+      { name: 'height', type: 'integer' },
+      { name: 'metadata_updated_at', type: 'integer' }
+    ]
+  },
+  {
+    tag: '0018_add_resource_search_text',
+    table: 'resource',
+    columns: [
+      { name: 'search_text', type: 'text' }
+    ]
   }
 ]
 
@@ -123,6 +147,14 @@ function ensureMigrationsTable() {
 function getTableColumns(tableName: string): Set<string> {
   const rows = sqlite.prepare(`PRAGMA table_info("${tableName}")`).all() as Array<{ name: string }>
   return new Set(rows.map((row) => row.name))
+}
+
+function hasTable(tableName: string) {
+  const row = sqlite
+    .prepare('SELECT 1 FROM sqlite_master WHERE type = ? AND name = ? LIMIT 1')
+    .get('table', tableName)
+
+  return Boolean(row)
 }
 
 function addMissingColumn(tableName: string, columnName: string, columnType: string) {
@@ -232,6 +264,14 @@ function applyIdempotentColumnMigrations(migrationsPath: string) {
   for (const rule of IDEMPOTENT_COLUMN_MIGRATION_RULES) {
     const journalEntry = journal.entries.find((entry) => entry.tag === rule.tag)
     if (!journalEntry || isMigrationApplied(journalEntry.when)) {
+      continue
+    }
+
+    if (!hasTable(rule.table)) {
+      logger.warn('skip idempotent column migration because table does not exist yet', {
+        table: rule.table,
+        migration: rule.tag
+      })
       continue
     }
 

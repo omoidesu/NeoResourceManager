@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { BookOutline, CloseOutline, ChevronBackOutline, ChevronForwardOutline, ImagesOutline, ExpandOutline, ContractOutline } from '@vicons/ionicons5'
+import { resolveImagePreviewSource } from '../shared/preview/usePreviewAssetLoader'
 
 const props = withDefaults(defineProps<{
   show: boolean
@@ -20,6 +21,7 @@ type FitMode = 'width' | 'contain' | 'custom'
 
 const readingMode = ref<ReadingMode>('continuous')
 const fitMode = ref<FitMode>('width')
+const continuousGapless = ref(false)
 const currentIndex = ref(0)
 const pageSrcMap = ref<Record<string, string>>({})
 const thumbSrcMap = ref<Record<string, string>>({})
@@ -100,11 +102,12 @@ const loadThumb = async (filePath: string) => {
   }
 
   try {
-    const previewUrl = await window.api.dialog.getImagePreviewUrl(normalizedPath, {
+    const previewUrl = await resolveImagePreviewSource(normalizedPath, {
       maxWidth: 240,
       maxHeight: 320,
       fit: 'cover',
-      quality: 70
+      quality: 70,
+      fallbackToFileUrl: true
     })
     if (!previewUrl) {
       return
@@ -126,11 +129,12 @@ const loadPage = async (filePath: string) => {
   }
 
   try {
-    const imageUrl = await window.api.dialog.getImagePreviewUrl(normalizedPath, {
+    const imageUrl = await resolveImagePreviewSource(normalizedPath, {
       maxWidth: 4096,
       maxHeight: 4096,
       fit: 'inside',
-      quality: 88
+      quality: 88,
+      fallbackToFileUrl: true
     })
     if (!imageUrl) {
       return
@@ -754,6 +758,14 @@ onMounted(() => {
             单页阅读
           </n-button>
           <n-button
+            v-if="readingMode === 'continuous'"
+            quaternary
+            :type="continuousGapless ? 'primary' : 'default'"
+            @click="continuousGapless = !continuousGapless"
+          >
+            无间隔
+          </n-button>
+          <n-button
             quaternary
             :type="fitMode === 'width' ? 'primary' : 'default'"
             @click="() => { fitMode = 'width'; if (readingMode === 'single') singleZoomPercent = widthPresetZoomPercent }"
@@ -819,13 +831,20 @@ onMounted(() => {
         </n-scrollbar>
 
         <div ref="viewerRef" class="comic-reader__viewer">
-          <div v-if="readingMode === 'continuous'" class="comic-reader__flow">
+          <div
+            v-if="readingMode === 'continuous'"
+            class="comic-reader__flow"
+            :class="{ 'comic-reader__flow--gapless': continuousGapless }"
+          >
             <section
               v-for="(imagePath, index) in imagePaths"
               :key="`${imagePath}-${index}`"
               :ref="(element) => setPageRef(element, index)"
               class="comic-reader__page"
-              :class="{ 'comic-reader__page--active': index === currentIndex }"
+              :class="{
+                'comic-reader__page--active': index === currentIndex,
+                'comic-reader__page--gapless': continuousGapless
+              }"
             >
               <img
                 v-if="pageSrcMap[imagePath]"
@@ -834,7 +853,8 @@ onMounted(() => {
                 class="comic-reader__page-image"
                 :class="{
                   'comic-reader__page-image--fit-width': fitMode === 'width',
-                  'comic-reader__page-image--fit-contain': fitMode === 'contain'
+                  'comic-reader__page-image--fit-contain': fitMode === 'contain',
+                  'comic-reader__page-image--gapless': continuousGapless
                 }"
               />
               <div v-else class="comic-reader__page-placeholder">
@@ -1024,6 +1044,10 @@ onMounted(() => {
   gap: 20px;
 }
 
+.comic-reader__flow--gapless {
+  gap: 0;
+}
+
 .comic-reader__single {
   position: relative;
   margin: 0 auto;
@@ -1048,6 +1072,13 @@ onMounted(() => {
   border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+.comic-reader__page--gapless {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border-color: transparent;
+}
+
 .comic-reader__page--active {
   border-color: rgba(145, 232, 193, 0.22);
 }
@@ -1058,6 +1089,10 @@ onMounted(() => {
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.02);
   flex: 0 0 auto;
+}
+
+.comic-reader__page-image--gapless {
+  border-radius: 0;
 }
 
 .comic-reader__single > .comic-reader__page-image {

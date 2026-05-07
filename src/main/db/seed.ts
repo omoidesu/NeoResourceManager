@@ -355,7 +355,7 @@ function buildSeedDefinitions(currentVersion: string): SeedDefinitions {
       description: '番剧',
       value: 'mulit_video',
       typeId: dictTypeIds.resource,
-      extra: createCategoryExtra('video_meta', 'folder', '个', [], '发行商/制作者', '播放')
+      extra: createCategoryExtra('video_meta', 'folder', '个', [], '发行商/制作者', '播放', false, true)
     }, {
       id: generateId(),
       name: '音声',

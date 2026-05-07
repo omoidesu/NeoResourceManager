@@ -367,35 +367,19 @@ const loadEpub = async (): Promise<void> => {
       throw new Error('EPUB 阅读器尚未准备好')
     }
 
-    const fileUrl = await window.api.dialog.getFileUrl(normalizedFilePath.value)
+    const binaryData = await window.api.dialog.readBinaryFile(normalizedFilePath.value)
     if (requestId !== loadRequestId) {
       return
     }
 
-    let nextBook: Book | null = null
-    if (fileUrl) {
-      try {
-        nextBook = ePub(fileUrl)
-        await nextBook.ready
-      } catch {
-        nextBook?.destroy()
-        nextBook = null
-      }
+    if (!binaryData) {
+      throw new Error('无法读取 EPUB 文件')
     }
 
-    if (!nextBook) {
-      const binaryData = await window.api.dialog.readBinaryFile(normalizedFilePath.value)
-      if (requestId !== loadRequestId) {
-        return
-      }
-
-      if (!binaryData) {
-        throw new Error('无法读取 EPUB 文件')
-      }
-
-      nextBook = ePub(new Uint8Array(binaryData).buffer)
-      await nextBook.ready
-    }
+    // EPUB 是 zip 归档，使用二进制 buffer 打开可以避免自定义 file 协议下
+    // container.xml / 章节资源的相对路径解析失败。
+    const nextBook = ePub(new Uint8Array(binaryData).buffer)
+    await nextBook.ready
 
     if (requestId !== loadRequestId) {
       nextBook.destroy()

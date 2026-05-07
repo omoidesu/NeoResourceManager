@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Compon
 import { ChevronBackOutline, ChevronForwardOutline, CloseOutline, Pause, Play, Repeat, Shuffle, Square, SwapHorizontal, VolumeHighOutline, VolumeMuteOutline } from '@vicons/ionicons5'
 import { notify } from '../utils/notification'
 import { createLogger } from '../../../main/util/logger'
+import { resolveImagePreviewSource } from '../shared/preview/usePreviewAssetLoader'
 import {
   clearAudioPlayerControls,
   registerAudioPlayerControls,
@@ -38,6 +39,7 @@ const props = withDefaults(defineProps<{
   playlist: AudioTrack[]
   initialPath?: string
   initialTime?: number
+  sessionVersion?: number
   resumeRestartThreshold?: number
   coverSrc?: string
   title?: string
@@ -1081,22 +1083,13 @@ const previewLyricsWhileScrolling = () => {
 }
 
 const resolveCoverPreviewSource = async (coverPath: string) => {
-  const normalizedCoverPath = String(coverPath ?? '').trim()
-  if (!normalizedCoverPath) {
-    return ''
-  }
-
-  if (/^https?:\/\//i.test(normalizedCoverPath) || /^data:/i.test(normalizedCoverPath)) {
-    return normalizedCoverPath
-  }
-
   try {
-    return (await window.api.dialog.getImagePreviewUrl(normalizedCoverPath, {
+    return await resolveImagePreviewSource(coverPath, {
       maxWidth: 720,
       maxHeight: 720,
       fit: 'cover',
       quality: 84
-    })) ?? ''
+    })
   } catch {
     return ''
   }
@@ -1161,6 +1154,19 @@ watch(() => props.initialPath, async (filePath) => {
   if (nextIndex >= 0 && nextIndex !== currentIndex.value) {
     await syncTrack(nextIndex, true, props.initialTime)
   }
+})
+
+watch(() => props.sessionVersion, async (nextVersion, previousVersion) => {
+  if (!props.show || !orderedPlaylist.value.length) {
+    return
+  }
+
+  if (Number(nextVersion ?? 0) === Number(previousVersion ?? 0)) {
+    return
+  }
+
+  const nextIndex = orderedPlaylist.value.findIndex((track) => track.path === props.initialPath)
+  await syncTrack(nextIndex >= 0 ? nextIndex : currentIndex.value, true, props.initialTime)
 })
 
 watch(() => props.playlist, async (playlist) => {

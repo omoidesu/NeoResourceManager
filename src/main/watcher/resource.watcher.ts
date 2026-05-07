@@ -3,6 +3,7 @@ import { Settings } from '../../common/constants'
 import { DatabaseService } from '../service/database.service'
 import { NotificationQueueService } from '../service/notification-queue.service'
 import { EverythingService, type EverythingClientInfo } from '../service/everything.service'
+import { ResourceDirectoryMetadataService, type DirectoryMetadataKind } from '../service/resource-directory-metadata.service'
 import { createFileFingerprint, readResourceMarkerPayload } from '../util/resource-marker'
 import { createLogger } from '../util/logger'
 import path from 'path'
@@ -14,6 +15,7 @@ type WatchableResource = {
   basePath: string
   fileName: string | null
   missingStatus: boolean | null
+  directoryMetadataKind?: DirectoryMetadataKind | null
 }
 
 const logger = createLogger('resource-watcher')
@@ -24,6 +26,9 @@ export class ResourceWatcher {
   private resourcesById = new Map<string, WatchableResource>()
   private resourceIdByWatchPath = new Map<string, string>()
   private pendingRelocations = new Map<string, Promise<void>>()
+  private initialMissingScanTimer: NodeJS.Timeout | null = null
+  private initialMissingScanPromise: Promise<void> | null = null
+  private lifecycleVersion = 0
   private everythingClient: EverythingClientInfo
 
   private static instance: ResourceWatcher | null = null
@@ -56,6 +61,8 @@ export class ResourceWatcher {
       logWatcher('start skipped: watcher already started')
       return
     }
+
+    this.lifecycleVersion += 1
 
     const everythingEnabled = await this.isEverythingEnabled()
 
@@ -110,17 +117,12 @@ export class ResourceWatcher {
       this.storeResource(normalizedResource)
       watchPaths.push(watchPath)
       this.watchedPaths.add(watchPath)
-      logWatcher('register existing resource', {
-        resourceId: normalizedResource.id,
-        watchPath,
-        basePath: normalizedResource.basePath,
-        fileName: normalizedResource.fileName,
-      })
     }
 
     logWatcher('starting watcher', {
       resourceCount: resources.length,
-      watchPaths,
+      watchPathCount: watchPaths.length,
+      watchPathSample: watchPaths.slice(0, 5),
     })
 
     const watcher = chokidar.watch(watchPaths, {
@@ -157,17 +159,7 @@ export class ResourceWatcher {
         logger.error('watcher error', error)
       })
 
-    for (const resource of this.resourcesById.values()) {
-      const watchPath = resolveWatchPath(resource)
-      if (!fs.existsSync(watchPath)) {
-        logWatcher('missing on startup', {
-          resourceId: resource.id,
-          watchPath,
-        })
-        await this.markMissing(resource.id)
-        void this.scheduleRelocation(resource.id)
-      }
-    }
+    this.scheduleInitialMissingScan()
   }
 
   /**
@@ -231,11 +223,14 @@ export class ResourceWatcher {
   }
 
   public async stop() {
+    this.clearInitialMissingScanTimer()
+    this.lifecycleVersion += 1
     if (!this.watcher) {
       this.watchedPaths.clear()
       this.resourcesById.clear()
       this.resourceIdByWatchPath.clear()
       this.pendingRelocations.clear()
+      this.initialMissingScanPromise = null
       return
     }
 
@@ -254,6 +249,7 @@ export class ResourceWatcher {
     this.resourcesById.clear()
     this.resourceIdByWatchPath.clear()
     this.pendingRelocations.clear()
+    this.initialMissingScanPromise = null
 
     this.everythingClient = {
       available: false,
@@ -280,6 +276,7 @@ export class ResourceWatcher {
     })
 
     if (!matchedResourceId) {
+      this.scheduleDirectoryMetadataSyncByChildPath(normalizedPath)
       return
     }
 
@@ -317,6 +314,13 @@ export class ResourceWatcher {
     })
 
     if (!matchedResourceId) {
+      this.scheduleDirectoryMetadataSyncByChildPath(normalizedPath)
+      return
+    }
+
+    const childResource = this.findDirectoryMetadataResourceByChildPath(normalizedPath, matchedResourceId)
+    if (childResource) {
+      this.scheduleDirectoryMetadataSync(childResource)
       return
     }
 
@@ -597,6 +601,52 @@ export class ResourceWatcher {
     })
   }
 
+  private scheduleDirectoryMetadataSync(resource: WatchableResource) {
+    const kind = resource.directoryMetadataKind ?? null
+    if (!kind) {
+      return
+    }
+
+    ResourceDirectoryMetadataService.scheduleResourceSync(resource.id, {
+      kind,
+      debounceMs: 800
+    })
+  }
+
+  private scheduleDirectoryMetadataSyncByChildPath(childPath: string) {
+    const matchedResource = this.findDirectoryMetadataResourceByChildPath(childPath)
+    if (!matchedResource) {
+      return
+    }
+
+    this.scheduleDirectoryMetadataSync(matchedResource)
+  }
+
+  private findDirectoryMetadataResourceByChildPath(childPath: string, excludeResourceId?: string) {
+    const normalizedChildPath = normalizeFsPath(childPath).toLowerCase()
+
+    for (const resource of this.resourcesById.values()) {
+      if (excludeResourceId && resource.id === excludeResourceId) {
+        continue
+      }
+
+      if (!resource.directoryMetadataKind || resource.fileName) {
+        continue
+      }
+
+      const resourceBasePath = normalizeFsPath(resource.basePath).toLowerCase()
+      if (!resourceBasePath || normalizedChildPath === resourceBasePath) {
+        continue
+      }
+
+      if (normalizedChildPath.startsWith(`${resourceBasePath}${path.sep}`)) {
+        return resource
+      }
+    }
+
+    return null
+  }
+
   private async isEverythingEnabled() {
     const [httpSetting, cliSetting] = await Promise.all([
       DatabaseService.getSetting(Settings.USE_EVERYTHING_HTTP),
@@ -607,6 +657,98 @@ export class ResourceWatcher {
     const cliEnabled = String(cliSetting?.value ?? Settings.USE_EVERYTHING_CLI.default) === '1'
 
     return httpEnabled || cliEnabled
+  }
+
+  private clearInitialMissingScanTimer() {
+    if (this.initialMissingScanTimer) {
+      clearTimeout(this.initialMissingScanTimer)
+      this.initialMissingScanTimer = null
+    }
+  }
+
+  private scheduleInitialMissingScan() {
+    if (this.initialMissingScanTimer || this.initialMissingScanPromise) {
+      return
+    }
+
+    const lifecycleVersion = this.lifecycleVersion
+
+    this.initialMissingScanTimer = setTimeout(() => {
+      this.initialMissingScanTimer = null
+      this.initialMissingScanPromise = this.runInitialMissingScan(lifecycleVersion)
+        .catch((error) => {
+          logger.error('initial missing scan failed', error)
+        })
+        .finally(() => {
+          this.initialMissingScanPromise = null
+        })
+    }, 1800)
+
+    logWatcher('initial missing scan scheduled', {
+      delayMs: 1800,
+      resourceCount: this.resourcesById.size,
+      lifecycleVersion,
+    })
+  }
+
+  private async runInitialMissingScan(lifecycleVersion: number) {
+    const resources = Array.from(this.resourcesById.values())
+    const batchSize = 8
+    let scannedCount = 0
+    let missingCount = 0
+
+    logWatcher('initial missing scan started', {
+      resourceCount: resources.length,
+      batchSize,
+      lifecycleVersion,
+    })
+
+    for (let index = 0; index < resources.length; index += batchSize) {
+      if (lifecycleVersion !== this.lifecycleVersion || !this.watcher) {
+        logWatcher('initial missing scan aborted', {
+          scannedCount,
+          missingCount,
+          lifecycleVersion,
+          currentLifecycleVersion: this.lifecycleVersion,
+        })
+        return
+      }
+
+      const batch = resources.slice(index, index + batchSize)
+
+      for (const resource of batch) {
+        if (lifecycleVersion !== this.lifecycleVersion || !this.watcher) {
+          logWatcher('initial missing scan aborted', {
+            scannedCount,
+            missingCount,
+            lifecycleVersion,
+            currentLifecycleVersion: this.lifecycleVersion,
+          })
+          return
+        }
+
+        const watchPath = resolveWatchPath(resource)
+        scannedCount += 1
+
+        if (!fs.existsSync(watchPath)) {
+          missingCount += 1
+          logWatcher('missing on startup', {
+            resourceId: resource.id,
+            watchPath,
+          })
+          await this.markMissing(resource.id)
+          void this.scheduleRelocation(resource.id)
+        }
+      }
+
+      await delay(0)
+    }
+
+    logWatcher('initial missing scan finished', {
+      scannedCount,
+      missingCount,
+      lifecycleVersion,
+    })
   }
 }
 
@@ -632,6 +774,7 @@ function normalizeResource(resource: WatchableResource): WatchableResource {
     basePath: normalizeFsPath(resource.basePath),
     fileName: normalizeFileName(resource.fileName),
     missingStatus: Boolean(resource.missingStatus),
+    directoryMetadataKind: resource.directoryMetadataKind ?? null,
   }
 }
 

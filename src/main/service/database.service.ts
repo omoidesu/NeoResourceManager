@@ -10,11 +10,12 @@ import {
   tagResource,
   typeResource,
   resourceType, dictType, author, authorWork, storeWork,
-  actor, gameMeta, softwareMeta, singleImageMeta, multiImageMeta, videoMeta, videoSub, asmrMeta, audioMeta, novelMeta, websiteMeta,
+  actor, gameMeta, softwareMeta, singleImageMeta, multiImageMeta, videoMeta, mediaSub, asmrMeta, audioMeta, novelMeta, websiteMeta, homePin,
 } from '../db/schema'
 import {and, asc, count, desc, eq, inArray, not, or, sql} from 'drizzle-orm'
 import {generateId} from '../util/id-generator'
 import { ResourceLogSpecialTime, SettingDetail, Settings } from "../../common/constants";
+import { createLogger } from '../util/logger'
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0]
 type DbExecutor = typeof db | DbTransaction
@@ -54,6 +55,18 @@ const DEFAULT_CATEGORY_PILL_COLORS: Record<string, string> = {
 
 export class DatabaseService {
   private static categoryPillColorColumnReady = false
+  private static resourceTopAndHomePinSchemaReady = false
+  private static resourceSearchTextColumnReady = false
+  private static logger = createLogger('database-service')
+
+  private static logCategoryQueryDuration(label: string, categoryId: string, startedAt: number, extra?: Record<string, any>) {
+    this.logger.info('category query timing', {
+      label,
+      categoryId,
+      elapsedMs: Date.now() - startedAt,
+      ...(extra ?? {})
+    })
+  }
 
   private static async ensureCategoryPillColorColumn() {
     if (this.categoryPillColorColumnReady) {
@@ -76,6 +89,126 @@ export class DatabaseService {
     }
 
     this.categoryPillColorColumnReady = true
+  }
+
+  private static async ensureResourceTopAndHomePinSchema() {
+    if (this.resourceTopAndHomePinSchemaReady) {
+      return
+    }
+
+    const resourceColumns = await db.all(sql`PRAGMA table_info('resource')`) as Array<{ name?: string }>
+    if (!resourceColumns.some((row) => row.name === 'if_top')) {
+      await db.run(sql`ALTER TABLE resource ADD if_top integer DEFAULT 0`)
+    }
+
+    await db.run(sql`
+      CREATE TABLE IF NOT EXISTS home_pin (
+        resource_id text PRIMARY KEY NOT NULL,
+        pinned_at integer DEFAULT (strftime('%s', 'now')),
+        is_deleted integer DEFAULT 0,
+        FOREIGN KEY (resource_id) REFERENCES resource(id)
+      )
+    `)
+
+    this.resourceTopAndHomePinSchemaReady = true
+  }
+
+  private static buildResourceSearchTextExpr() {
+    return sql<string>`trim(
+      coalesce(${resource.title}, '') || ' ' ||
+      coalesce(${resource.description}, '') || ' ' ||
+      coalesce((
+        select ${category.name}
+        from ${category}
+        where ${category.id} = ${resource.categoryId}
+      ), '') || ' ' ||
+      coalesce((
+        select group_concat(${tag.name}, ' ')
+        from ${tagResource}
+        inner join ${tag} on ${tag.id} = ${tagResource.tagId}
+        where ${tagResource.resourceId} = ${resource.id}
+          and coalesce(${tag.isDeleted}, 0) = 0
+      ), '') || ' ' ||
+      coalesce((
+        select group_concat(${resourceType.name}, ' ')
+        from ${typeResource}
+        inner join ${resourceType} on ${resourceType.id} = ${typeResource.typeId}
+        where ${typeResource.resourceId} = ${resource.id}
+          and coalesce(${resourceType.isDeleted}, 0) = 0
+      ), '') || ' ' ||
+      coalesce((
+        select group_concat(${author.name}, ' ')
+        from ${authorWork}
+        inner join ${author} on ${author.id} = ${authorWork.authorId}
+        where ${authorWork.resourceId} = ${resource.id}
+          and coalesce(${authorWork.isDeleted}, 0) = 0
+          and coalesce(${author.isDeleted}, 0) = 0
+      ), '') || ' ' ||
+      coalesce((
+        select group_concat(${actor.name}, ' ')
+        from ${actor}
+        where ${actor.resourceId} = ${resource.id}
+          and coalesce(${actor.isDeleted}, 0) = 0
+      ), '') || ' ' ||
+      coalesce((
+        select group_concat(${storeWork.workId}, ' ')
+        from ${storeWork}
+        where ${storeWork.resourceId} = ${resource.id}
+          and coalesce(${storeWork.isDeleted}, 0) = 0
+      ), '') || ' ' ||
+      coalesce((select ${gameMeta.nameZh} from ${gameMeta} where ${gameMeta.resourceId} = ${resource.id}), '') || ' ' ||
+      coalesce((select ${gameMeta.nameJp} from ${gameMeta} where ${gameMeta.resourceId} = ${resource.id}), '') || ' ' ||
+      coalesce((select ${gameMeta.nameEn} from ${gameMeta} where ${gameMeta.resourceId} = ${resource.id}), '') || ' ' ||
+      coalesce((select ${gameMeta.nickname} from ${gameMeta} where ${gameMeta.resourceId} = ${resource.id}), '') || ' ' ||
+      coalesce((select ${audioMeta.artist} from ${audioMeta} where ${audioMeta.resourceId} = ${resource.id}), '') || ' ' ||
+      coalesce((select ${audioMeta.album} from ${audioMeta} where ${audioMeta.resourceId} = ${resource.id}), '') || ' ' ||
+      coalesce((select ${asmrMeta.cv} from ${asmrMeta} where ${asmrMeta.resourceId} = ${resource.id}), '') || ' ' ||
+      coalesce((select ${asmrMeta.scenario} from ${asmrMeta} where ${asmrMeta.resourceId} = ${resource.id}), '') || ' ' ||
+      coalesce((select ${asmrMeta.illust} from ${asmrMeta} where ${asmrMeta.resourceId} = ${resource.id}), '') || ' ' ||
+      coalesce((select ${websiteMeta.url} from ${websiteMeta} where ${websiteMeta.resourceId} = ${resource.id}), '')
+    )`
+  }
+
+  private static async ensureResourceSearchTextColumn() {
+    if (this.resourceSearchTextColumnReady) {
+      return
+    }
+
+    const rows = await db.all(sql`PRAGMA table_info('resource')`) as Array<{ name?: string }>
+    if (!rows.some((row) => row.name === 'search_text')) {
+      await db.run(sql`ALTER TABLE resource ADD search_text text`)
+    }
+
+    const searchTextExpr = this.buildResourceSearchTextExpr()
+    const searchTextColumn = sql.raw(`"search_text"`)
+    await db.run(sql`
+      UPDATE ${resource}
+      SET ${searchTextColumn} = ${searchTextExpr}
+      WHERE coalesce(${resource.isDeleted}, 0) = 0
+        AND (
+          ${resource.searchText} IS NULL
+          OR trim(${resource.searchText}) = ''
+        )
+    `)
+
+    this.resourceSearchTextColumnReady = true
+  }
+
+  static async refreshResourceSearchText(resourceId: string, tx?: DbExecutor) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    if (!normalizedResourceId) {
+      return
+    }
+
+    await this.ensureResourceSearchTextColumn()
+    const executor = tx ?? db
+    const searchTextExpr = this.buildResourceSearchTextExpr()
+    const searchTextColumn = sql.raw(`"search_text"`)
+    await executor.run(sql`
+      UPDATE ${resource}
+      SET ${searchTextColumn} = ${searchTextExpr}
+      WHERE ${resource.id} = ${normalizedResourceId}
+    `)
   }
 
   private static isMissingCategoryPillColorError(error: unknown) {
@@ -296,9 +429,19 @@ export class DatabaseService {
   }
 
   static async getResourceByCategoryId(categoryId: string, query: ResourceQueryParams = {}) {
+    await this.ensureResourceTopAndHomePinSchema()
+
+    const startedAt = Date.now()
     const page = Math.max(1, Number(query.page ?? 1))
     const pageSize = Math.max(1, Number(query.pageSize ?? 24))
     const whereClause = and(...this.buildResourceFilterConditions(categoryId, query))
+    const categoryInfo = await this.getCategoryById(categoryId)
+    const extendTableName = String(categoryInfo?.meta?.extra?.extendTable ?? '').trim()
+    const isNovelCategory = extendTableName === 'novel_meta'
+    const isVideoCategory = extendTableName === 'video_meta'
+    const isAudioCategory = extendTableName === 'audio_meta'
+    const isAsmrCategory = extendTableName === 'asmr_meta'
+    const isWebsiteCategory = extendTableName === 'website_meta'
 
     const totalResult = await db
       .select({ total: count(resource.id) })
@@ -310,26 +453,26 @@ export class DatabaseService {
     const orderByClause = (() => {
       switch (query.sortBy) {
         case 'title-asc':
-          return [asc(resource.title), desc(resource.createTime)]
+          return [desc(resource.ifTop), asc(resource.title), desc(resource.createTime)]
         case 'title-desc':
-          return [desc(resource.title), desc(resource.createTime)]
+          return [desc(resource.ifTop), desc(resource.title), desc(resource.createTime)]
         case 'createTime-asc':
-          return [asc(resource.createTime), asc(resource.title)]
+          return [desc(resource.ifTop), asc(resource.createTime), asc(resource.title)]
         case 'lastAccessTime-desc':
-          return [desc(resourceStat.lastAccessTime), desc(resource.createTime), asc(resource.title)]
+          return [desc(resource.ifTop), desc(resourceStat.lastAccessTime), desc(resource.createTime), asc(resource.title)]
         case 'lastAccessTime-asc':
-          return [asc(resourceStat.lastAccessTime), asc(resource.createTime), asc(resource.title)]
+          return [desc(resource.ifTop), asc(resourceStat.lastAccessTime), asc(resource.createTime), asc(resource.title)]
         case 'totalRuntime-desc':
-          return [desc(resourceStat.totalRuntime), desc(resource.createTime), asc(resource.title)]
+          return [desc(resource.ifTop), desc(resourceStat.totalRuntime), desc(resource.createTime), asc(resource.title)]
         case 'totalRuntime-asc':
-          return [asc(resourceStat.totalRuntime), asc(resource.createTime), asc(resource.title)]
+          return [desc(resource.ifTop), asc(resourceStat.totalRuntime), asc(resource.createTime), asc(resource.title)]
         case 'firstAccessTime-desc':
-          return [desc(resourceStat.firstAccessTime), desc(resource.createTime), asc(resource.title)]
+          return [desc(resource.ifTop), desc(resourceStat.firstAccessTime), desc(resource.createTime), asc(resource.title)]
         case 'firstAccessTime-asc':
-          return [asc(resourceStat.firstAccessTime), asc(resource.createTime), asc(resource.title)]
+          return [desc(resource.ifTop), asc(resourceStat.firstAccessTime), asc(resource.createTime), asc(resource.title)]
         case 'createTime-desc':
         default:
-          return [desc(resource.createTime), asc(resource.title)]
+          return [desc(resource.ifTop), desc(resource.createTime), asc(resource.title)]
       }
     })()
 
@@ -344,6 +487,14 @@ export class DatabaseService {
 
     const resourceIds = pagedIds.map((item) => item.id)
     if (!resourceIds.length) {
+      this.logCategoryQueryDuration('getResourceByCategoryId', categoryId, startedAt, {
+        total,
+        page,
+        pageSize,
+        itemCount: 0,
+        sortBy: String(query.sortBy ?? 'createTime-desc'),
+        keyword: String(query.keyword ?? '').trim()
+      })
       return {
         items: [],
         total,
@@ -354,55 +505,170 @@ export class DatabaseService {
 
     const resourceList = await db.query.resource.findMany({
       where: inArray(resource.id, resourceIds),
+      columns: {
+        id: true,
+        title: true,
+        categoryId: true,
+        coverPath: true,
+        basePath: true,
+        fileName: true,
+        ifFavorite: true,
+        ifTop: true,
+        isCompleted: true,
+        rating: true,
+        missingStatus: true,
+        createTime: true,
+      },
       with: {
-        stats: true,
-        logs: true,
-        gameMeta: true,
-        singleImageMeta: true,
-        videoMeta: true,
-        asmrMeta: true,
-        audioMeta: true,
-        novelMeta: true,
-        websiteMeta: true,
-        actors: true,
+        ...(isVideoCategory ? {
+          videoMeta: {
+            columns: {
+              year: true,
+              lastPlayFile: true,
+              lastPlayTime: true,
+            }
+          },
+          mediaSubs: {
+            columns: {
+              fileName: true,
+              relativePath: true,
+              kind: true,
+              sortOrder: true,
+            }
+          }
+        } : {}),
+        ...(isAudioCategory ? {
+          audioMeta: {
+            columns: {
+              album: true,
+              lastPlayTime: true,
+            }
+          }
+        } : {}),
+        ...(isAsmrCategory ? {
+          asmrMeta: {
+            columns: {
+              lastPlayFile: true,
+              lastPlayTime: true,
+            }
+          }
+        } : {}),
+        ...(isNovelCategory ? {
+          novelMeta: {
+            columns: {
+              publisher: true,
+              year: true,
+            }
+          }
+        } : {}),
+        ...(isWebsiteCategory ? {
+          websiteMeta: {
+            columns: {
+              url: true,
+              favicon: true,
+              isDownloadLink: true,
+            }
+          }
+        } : {}),
+        actors: {
+          columns: {
+            id: true,
+            name: true,
+          }
+        },
         tags: {
+          columns: {
+            resourceId: false,
+            tagId: false,
+          },
           with: {
-            tag: true
+            tag: {
+              columns: {
+                id: true,
+                name: true,
+              }
+            }
           }
         },
         types: {
+          columns: {
+            resourceId: false,
+            typeId: false,
+          },
           with: {
-            type: true
+            type: {
+              columns: {
+                id: true,
+                name: true,
+              }
+            }
           }
         },
         authors: {
+          columns: {
+            authorId: false,
+            resourceId: false,
+            categoryId: false,
+            isDeleted: false,
+          },
           with: {
-            author: true
+            author: {
+              columns: {
+                id: true,
+                name: true,
+              }
+            }
           }
         }
       }
     })
+    const [runningResourceIds, homePinRows] = await Promise.all([
+      this.getRunningResourceIdsByResourceIds(resourceIds),
+      db
+        .select({
+          resourceId: homePin.resourceId,
+          pinnedAt: homePin.pinnedAt
+        })
+        .from(homePin)
+        .where(and(
+          inArray(homePin.resourceId, resourceIds),
+          eq(homePin.isDeleted, false)
+        ))
+    ])
+    const runningResourceIdSet = new Set(runningResourceIds)
+    const homePinMap = new Map(homePinRows.map((item) => [String(item.resourceId ?? '').trim(), item.pinnedAt ?? null]))
 
     const resourceMap = new Map(resourceList.map((item) => [
       item.id,
       {
         ...item,
-        isRunning: Array.isArray(item.logs)
-          ? item.logs.some((logItem) => !logItem.isDeleted && !logItem.endTime)
-          : false,
+        homePinnedAt: homePinMap.get(String(item.id ?? '').trim()) ?? null,
+        isRunning: runningResourceIdSet.has(String(item.id ?? '').trim()),
         actors: item.actors,
+        videoSubs: Array.isArray((item as any).mediaSubs)
+          ? (item as any).mediaSubs.filter((subItem: any) => String(subItem?.kind ?? '') === 'video')
+          : undefined,
         tags: item.tags.map(tagItem => tagItem.tag),
         types: item.types.map(typeItem => typeItem.type),
         authors: item.authors.map(authorItem => authorItem.author)
       }
     ]))
 
-    return {
+    const result = {
       items: resourceIds.map((id) => resourceMap.get(id)).filter(Boolean),
       total,
       page,
       pageSize
     }
+    this.logCategoryQueryDuration('getResourceByCategoryId', categoryId, startedAt, {
+      total,
+      page,
+      pageSize,
+      itemCount: result.items.length,
+      sortBy: String(query.sortBy ?? 'createTime-desc'),
+      keyword: String(query.keyword ?? '').trim()
+    })
+    return result
   }
 
   static async getRecentlyAddedResources(days = 7, limit = 10) {
@@ -433,6 +699,73 @@ export class DatabaseService {
     await this.ensureCategoryPillColorColumn()
 
     const normalizedLimit = Math.max(1, Math.min(12, Math.floor(Number(limit) || 9)))
+    const resolveNextPlayKind = (categoryNameInput: unknown) => {
+      const categoryName = String(categoryNameInput ?? '').trim().toLowerCase()
+
+      if (['小说', '书', 'novel', 'book', '漫画', 'comic', 'manga'].some((keyword) => categoryName.includes(keyword))) {
+        return 'read' as const
+      }
+
+      if (['音乐', 'music', '音声', 'asmr', '广播剧', 'audio'].some((keyword) => categoryName.includes(keyword))) {
+        return 'listen' as const
+      }
+
+      if (['电影', 'movie', '番剧', 'anime', '视频', 'video'].some((keyword) => categoryName.includes(keyword))) {
+        return 'watch' as const
+      }
+
+      if (['网站', 'web', 'website', '网址'].some((keyword) => categoryName.includes(keyword))) {
+        return 'visit' as const
+      }
+
+      if (['游戏', 'game', 'galgame'].some((keyword) => categoryName.includes(keyword))) {
+        return 'play' as const
+      }
+
+      return 'use' as const
+    }
+    const buildNextPlayReason = (categoryNameInput: unknown, source: 'recent-unopened' | 'favorite-dormant' | 'high-rating' | 'active-category' | 'random-fill') => {
+      const kind = resolveNextPlayKind(categoryNameInput)
+
+      switch (source) {
+        case 'recent-unopened':
+          if (kind === 'read') return '最近添加，还没真正开始读'
+          if (kind === 'listen') return '最近添加，还没认真听过'
+          if (kind === 'watch') return '最近添加，还没认真看过'
+          if (kind === 'visit') return '最近添加，还没真正访问过'
+          if (kind === 'play') return '最近添加，还没真正打开玩过'
+          return '最近添加，还没真正用过'
+        case 'favorite-dormant':
+          if (kind === 'read') return '收藏很久了，可以找个时间读一会'
+          if (kind === 'listen') return '收藏很久了，可以重新听听'
+          if (kind === 'watch') return '收藏很久了，可以重新看看'
+          if (kind === 'visit') return '收藏很久了，值得再去看看'
+          if (kind === 'play') return '收藏很久了，可以回来继续玩'
+          return '收藏很久了，也许现在正好用得上'
+        case 'high-rating':
+          if (kind === 'read') return '评分很高，值得优先读读看'
+          if (kind === 'listen') return '评分很高，值得优先听听看'
+          if (kind === 'watch') return '评分很高，值得优先看看'
+          if (kind === 'visit') return '评分很高，值得优先点开看看'
+          if (kind === 'play') return '评分很高，值得优先开玩'
+          return '评分很高，值得优先体验'
+        case 'active-category':
+          if (kind === 'read') return '你最近常看这类内容，可以接着读'
+          if (kind === 'listen') return '你最近常听这类内容，可以接着听'
+          if (kind === 'watch') return '你最近常看这类内容，可以接着看'
+          if (kind === 'visit') return '你最近常用这类站点，也许正好用得上'
+          if (kind === 'play') return '你最近常玩这类内容，可以接着玩'
+          return '你最近常用这类资源，可以接着用'
+        case 'random-fill':
+        default:
+          if (kind === 'read') return '随机翻到这本，也许正好想读'
+          if (kind === 'listen') return '随机翻到这条，也许刚好想听'
+          if (kind === 'watch') return '随机翻到这部，也许刚好想看'
+          if (kind === 'visit') return '随机翻到这个，也许刚好用得上'
+          if (kind === 'play') return '随机翻到这个，也许刚好想玩'
+          return '随机补位，也许正好用得上'
+      }
+    }
     const recentLogRows = await db
       .select({ resourceId: resourceLog.resourceId })
       .from(resourceLog)
@@ -541,14 +874,21 @@ export class DatabaseService {
     ])
 
     const selected = new Map<string, any>()
-    const addLimitedPool = (rows: any[], limitForPool: number, reason: string) => {
+    const addLimitedPool = (
+      rows: any[],
+      limitForPool: number,
+      source: 'recent-unopened' | 'favorite-dormant' | 'high-rating' | 'active-category' | 'random-fill'
+    ) => {
       let added = 0
       for (const row of rows) {
         const id = String(row?.id ?? '')
         if (!id || selected.has(id)) {
           continue
         }
-        selected.set(id, { ...row, reason })
+        selected.set(id, {
+          ...row,
+          reason: buildNextPlayReason(row?.categoryName, source)
+        })
         added += 1
         if (selected.size >= normalizedLimit || added >= limitForPool) {
           break
@@ -556,13 +896,20 @@ export class DatabaseService {
       }
     }
 
-    addLimitedPool(recentUnopenedRows, 2, '最近添加，还没真正打开过')
-    addLimitedPool(favoriteDormantRows, 2, '收藏已久，适合重新翻出来')
-    addLimitedPool(highRatingRows, 2, '高评分资源，值得优先体验')
-    addLimitedPool(activeCategoryRows, 2, '最近活跃类型，顺手接着玩')
-    addLimitedPool(randomRows, normalizedLimit, '随机补位，也许正合胃口')
+    addLimitedPool(recentUnopenedRows, 2, 'recent-unopened')
+    addLimitedPool(favoriteDormantRows, 2, 'favorite-dormant')
+    addLimitedPool(highRatingRows, 2, 'high-rating')
+    addLimitedPool(activeCategoryRows, 2, 'active-category')
+    addLimitedPool(randomRows, normalizedLimit, 'random-fill')
 
-    return [...selected.values()].slice(0, normalizedLimit)
+    return [...selected.values()]
+      .slice(0, normalizedLimit)
+      .map((item, index) => ({
+        ...item,
+        order: index + 1,
+        categoryName: String(item?.categoryName ?? '').trim(),
+        categoryEmoji: String(item?.categoryEmoji ?? '').trim() || null
+      }))
   }
 
   static async getHomeFavoriteOverview() {
@@ -623,25 +970,53 @@ export class DatabaseService {
     ]
   }
 
-  static async getHomeCoverWallData(limit = 15) {
+  static async getHomePinnedResources(limit = 12) {
+    await this.ensureResourceTopAndHomePinSchema()
     await this.ensureCategoryPillColorColumn()
 
-    const normalizedLimit = Math.max(1, Math.min(30, Math.floor(Number(limit) || 15)))
-    const coverExistsCondition = sql`(${resource.coverPath} is not null and trim(${resource.coverPath}) != '')`
-    const activeRecentCategoryIds = await db
-      .select({ categoryId: resource.categoryId })
-      .from(resourceLog)
-      .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
-      .where(and(
-        eq(resourceLog.isDeleted, false),
-        eq(resource.isDeleted, false),
-        sql`${resourceLog.startTime} >= strftime('%s', 'now', '-30 days')`
-      ))
-      .groupBy(resource.categoryId)
-      .orderBy(desc(count(resourceLog.resourceId)))
-      .limit(3)
+    const normalizedLimit = Math.max(1, Math.min(24, Math.floor(Number(limit) || 12)))
 
-    const recentCategoryIdList = activeRecentCategoryIds.map((item) => String(item.categoryId ?? '')).filter(Boolean)
+    return await db
+      .select({
+        id: resource.id,
+        title: resource.title,
+        categoryId: resource.categoryId,
+        categoryName: category.name,
+        categoryEmoji: category.emoji,
+        categoryPillColor: category.pillColor,
+        coverPath: resource.coverPath,
+        basePath: resource.basePath,
+        fileName: resource.fileName,
+        pinnedAt: homePin.pinnedAt,
+        createTime: resource.createTime,
+        accessCount: sql<number>`coalesce(${resourceStat.accessCount}, 0)`,
+        lastAccessTime: resourceStat.lastAccessTime
+      })
+      .from(homePin)
+      .innerJoin(resource, eq(homePin.resourceId, resource.id))
+      .innerJoin(category, eq(resource.categoryId, category.id))
+      .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+      .where(and(
+        eq(homePin.isDeleted, false),
+        eq(resource.isDeleted, false),
+        eq(category.isDeleted, false)
+      ))
+      .orderBy(desc(homePin.pinnedAt), desc(resource.createTime), asc(resource.title))
+      .limit(normalizedLimit)
+  }
+
+  static async getHomeCoverWallData(query: number | { filter?: string; limit?: number; offset?: number; keyword?: string } = 15) {
+    await this.ensureCategoryPillColorColumn()
+    await this.ensureResourceSearchTextColumn()
+
+    const filter = typeof query === 'object'
+      ? String(query?.filter ?? 'all')
+      : 'all'
+    const normalizedLimit = Math.max(1, Math.min(180, Math.floor(typeof query === 'object' ? Number(query?.limit) : Number(query)) || 60))
+    const normalizedOffset = Math.max(0, Math.floor(typeof query === 'object' ? Number(query?.offset) : 0) || 0)
+    const keyword = typeof query === 'object' ? String(query?.keyword ?? '').trim().toLowerCase() : ''
+    const keywordTerms = keyword.split(/\s+/).filter(Boolean)
+
     const selectFields = {
       id: resource.id,
       title: resource.title,
@@ -650,56 +1025,94 @@ export class DatabaseService {
       categoryEmoji: category.emoji,
       categoryPillColor: category.pillColor,
       coverPath: resource.coverPath,
+      ifFavorite: resource.ifFavorite,
+      isCompleted: resource.isCompleted,
+      missingStatus: resource.missingStatus,
+      rating: resource.rating,
       createTime: resource.createTime,
-      lastAccessTime: resourceStat.lastAccessTime
+      lastAccessTime: resourceStat.lastAccessTime,
+      accessCount: resourceStat.accessCount,
+      isPinned: sql<number>`exists(
+        select 1
+        from ${homePin}
+        where ${homePin.resourceId} = ${resource.id}
+          and coalesce(${homePin.isDeleted}, 0) = 0
+      )`,
+      tagCount: sql<number>`(
+        select count(*)
+        from ${tagResource}
+        where ${tagResource.resourceId} = ${resource.id}
+      )`,
+      authorCount: sql<number>`(
+        select count(*)
+        from ${authorWork}
+        where ${authorWork.resourceId} = ${resource.id}
+          and coalesce(${authorWork.isDeleted}, 0) = 0
+      )`,
+      searchText: resource.searchText
     }
     const sharedWhere = and(
       eq(resource.isDeleted, false),
-      eq(category.isDeleted, false),
-      coverExistsCondition
+      eq(category.isDeleted, false)
     )
+    const recentRunWhere = and(
+      sharedWhere,
+      eq(resourceLog.isDeleted, false),
+      sql`${resourceLog.startTime} >= strftime('%s', 'now', '-30 days')`
+    )
+    const recentAddWhere = and(
+      sharedWhere,
+      sql`${resource.createTime} >= strftime('%s', 'now', '-30 days')`
+    )
+    const favoriteWhere = and(sharedWhere, eq(resource.ifFavorite, true))
+    const coverOnlyWhere = and(
+      sharedWhere,
+      sql`${resource.coverPath} is not null`,
+      sql`trim(${resource.coverPath}) <> ''`
+    )
+    const keywordWhere = keywordTerms.length
+      ? and(...keywordTerms.map((term) => sql`lower(coalesce(${resource.searchText}, '')) like ${`%${term}%`}`))
+      : undefined
+    const mergeWhere = (...conditions: Array<any>) => {
+      const filtered = conditions.filter(Boolean)
+      return filtered.length ? and(...filtered) : undefined
+    }
 
-    const [allCount, recentRunCount, favoriteCount, gameCount, recentAccessCount, allItems, recentRunItems, favoriteItems, gameItems, recentAccessItems] = await Promise.all([
+    const [allCount, recentRunCount, recentAddCount, favoriteCount, coverOnlyCount] = await Promise.all([
       db.select({ total: count(resource.id) })
         .from(resource)
         .innerJoin(category, eq(resource.categoryId, category.id))
-        .where(sharedWhere),
+        .where(mergeWhere(sharedWhere, keywordWhere)),
       db.select({ total: count(sql`distinct ${resource.id}`) })
         .from(resourceLog)
         .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
         .innerJoin(category, eq(resource.categoryId, category.id))
-        .where(and(
-          sharedWhere,
-          eq(resourceLog.isDeleted, false),
-          sql`${resourceLog.startTime} >= strftime('%s', 'now', '-30 days')`
-        )),
+        .where(mergeWhere(recentRunWhere, keywordWhere)),
       db.select({ total: count(resource.id) })
         .from(resource)
         .innerJoin(category, eq(resource.categoryId, category.id))
-        .where(and(sharedWhere, eq(resource.ifFavorite, true))),
+        .where(mergeWhere(recentAddWhere, keywordWhere)),
       db.select({ total: count(resource.id) })
         .from(resource)
         .innerJoin(category, eq(resource.categoryId, category.id))
-        .where(and(
-          sharedWhere,
-          sql`(lower(${category.name}) like '%游戏%' or lower(${category.name}) like '%game%' or lower(${category.name}) like '%galgame%')`
-        )),
+        .where(mergeWhere(favoriteWhere, keywordWhere)),
       db.select({ total: count(resource.id) })
         .from(resource)
         .innerJoin(category, eq(resource.categoryId, category.id))
-        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
-        .where(and(
-          sharedWhere,
-          sql`${resourceStat.lastAccessTime} is not null`
-        )),
-      db.select(selectFields)
-        .from(resource)
-        .innerJoin(category, eq(resource.categoryId, category.id))
-        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
-        .where(sharedWhere)
-        .orderBy(desc(resource.createTime), asc(resource.title))
-        .limit(normalizedLimit),
-      db.select({
+        .where(mergeWhere(coverOnlyWhere, keywordWhere))
+    ])
+
+    const counts = {
+      all: Number(allCount[0]?.total ?? 0),
+      recentRun: Number(recentRunCount[0]?.total ?? 0),
+      recentAdd: Number(recentAddCount[0]?.total ?? 0),
+      favorite: Number(favoriteCount[0]?.total ?? 0),
+      coverOnly: Number(coverOnlyCount[0]?.total ?? 0)
+    }
+
+    let items: any[] = []
+    if (filter === 'recentRun') {
+      items = await db.select({
         ...selectFields,
         latestStartTime: sql<number>`max(${resourceLog.startTime})`
       })
@@ -707,72 +1120,66 @@ export class DatabaseService {
         .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
         .innerJoin(category, eq(resource.categoryId, category.id))
         .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
-        .where(and(
-          sharedWhere,
-          eq(resourceLog.isDeleted, false),
-          sql`${resourceLog.startTime} >= strftime('%s', 'now', '-30 days')`
-        ))
+        .where(mergeWhere(recentRunWhere, keywordWhere))
         .groupBy(resource.id, category.id, resourceStat.lastAccessTime)
         .orderBy(desc(sql`max(${resourceLog.startTime})`), asc(resource.title))
-        .limit(normalizedLimit),
-      db.select(selectFields)
-        .from(resource)
-        .innerJoin(category, eq(resource.categoryId, category.id))
-        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
-        .where(and(sharedWhere, eq(resource.ifFavorite, true)))
-        .orderBy(desc(resource.createTime), asc(resource.title))
-        .limit(normalizedLimit),
-      db.select(selectFields)
-        .from(resource)
-        .innerJoin(category, eq(resource.categoryId, category.id))
-        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
-        .where(and(
-          sharedWhere,
-          sql`(lower(${category.name}) like '%游戏%' or lower(${category.name}) like '%game%' or lower(${category.name}) like '%galgame%')`
-        ))
-        .orderBy(desc(resource.createTime), asc(resource.title))
-        .limit(normalizedLimit),
-      db.select(selectFields)
-        .from(resource)
-        .innerJoin(category, eq(resource.categoryId, category.id))
-        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
-        .where(and(
-          sharedWhere,
-          sql`${resourceStat.lastAccessTime} is not null`
-        ))
-        .orderBy(desc(resourceStat.lastAccessTime), desc(resource.createTime), asc(resource.title))
         .limit(normalizedLimit)
-    ])
+        .offset(normalizedOffset)
+    } else {
+      if (filter === 'recentAdd') {
+        items = await db.select(selectFields)
+          .from(resource)
+          .innerJoin(category, eq(resource.categoryId, category.id))
+          .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+          .where(mergeWhere(recentAddWhere, keywordWhere))
+          .orderBy(desc(resource.createTime), asc(resource.title))
+          .limit(normalizedLimit)
+          .offset(normalizedOffset)
+      } else if (filter === 'favorite') {
+        items = await db.select(selectFields)
+          .from(resource)
+          .innerJoin(category, eq(resource.categoryId, category.id))
+          .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+          .where(mergeWhere(favoriteWhere, keywordWhere))
+          .orderBy(asc(resource.title), desc(resource.createTime))
+          .limit(normalizedLimit)
+          .offset(normalizedOffset)
+      } else if (filter === 'coverOnly') {
+        items = await db.select(selectFields)
+          .from(resource)
+          .innerJoin(category, eq(resource.categoryId, category.id))
+          .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+          .where(mergeWhere(coverOnlyWhere, keywordWhere))
+          .orderBy(asc(resource.title), desc(resource.createTime))
+          .limit(normalizedLimit)
+          .offset(normalizedOffset)
+      } else {
+        items = await db.select(selectFields)
+          .from(resource)
+          .innerJoin(category, eq(resource.categoryId, category.id))
+          .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+          .where(mergeWhere(sharedWhere, keywordWhere))
+          .orderBy(asc(resource.title), desc(resource.createTime))
+          .limit(normalizedLimit)
+          .offset(normalizedOffset)
+      }
+    }
 
-    const recentCategoryItems = recentCategoryIdList.length
-      ? await db.select(selectFields)
-        .from(resource)
-        .innerJoin(category, eq(resource.categoryId, category.id))
-        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
-        .where(and(
-          sharedWhere,
-          inArray(resource.categoryId, recentCategoryIdList)
-        ))
-        .orderBy(desc(resource.createTime), asc(resource.title))
-        .limit(normalizedLimit)
-      : []
+    const totalForFilter = filter === 'recentRun'
+      ? counts.recentRun
+      : filter === 'recentAdd'
+        ? counts.recentAdd
+        : filter === 'favorite'
+          ? counts.favorite
+          : filter === 'coverOnly'
+            ? counts.coverOnly
+            : counts.all
 
     return {
-      counts: {
-        all: Number(allCount[0]?.total ?? 0),
-        recentRun: Number(recentRunCount[0]?.total ?? 0),
-        favorite: Number(favoriteCount[0]?.total ?? 0),
-        game: Number(gameCount[0]?.total ?? 0),
-        recentAccess: Number(recentAccessCount[0]?.total ?? 0)
-      },
-      items: {
-        all: allItems,
-        recentRun: recentRunItems,
-        favorite: favoriteItems,
-        game: gameItems,
-        recentAccess: recentAccessItems,
-        activeCategory: recentCategoryItems
-      }
+      counts,
+      items,
+      total: totalForFilter,
+      hasMore: normalizedOffset + items.length < totalForFilter
     }
   }
 
@@ -1009,6 +1416,111 @@ export class DatabaseService {
           : '暂无'
       }
     }
+  }
+
+  static async getDashboardUsageDistribution(days = 30) {
+    const normalizedDays = Math.max(1, Math.min(365, Math.floor(Number(days) || 30)))
+    const startTimeCondition = sql`${resourceLog.startTime} >= strftime('%s', 'now', ${`-${normalizedDays} days`})`
+    const whereClause = and(
+      eq(resourceLog.isDeleted, false),
+      eq(resource.isDeleted, false),
+      eq(category.isDeleted, false),
+      startTimeCondition
+    )
+
+    const rows = await db
+      .select({
+        categoryName: category.name,
+        categoryEmoji: category.emoji,
+        categoryPillColor: category.pillColor,
+        launchCount: count(resourceLog.resourceId)
+      })
+      .from(resourceLog)
+      .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+      .innerJoin(category, eq(resource.categoryId, category.id))
+      .where(whereClause)
+      .groupBy(category.id, category.name, category.emoji, category.pillColor)
+      .orderBy(desc(sql`count(${resourceLog.resourceId})`), asc(category.name))
+      .limit(5)
+
+    return rows.map((item) => ({
+      categoryName: String(item.categoryName ?? '').trim() || '未分类',
+      categoryEmoji: String(item.categoryEmoji ?? '').trim() || '',
+      categoryPillColor: String(item.categoryPillColor ?? '').trim() || null,
+      launchCount: Number(item.launchCount ?? 0)
+    }))
+  }
+
+  static async getDashboardLongUnvisitedBuckets() {
+    const bucketDefinitions = [
+      { label: '30-90 天', startDays: 30, endDays: 90 },
+      { label: '90-180 天', startDays: 90, endDays: 180 },
+      { label: '180-365 天', startDays: 180, endDays: 365 },
+      { label: '365 天以上', startDays: 365, endDays: null }
+    ] as const
+
+    const results = await Promise.all(bucketDefinitions.map(async (bucket) => {
+      const lowerBoundCondition = sql`(
+        (${resourceStat.lastAccessTime} is not null and ${resourceStat.lastAccessTime} < strftime('%s', 'now', ${`-${bucket.startDays} days`}))
+        or
+        (${resourceStat.lastAccessTime} is null and ${resource.createTime} < strftime('%s', 'now', ${`-${bucket.startDays} days`}))
+      )`
+
+      const upperBoundCondition = bucket.endDays == null
+        ? undefined
+        : sql`(
+          (${resourceStat.lastAccessTime} is not null and ${resourceStat.lastAccessTime} >= strftime('%s', 'now', ${`-${bucket.endDays} days`}))
+          or
+          (${resourceStat.lastAccessTime} is null and ${resource.createTime} >= strftime('%s', 'now', ${`-${bucket.endDays} days`}))
+        )`
+
+      const whereClause = upperBoundCondition
+        ? and(eq(resource.isDeleted, false), lowerBoundCondition, upperBoundCondition)
+        : and(eq(resource.isDeleted, false), lowerBoundCondition)
+
+      const rows = await db
+        .select({ total: count(resource.id) })
+        .from(resource)
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(whereClause)
+
+      return {
+        label: bucket.label,
+        value: Number(rows[0]?.total ?? 0)
+      }
+    }))
+
+    return results
+  }
+
+  static async getDashboardAddedTrend(days = 14) {
+    const normalizedDays = Math.max(7, Math.min(30, Math.floor(Number(days) || 14)))
+    const rows = await db
+      .select({
+        date: sql<string>`strftime('%Y-%m-%d', ${resource.createTime}, 'unixepoch', 'localtime')`,
+        count: count(resource.id)
+      })
+      .from(resource)
+      .where(and(
+        eq(resource.isDeleted, false),
+        sql`${resource.createTime} >= strftime('%s', 'now', ${`-${normalizedDays - 1} days`})`
+      ))
+      .groupBy(sql`strftime('%Y-%m-%d', ${resource.createTime}, 'unixepoch', 'localtime')`)
+      .orderBy(sql`strftime('%Y-%m-%d', ${resource.createTime}, 'unixepoch', 'localtime')`)
+
+    const countByDate = new Map(rows.map((item) => [String(item.date ?? ''), Number(item.count ?? 0)]))
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+
+    return Array.from({ length: normalizedDays }, (_, index) => {
+      const date = new Date(today)
+      date.setDate(today.getDate() - (normalizedDays - index - 1))
+      const dateKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+      return {
+        date: dateKey,
+        count: countByDate.get(dateKey) ?? 0
+      }
+    })
   }
 
   static async getRecentResourceLogs(page = 1, pageSize = 10) {
@@ -1497,31 +2009,41 @@ export class DatabaseService {
       .run()
   }
 
-  static getVideoSubsByResourceId(resourceId: string, tx?: DbExecutor) {
+  static getMediaSubsByResourceId(resourceId: string, tx?: DbExecutor) {
     const executor = tx ?? db
-    return executor.query.videoSub.findMany({
-      where: eq(videoSub.resourceId, resourceId),
-      orderBy: [asc(videoSub.sortOrder), asc(videoSub.fileName)]
+    return executor.query.mediaSub.findMany({
+      where: eq(mediaSub.resourceId, resourceId),
+      orderBy: [asc(mediaSub.sortOrder), asc(mediaSub.fileName)]
     })
   }
 
-  static deleteVideoSubsByResourceId(resourceId: string, tx?: DbExecutor) {
+  static deleteMediaSubsByResourceId(resourceId: string, tx?: DbExecutor) {
     const executor = tx ?? db
-    executor.delete(videoSub).where(eq(videoSub.resourceId, resourceId)).run()
+    executor.delete(mediaSub).where(eq(mediaSub.resourceId, resourceId)).run()
   }
 
-  static insertVideoSubs(items: Array<typeof videoSub.$inferInsert>, tx?: DbExecutor) {
+  static insertMediaSubs(items: Array<typeof mediaSub.$inferInsert>, tx?: DbExecutor) {
     if (!items.length) {
       return
     }
 
     const executor = tx ?? db
-    executor.insert(videoSub).values(items).run()
+    executor.insert(mediaSub).values(items).run()
   }
 
-  static replaceVideoSubs(resourceId: string, items: Array<typeof videoSub.$inferInsert>, tx?: DbExecutor) {
-    this.deleteVideoSubsByResourceId(resourceId, tx)
-    this.insertVideoSubs(items, tx)
+  static replaceMediaSubs(resourceId: string, items: Array<typeof mediaSub.$inferInsert>, tx?: DbExecutor) {
+    this.deleteMediaSubsByResourceId(resourceId, tx)
+    this.insertMediaSubs(items, tx)
+  }
+
+  static getVideoSubsByResourceId(resourceId: string, tx?: DbExecutor) {
+    return this.getMediaSubsByResourceId(resourceId, tx).then((items) =>
+      items.filter((item) => String(item?.kind ?? '') === 'video')
+    )
+  }
+
+  static replaceVideoSubs(resourceId: string, items: Array<typeof mediaSub.$inferInsert>, tx?: DbExecutor) {
+    this.replaceMediaSubs(resourceId, items, tx)
   }
 
   static updateVideoPlaybackProgress(resourceId: string, lastPlayFile: string, lastPlayTime: number, tx?: DbExecutor) {
@@ -1889,6 +2411,8 @@ export class DatabaseService {
   }
 
   static async getResourceById(resourceId: string) {
+    await this.ensureResourceTopAndHomePinSchema()
+
     return await db.query.resource.findFirst({
       where: and(
         eq(resource.id, resourceId),
@@ -1898,6 +2422,8 @@ export class DatabaseService {
   }
 
   static async getResourcesByIds(resourceIds: string[]) {
+    await this.ensureResourceTopAndHomePinSchema()
+
     const normalizedIds = resourceIds.filter(Boolean)
     if (!normalizedIds.length) {
       return []
@@ -1933,6 +2459,8 @@ export class DatabaseService {
   }
 
   static async getResourceByStoragePath(basePath: string, fileName: string | null) {
+    await this.ensureResourceTopAndHomePinSchema()
+
     const conditions = [
       eq(resource.basePath, basePath),
       eq(resource.isDeleted, false)
@@ -1950,6 +2478,8 @@ export class DatabaseService {
   }
 
   static async getResourceDetailById(resourceId: string) {
+    await this.ensureResourceTopAndHomePinSchema()
+
     const item = await db.query.resource.findFirst({
       where: and(
         eq(resource.id, resourceId),
@@ -1963,7 +2493,7 @@ export class DatabaseService {
           singleImageMeta: true,
           multiImageMeta: true,
           videoMeta: true,
-          videoSubs: true,
+          mediaSubs: true,
           asmrMeta: true,
           audioMeta: true,
           novelMeta: true,
@@ -1996,13 +2526,22 @@ export class DatabaseService {
       return null
     }
 
+    const currentHomePin = await db.query.homePin.findFirst({
+      where: and(
+        eq(homePin.resourceId, resourceId),
+        eq(homePin.isDeleted, false)
+      )
+    })
+
     return {
       ...item,
+      homePinnedAt: currentHomePin?.pinnedAt ?? null,
       isRunning: Array.isArray(item.logs)
         ? item.logs.some((logItem) => !logItem.isDeleted && !logItem.endTime)
         : false,
       actors: item.actors,
-      videoSubs: item.videoSubs,
+      videoSubs: item.mediaSubs.filter((subItem) => String(subItem?.kind ?? '') === 'video'),
+      asmrSubs: item.mediaSubs,
       tags: item.tags.map((tagItem) => tagItem.tag),
       types: item.types.map((typeItem) => typeItem.type),
       authors: item.authors.map((authorItem) => authorItem.author)
@@ -2013,8 +2552,54 @@ export class DatabaseService {
     resourceData: Partial<typeof resource.$inferInsert> & Pick<typeof resource.$inferInsert, 'id'>,
     tx?: DbExecutor
   ) {
+    await this.ensureResourceTopAndHomePinSchema()
     const executor = tx ?? db
     executor.update(resource).set(resourceData).where(eq(resource.id, resourceData.id)).run()
+  }
+
+  static async pinResourceToHome(resourceId: string, pinnedAt: Date = new Date(), tx?: DbExecutor) {
+    await this.ensureResourceTopAndHomePinSchema()
+    const executor = tx ?? db
+    const existing = await executor.query.homePin.findFirst({
+      where: eq(homePin.resourceId, resourceId)
+    })
+
+    if (existing) {
+      await executor
+        .update(homePin)
+        .set({
+          pinnedAt,
+          isDeleted: false
+        })
+        .where(eq(homePin.resourceId, resourceId))
+      return
+    }
+
+    await executor.insert(homePin).values({
+      resourceId,
+      pinnedAt,
+      isDeleted: false
+    })
+  }
+
+  static async unpinResourceFromHome(resourceId: string, tx?: DbExecutor) {
+    await this.ensureResourceTopAndHomePinSchema()
+    const executor = tx ?? db
+    await executor
+      .update(homePin)
+      .set({ isDeleted: true })
+      .where(eq(homePin.resourceId, resourceId))
+  }
+
+  static async getHomePinByResourceId(resourceId: string, tx?: DbExecutor) {
+    await this.ensureResourceTopAndHomePinSchema()
+    const executor = tx ?? db
+    return await executor.query.homePin.findFirst({
+      where: and(
+        eq(homePin.resourceId, resourceId),
+        eq(homePin.isDeleted, false)
+      )
+    })
   }
 
   static async logicalDeleteResource(resourceId: string, tx?: DbExecutor) {
@@ -2042,13 +2627,17 @@ export class DatabaseService {
   }
 
   static async getWatcherResources() {
-    return db.select({
+    const items = await db.select({
       id: resource.id,
       categoryId: resource.categoryId,
       basePath: resource.basePath,
       fileName: resource.fileName,
       missingStatus: resource.missingStatus,
-    }).from(resource)
+      categoryExtra: dictData.extra,
+    })
+      .from(resource)
+      .leftJoin(category, eq(resource.categoryId, category.id))
+      .leftJoin(dictData, eq(category.referenceId, dictData.id))
       .where(and(
         eq(resource.isDeleted, false),
         sql`not exists (
@@ -2057,6 +2646,26 @@ export class DatabaseService {
           where ${websiteMeta.resourceId} = ${resource.id}
         )`
       ))
+
+    return items.map((item) => {
+      const extendTable = String(item?.categoryExtra?.extendTable ?? '').trim()
+      const resourcePathType = String(item?.categoryExtra?.resourcePathType ?? '').trim()
+      const directoryMetadataKind =
+        extendTable === 'video_meta' && resourcePathType === 'folder'
+          ? 'video'
+          : extendTable === 'asmr_meta' && resourcePathType === 'folder'
+            ? 'asmr'
+            : null
+
+      return {
+        id: item.id,
+        categoryId: item.categoryId,
+        basePath: item.basePath,
+        fileName: item.fileName,
+        missingStatus: item.missingStatus,
+        directoryMetadataKind: directoryMetadataKind as 'video' | 'asmr' | null
+      }
+    })
   }
 
   static async getDictTypeByName(name: string) {

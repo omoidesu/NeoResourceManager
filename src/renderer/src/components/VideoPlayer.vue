@@ -15,6 +15,12 @@ import {
   VolumeMuteOutline
 } from '@vicons/ionicons5'
 import { Settings } from '../../../common/constants'
+import {
+  setAudioPlayerPlaybackState,
+  setAudioPlayerSession,
+  setAudioPlayerVisible,
+  useAudioPlayerStore
+} from '../utils/audio-player-store'
 
 type VideoTrack = {
   path: string
@@ -51,6 +57,7 @@ const emit = defineEmits<{
   (event: 'progress-persisted', value: { resourceId: string; filePath: string; playbackTime: number }): void
 }>()
 
+const audioPlayerStore = useAudioPlayerStore()
 const videoRef = ref<HTMLVideoElement | null>(null)
 const shellRef = ref<HTMLDivElement | null>(null)
 const sourceUrl = ref('')
@@ -89,6 +96,52 @@ let captureToastTimer: number | null = null
 let seekPreviewTimer: number | null = null
 let playbackSessionResourceId = ''
 let removeVideoFrameCaptureShortcutListener: (() => void) | null = null
+
+const resetAudioPlayerStoreState = () => {
+  setAudioPlayerPlaybackState({
+    currentTrack: null,
+    currentTime: 0,
+    duration: 0,
+    isPlaying: false,
+    coverSrc: ''
+  })
+  setAudioPlayerSession({
+    resourceId: '',
+    initialPath: '',
+    initialTime: 0,
+    playlist: []
+  })
+  setAudioPlayerVisible(false)
+}
+
+const stopActiveAudioPlaybackBeforeVideo = async () => {
+  const audioResourceId = String(
+    audioPlayerStore.resourceId.value
+    || audioPlayerStore.currentTrack.value?.resourceId
+    || ''
+  ).trim()
+  const hasAudioSession = Boolean(audioResourceId || audioPlayerStore.currentTrack.value?.path)
+
+  if (!hasAudioSession) {
+    return
+  }
+
+  const stopControl = audioPlayerStore.controls.value.stop
+  if (stopControl) {
+    await Promise.resolve(stopControl())
+    return
+  }
+
+  if (audioResourceId) {
+    try {
+      await window.api.service.stopAsmrPlayback(audioResourceId)
+    } catch {
+      // ignore playback stop errors
+    }
+  }
+
+  resetAudioPlayerStoreState()
+}
 
 const playbackRateOptions = [
   { label: '2x', value: 2 },
@@ -960,8 +1013,11 @@ const handleVideoFrameCaptureShortcut = () => {
 
 watch(() => props.show, (visible) => {
   if (visible) {
-    void loadScreenshotShortcut()
-    void initializePlayer()
+    void (async () => {
+      await stopActiveAudioPlaybackBeforeVideo()
+      await loadScreenshotShortcut()
+      await initializePlayer()
+    })()
     window.addEventListener('keydown', handleKeydown)
     document.addEventListener('fullscreenchange', handleFullscreenChange)
     removeVideoFrameCaptureShortcutListener?.()

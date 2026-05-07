@@ -1,30 +1,98 @@
 <script setup lang="ts">
-import {computed, h, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch} from 'vue'
-import type { ComputedRef } from 'vue'
-import { useRoute } from 'vue-router'
-import { CheckmarkOutline, ChevronBackOutline, ChevronDownOutline, ChevronForwardOutline, ChevronUpOutline, CloseOutline, CopyOutline, EyeOutline, FolderOpenOutline, FunnelOutline, Play, SearchOutline, Stop, TrashOutline } from '@vicons/ionicons5'
-import { createLogger } from '../../../main/util/logger'
-import { confirmDialog, notify } from '../utils/notification'
-import { removeOngoingCenterItem, upsertOngoingCenterItem } from '../utils/notification-center'
+import {computed, defineAsyncComponent, h, inject, nextTick, onBeforeMount, onBeforeUnmount, onMounted, ref, toRaw, watch} from 'vue'
+import type {ComputedRef} from 'vue'
+import {useRoute, useRouter} from 'vue-router'
+import {
+  ChevronDownOutline,
+  ChevronUpOutline,
+  SearchOutline,
+} from '@vicons/ionicons5'
+import {createLogger} from '../../../main/util/logger'
+import {confirmDialog, notify} from '../utils/notification'
+import {removeOngoingCenterItem, upsertOngoingCenterItem} from '../utils/notification-center'
 import ResourceCard from '../components/card/ResourceCard.vue'
-import PictureViewer from '../components/PictureViewer.vue'
-import ComicReader from '../components/ComicReader.vue'
-import TextReader from '../components/TextReader.vue'
-import PdfReader from '../components/PdfReader.vue'
-import EpubReader from '../components/EpubReader.vue'
-import EbookReader from '../components/EbookReader.vue'
-import VideoPlayer from '../components/VideoPlayer.vue'
-import RichTextEditor from '../components/RichTextEditor.vue'
-import BangumiDirectory from '../components/BangumiDirectory.vue'
-import { createEmptyMetaByType } from '../components/meta/meta-factory'
-import { resolveMetaFormComponent } from '../components/meta/registry'
-import { setAudioPlayerSession, setAudioPlayerVisible, useAudioPlayerStore } from '../utils/audio-player-store'
-import { getWebsitePlaceholderEmoji } from '../utils/website-placeholder-emoji'
-import { DictType, ResourceLaunchMode, ResourceLogSpecialTime, Settings } from '../../../common/constants'
-import type { ResourceForm, ResourceMeta } from '../../../main/model/models'
+import {createEmptyMetaByType} from '../components/meta/meta-factory'
+import {resolveMetaFormComponent} from '../components/meta/registry'
+import CategoryBatchImportPanel from './category-detail/components/CategoryBatchImportPanel.vue'
+import CategoryFilterPanel from './category-detail/components/CategoryFilterPanel.vue'
+import ResourceDetailDrawer from './category-detail/components/ResourceDetailDrawer.vue'
+import ResourceEditorDrawer from './category-detail/components/ResourceEditorDrawer.vue'
+import AudioCoverCandidateModal from './category-detail/components/AudioCoverCandidateModal.vue'
+import VideoCoverCandidateModal from './category-detail/components/VideoCoverCandidateModal.vue'
+import VideoSubCoverCandidateModal from './category-detail/components/VideoSubCoverCandidateModal.vue'
+import {useCategoryDetailPresentation} from './category-detail/composables/useCategoryDetailPresentation'
+import {useCategoryDetailFormatters} from './category-detail/composables/useCategoryDetailFormatters'
+import {useCategoryDetailAudioContextMenu} from './category-detail/composables/useCategoryDetailAudioContextMenu'
+import {useCategoryBatchActions} from './category-detail/composables/useCategoryBatchActions'
+import {useCategoryBatchImportCategoryActions} from './category-detail/composables/useCategoryBatchImportCategoryActions'
+import {useCategoryBatchImportState} from './category-detail/composables/useCategoryBatchImportState'
+import {useCategoryBatchImportWorkflow} from './category-detail/composables/useCategoryBatchImportWorkflow'
+import {useCategoryListPresentation} from './category-detail/composables/useCategoryListPresentation'
+import {useCategoryListQueryState} from './category-detail/composables/useCategoryListQueryState'
+import {useCategoryPageBootstrap} from './category-detail/composables/useCategoryPageBootstrap'
+import {useCategoryPreviewAssets} from './category-detail/composables/useCategoryPreviewAssets'
+import {useCategoryCapabilityActions} from './category-detail/composables/useCategoryCapabilityActions'
+import {useCategoryDetailRuntime} from './category-detail/composables/useCategoryDetailRuntime'
+import {useCategoryEditorPathAnalysis} from './category-detail/composables/useCategoryEditorPathAnalysis'
+import {useCategoryEditorSoftwareScript} from './category-detail/composables/useCategoryEditorSoftwareScript'
+import {useCategoryReaderPlayerActions} from './category-detail/composables/useCategoryReaderPlayerActions'
+import {useCategoryReaderSessions} from './category-detail/composables/useCategoryReaderSessions'
+import {useCategoryResourceEditor} from './category-detail/composables/useCategoryResourceEditor'
+import {useCategoryEditorAssistActions} from './category-detail/composables/useCategoryEditorAssistActions'
+import {useCategoryVideoOrderDialog} from './category-detail/composables/useCategoryVideoOrderDialog'
+import {resolveCategoryProfile} from './category-detail/profile-registry'
+import {setAudioPlayerSession, setAudioPlayerVisible, useAudioPlayerStore} from '../utils/audio-player-store'
+import {getWebsitePlaceholderEmoji} from '../utils/website-placeholder-emoji'
+import {Settings} from '../../../common/constants'
+
+const PictureViewer = defineAsyncComponent(() => import('../components/PictureViewer.vue'))
+const ComicReader = defineAsyncComponent(() => import('../components/ComicReader.vue'))
+const TextReader = defineAsyncComponent(() => import('../components/TextReader.vue'))
+const PdfReader = defineAsyncComponent(() => import('../components/PdfReader.vue'))
+const EpubReader = defineAsyncComponent(() => import('../components/EpubReader.vue'))
+const EbookReader = defineAsyncComponent(() => import('../components/EbookReader.vue'))
+const VideoPlayer = defineAsyncComponent(() => import('../components/VideoPlayer.vue'))
 
 const route = useRoute()
+const router = useRouter()
 const logger = createLogger('category-detail')
+const emitRendererTiming = (message: string, meta?: Record<string, unknown>) => {
+  window.api?.diagnostics?.logRenderer('info', message, meta)
+}
+const readCategoryRoutePerf = () => ((window as any).__nrmCategoryRoutePerf ?? null) as null | {
+  startedAt: number
+  from: string
+  to: string
+  categoryId: string
+  mountedLogged?: boolean
+  frameLogged?: boolean
+  listVisibleLogged?: boolean
+}
+const reportCategoryRoutePerf = (phase: 'category-mounted' | 'category-mounted-frame' | 'category-list-visible', extra?: Record<string, unknown>) => {
+  const perf = readCategoryRoutePerf()
+  if (!perf || String(perf.categoryId ?? '') !== String(categoryId.value ?? '')) {
+    return
+  }
+
+  if (phase === 'category-mounted' && perf.mountedLogged) return
+  if (phase === 'category-mounted-frame' && perf.frameLogged) return
+  if (phase === 'category-list-visible' && perf.listVisibleLogged) return
+
+  const elapsedMs = Math.round(performance.now() - Number(perf.startedAt ?? 0))
+  emitRendererTiming('category route perf', {
+    phase,
+    elapsedMs,
+    from: perf.from,
+    to: perf.to,
+    categoryId: perf.categoryId,
+    ...extra
+  })
+
+  if (phase === 'category-mounted') perf.mountedLogged = true
+  if (phase === 'category-mounted-frame') perf.frameLogged = true
+  if (phase === 'category-list-visible') perf.listVisibleLogged = true
+  ;(window as any).__nrmCategoryRoutePerf = perf
+}
 const injectedIsDark = inject<ComputedRef<boolean>>('appIsDark', computed(() => true))
 const audioPlayerStore = useAudioPlayerStore()
 const categoryId = computed(() => route.params.id as string)
@@ -33,6 +101,8 @@ const authorList = ref<any[]>([])
 const actorList = ref<any[]>([])
 const albumList = ref<any[]>([])
 const engineList = ref<any[]>([])
+const engineOptionList = ref<any[]>([])
+const languageOptions = ref<any[]>([])
 const websiteTypeOptions = ref<any[]>([])
 const tagList = ref<any[]>([])
 const typeList = ref<any[]>([])
@@ -54,7 +124,7 @@ const showVideoSubCoverCandidateModal = ref(false)
 const showVideoOrderModal = ref(false)
 const fetchResourceInfoLoading = ref(false)
 const videoCoverFrameLoading = ref(false)
-const formData = ref<any>({ name: '', meta: {} })
+const formData = ref<any>({name: '', meta: {}})
 const editingResourceId = ref('')
 const editInitialFormData = ref<any | null>(null)
 const batchImportItems = ref<any[]>([])
@@ -70,13 +140,12 @@ const batchAnalyzeInBackground = ref(false)
 const batchAnalyzeToastDismissed = ref(false)
 const formRef = ref()
 const basePathFormItemRef = ref()
-const coverPreviewSrc = ref('')
-const detailCoverPreviewSrc = ref('')
 const audioCoverCandidates = ref<Array<{
   label: string
   coverPath: string
   previewSrc: string
   queryText: string
+  albumName: string
 }>>([])
 const videoCoverCandidates = ref<Array<{
   label: string
@@ -95,7 +164,6 @@ const videoSubCoverCandidateItems = ref<Array<{
     time: number
   }>
 }>>([])
-const detailScreenshotPreviewSrc = ref('')
 const detailDescriptionContentRef = ref<HTMLElement | null>(null)
 const detailDescriptionHeight = ref(400)
 const showPictureViewer = ref(false)
@@ -130,14 +198,28 @@ const ebookReaderTitle = ref('')
 const ebookReaderInitialProgress = ref(0)
 const currentEbookReaderResourceId = ref('')
 const showVideoPlayer = ref(false)
-const videoPlayerPlaylist = ref<Array<{ path: string; label: string; resourceId?: string; resourceTitle?: string; coverSrc?: string; subtitlePath?: string }>>([])
+const videoPlayerPlaylist = ref<Array<{
+  path: string;
+  label: string;
+  resourceId?: string;
+  resourceTitle?: string;
+  coverSrc?: string;
+  subtitlePath?: string
+}>>([])
 const videoPlayerInitialPath = ref('')
 const videoPlayerInitialTime = ref(0)
 const audioPlaybackResumeRestartThreshold = ref(Math.max(0, Math.min(100, Number(Settings.AUDIO_PLAYBACK_RESUME_RESTART_THRESHOLD.default ?? 95))))
 const videoPlaybackResumeRestartThreshold = ref(Math.max(0, Math.min(100, Number(Settings.VIDEO_PLAYBACK_RESUME_RESTART_THRESHOLD.default ?? 95))))
 const videoPlayerTitle = ref('')
-const handleVideoPlayerPlaylistUpdate = (value: Array<{ path: string; label: string; resourceId?: string; resourceTitle?: string; coverSrc?: string; subtitlePath?: string }>) => {
-  videoPlayerPlaylist.value = value.map((item) => ({ ...item }))
+const handleVideoPlayerPlaylistUpdate = (value: Array<{
+  path: string;
+  label: string;
+  resourceId?: string;
+  resourceTitle?: string;
+  coverSrc?: string;
+  subtitlePath?: string
+}>) => {
+  videoPlayerPlaylist.value = value.map((item) => ({...item}))
 }
 const normalizePlaybackResumeRestartThreshold = (value: unknown) => {
   const numericValue = Number(value)
@@ -182,7 +264,11 @@ const applyVideoPlaybackProgressToResource = (resource: any, filePath: string, p
     }
   }
 }
-const handleVideoPlaybackProgressPersisted = (payload: { resourceId: string; filePath: string; playbackTime: number }) => {
+const handleVideoPlaybackProgressPersisted = (payload: {
+  resourceId: string;
+  filePath: string;
+  playbackTime: number
+}) => {
   const resourceId = String(payload?.resourceId ?? '').trim()
   const filePath = String(payload?.filePath ?? '').trim()
   const playbackTime = Math.max(0, Number(payload?.playbackTime ?? 0))
@@ -200,7 +286,21 @@ const handleVideoPlaybackProgressPersisted = (payload: { resourceId: string; fil
     selectedDetailResource.value = applyVideoPlaybackProgressToResource(selectedDetailResource.value, filePath, playbackTime)
   }
 }
-const audioPlayerPlaylist = ref<Array<{ path: string; label: string; duration?: number | null; resourceId?: string; resourceTitle?: string; artist?: string; coverSrc?: string; hasSubtitle?: boolean; subtitlePath?: string }>>([])
+const showNotifyByType = (type: string, title: string, content: string) => {
+  const normalizedType = type === 'warn' ? 'warning' : type
+  notify(normalizedType as 'success' | 'error' | 'info' | 'warning', title, content)
+}
+const audioPlayerPlaylist = ref<Array<{
+  path: string;
+  label: string;
+  duration?: number | null;
+  resourceId?: string;
+  resourceTitle?: string;
+  artist?: string;
+  coverSrc?: string;
+  hasSubtitle?: boolean;
+  subtitlePath?: string
+}>>([])
 const audioPlayerDisplayMode = ref<'default' | 'music'>('default')
 const detailAudioContextMenuVisible = ref(false)
 const detailAudioContextMenuX = ref(0)
@@ -213,7 +313,7 @@ const showDetailDrawer = ref(false)
 const selectedDetailResource = ref<any>(null)
 const detailScreenshotPaths = ref<string[]>([])
 const detailAudioTree = ref<any[]>([])
-const detailGalleryImageUrls = ref<Record<string, string>>({})
+const detailAudioTreeLoading = ref(false)
 const currentScreenshotIndex = ref(0)
 const showDeleteScreenshotConfirm = ref(false)
 const showSoftwareScriptModal = ref(false)
@@ -227,12 +327,6 @@ const detailDrawerWidth = ref(500)
 const isResizingDetailDrawer = ref(false)
 const detailDrawerResizeStartX = ref(0)
 const detailDrawerResizeStartWidth = ref(500)
-const videoOrderResource = ref<any | null>(null)
-const videoOrderItems = ref<Array<{ id: string; fileName: string; relativePath: string; coverPath?: string; sortOrder: number; isVisible: boolean }>>([])
-const videoOrderInitialItems = ref<Array<{ id: string; fileName: string; relativePath: string; coverPath?: string; sortOrder: number; isVisible: boolean }>>([])
-const isVideoOrderSubmitting = ref(false)
-const videoOrderDragIndex = ref<number | null>(null)
-const videoOrderDragOverIndex = ref<number | null>(null)
 const videoSubCoverPreviewUrls = ref<Record<string, string>>({})
 const engineIconModules = import.meta.glob('../assets/engine-icons/*', {
   eager: true,
@@ -249,50 +343,6 @@ const storeIconUrlByName = new Map<string, string>(
   Object.entries(storeIconModules).map(([filePath, url]) => [filePath.split('/').pop() ?? filePath, url])
 )
 
-type BatchImportState = {
-  items: any[]
-  fetchInfoEnabled: boolean
-  analyzeCurrent: number
-  analyzeTotal: number
-  analyzeMessage: string
-  analyzeRunning: boolean
-  importRunning: boolean
-  analyzeCancelled: boolean
-  analyzeInBackground: boolean
-  analyzeToastDismissed: boolean
-  showLoading: boolean
-  showPreview: boolean
-}
-
-const createBatchImportState = (): BatchImportState => ({
-  items: [],
-  fetchInfoEnabled: true,
-  analyzeCurrent: 0,
-  analyzeTotal: 0,
-  analyzeMessage: '',
-  analyzeRunning: false,
-  importRunning: false,
-  analyzeCancelled: false,
-  analyzeInBackground: false,
-  analyzeToastDismissed: false,
-  showLoading: false,
-  showPreview: false
-})
-
-const batchImportStateStore = reactive<Record<string, BatchImportState>>({})
-
-const ensureBatchImportState = (targetCategoryId: string) => {
-  if (!targetCategoryId) {
-    return createBatchImportState()
-  }
-
-  if (!batchImportStateStore[targetCategoryId]) {
-    batchImportStateStore[targetCategoryId] = createBatchImportState()
-  }
-
-  return batchImportStateStore[targetCategoryId]
-}
-
 const renderWebsiteOptionLabel = (icon: string, rawLabel: string) =>
   h(
     'div',
@@ -307,39 +357,39 @@ const renderWebsiteOptionLabel = (icon: string, rawLabel: string) =>
     [
       /^(?:[/.]|https?:|data:|file:|[a-zA-Z]:[\\/])/.test(icon)
         ? h('span', {
+          style: {
+            width: '18px',
+            height: '18px',
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flex: '0 0 18px',
+            overflow: 'hidden'
+          }
+        }, [
+          h('img', {
+            src: icon,
+            alt: rawLabel,
             style: {
-              width: '18px',
-              height: '18px',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              flex: '0 0 18px',
-              overflow: 'hidden'
+              width: '16px',
+              height: '16px',
+              maxWidth: '16px',
+              maxHeight: '16px',
+              objectFit: 'contain',
+              display: 'block',
+              flexShrink: 0
             }
-          }, [
-            h('img', {
-              src: icon,
-              alt: rawLabel,
-              style: {
-                width: '16px',
-                height: '16px',
-                maxWidth: '16px',
-                maxHeight: '16px',
-                objectFit: 'contain',
-                display: 'block',
-                flexShrink: 0
-              }
-            })
-          ])
+          })
+        ])
         : h('span', {
-            style: {
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              minWidth: '18px',
-              flex: '0 0 18px'
-            }
-          }, icon || rawLabel),
+          style: {
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            minWidth: '18px',
+            flex: '0 0 18px'
+          }
+        }, icon || rawLabel),
       h('span', {
         style: {
           display: 'inline-block',
@@ -374,6 +424,47 @@ const createEmptyFormData = () => ({
   types: [] as string[],
   meta: createEmptyMetaByType(String(categorySettings.value.extendTable ?? ''))
 })
+
+const assignResourceEditorFormRef = (instance: any) => {
+  formRef.value = instance ?? null
+}
+
+const assignResourceEditorBasePathFormItemRef = (instance: any) => {
+  basePathFormItemRef.value = instance ?? null
+}
+
+const mergeResourceSummaryIntoDetail = (detailResource: any, summaryResource: any) => {
+  if (!detailResource) {
+    return summaryResource
+  }
+
+  if (!summaryResource) {
+    return detailResource
+  }
+
+  return {
+    ...summaryResource,
+    ...detailResource,
+    tags: Array.isArray(detailResource.tags) && detailResource.tags.length ? detailResource.tags : summaryResource.tags,
+    types: Array.isArray(detailResource.types) && detailResource.types.length ? detailResource.types : summaryResource.types,
+    authors: Array.isArray(detailResource.authors) && detailResource.authors.length ? detailResource.authors : summaryResource.authors,
+    actors: Array.isArray(detailResource.actors) && detailResource.actors.length ? detailResource.actors : summaryResource.actors,
+    stores: Array.isArray(detailResource.stores) && detailResource.stores.length ? detailResource.stores : summaryResource.stores,
+    logs: Array.isArray(detailResource.logs) && detailResource.logs.length ? detailResource.logs : summaryResource.logs,
+    stats: detailResource.stats ?? summaryResource.stats,
+    gameMeta: detailResource.gameMeta ?? summaryResource.gameMeta,
+    softwareMeta: detailResource.softwareMeta ?? summaryResource.softwareMeta,
+    singleImageMeta: detailResource.singleImageMeta ?? summaryResource.singleImageMeta,
+    multiImageMeta: detailResource.multiImageMeta ?? summaryResource.multiImageMeta,
+    videoMeta: detailResource.videoMeta ?? summaryResource.videoMeta,
+    asmrMeta: detailResource.asmrMeta ?? summaryResource.asmrMeta,
+    audioMeta: detailResource.audioMeta ?? summaryResource.audioMeta,
+    novelMeta: detailResource.novelMeta ?? summaryResource.novelMeta,
+    websiteMeta: detailResource.websiteMeta ?? summaryResource.websiteMeta,
+    videoSubs: Array.isArray(detailResource.videoSubs) && detailResource.videoSubs.length ? detailResource.videoSubs : summaryResource.videoSubs,
+    asmrSubs: Array.isArray(detailResource.asmrSubs) && detailResource.asmrSubs.length ? detailResource.asmrSubs : summaryResource.asmrSubs
+  }
+}
 
 const normalizePathValue = (targetPath: string | null | undefined) => String(targetPath ?? '').replace(/\\/g, '/').trim()
 const compareByFileName = (left: string, right: string) => String(left ?? '').localeCompare(String(right ?? ''), undefined, {
@@ -478,6 +569,8 @@ const assignSanitizedSelectedFilterValues = (
   if (hasChanged) {
     targetRef.value = nextValues
   }
+
+  return hasChanged
 }
 
 const syncAudioAuthorFields = (targetForm: any, names?: string[]) => {
@@ -489,9 +582,9 @@ const syncAudioAuthorFields = (targetForm: any, names?: string[]) => {
     Array.isArray(names)
       ? names
       : [
-          ...(Array.isArray(targetForm.authors) ? targetForm.authors : []),
-          String(targetForm.author ?? '').trim()
-        ]
+        ...(Array.isArray(targetForm.authors) ? targetForm.authors : []),
+        String(targetForm.author ?? '').trim()
+      ]
   )
   const displayName = joinAudioAuthorNames(normalizedNames)
 
@@ -504,6 +597,16 @@ const syncAudioAuthorFields = (targetForm: any, names?: string[]) => {
 }
 
 const mapResourceDetailToFormData = (resource: any) => {
+  const pickFirstNonEmptyString = (...values: any[]) => {
+    for (const value of values) {
+      const normalized = String(value ?? '').trim()
+      if (normalized) {
+        return normalized
+      }
+    }
+
+    return ''
+  }
   const authorNames = Array.isArray(resource?.authors)
     ? resource.authors.map((item: any) => String(item?.name ?? '')).filter(Boolean)
     : []
@@ -539,9 +642,28 @@ const mapResourceDetailToFormData = (resource: any) => {
       ...(resource?.novelMeta ?? {}),
       ...(resource?.websiteMeta ?? {}),
       pixivId: String(pixivStore?.workId ?? ''),
-      websiteType: String(primaryStore?.storeId ?? ''),
-      gameId: String(primaryStore?.workId ?? ''),
-      website: String(resource?.websiteMeta?.url ?? primaryStore?.url ?? ''),
+      websiteType: pickFirstNonEmptyString(
+        primaryStore?.storeId,
+        resource?.gameMeta?.websiteType,
+        resource?.asmrMeta?.websiteType,
+        resource?.multiImageMeta?.websiteType,
+        resource?.singleImageMeta?.websiteType
+      ),
+      gameId: pickFirstNonEmptyString(
+        primaryStore?.workId,
+        resource?.gameMeta?.gameId,
+        resource?.asmrMeta?.gameId,
+        resource?.multiImageMeta?.gameId,
+        resource?.singleImageMeta?.gameId
+      ),
+      website: pickFirstNonEmptyString(
+        resource?.websiteMeta?.url,
+        primaryStore?.url,
+        resource?.gameMeta?.website,
+        resource?.asmrMeta?.website,
+        resource?.multiImageMeta?.website,
+        resource?.singleImageMeta?.website
+      ),
       additionalStores: additionalStores.map((item: any) => ({
         websiteType: String(item?.storeId ?? ''),
         workId: String(item?.workId ?? ''),
@@ -573,7 +695,7 @@ const selectionModeManuallyEnabled = ref(false)
 const isBatchDeleting = ref(false)
 const isBatchFetchingAlbumCover = ref(false)
 const isBatchLabelSubmitting = ref(false)
-const batchLabelField = ref<'tags' | 'types' | 'authors' | 'album'>('tags')
+const batchLabelField = ref<'tags' | 'types' | 'authors' | 'actors' | 'album'>('tags')
 const batchLabelMode = ref<'add' | 'remove'>('add')
 const batchLabelValues = ref<string[]>([])
 const batchLabelSingleValue = ref('')
@@ -585,48 +707,17 @@ const sortBy = ref('createTime-desc')
 const localeEmulatorPath = ref('')
 const mtoolPath = ref('')
 const suppressAutoFetch = ref(false)
-let fetchDataRequestId = 0
-let handledAutoOpenResourceKey = ''
-let hasOpenedVideoPlayer = false
 
-const showBatchImportButton = computed(() => {
-  const extendTable = String(categorySettings.value.extendTable ?? '')
-  if (extendTable === 'video_meta') {
-    return true
-  }
-
-  return ['game_meta', 'single_image_meta', 'multi_image_meta', 'asmr_meta', 'audio_meta', 'novel_meta'].includes(extendTable)
-})
+const categoryProfile = computed(() => resolveCategoryProfile({
+  extendTable: String(categorySettings.value.extendTable ?? ''),
+  resourcePathType: String(categorySettings.value.resourcePathType ?? ''),
+  startText: String(categorySettings.value.startText ?? '')
+}))
+const showBatchImportButton = computed(() => categoryProfile.value.features.showBatchImportButton)
 const getBatchImportOngoingId = (targetCategoryId: string) => `batch-import-analysis:${targetCategoryId}`
 const batchProgressRunning = computed(() => batchAnalyzeRunning.value || batchImportRunning.value)
 const batchProgressStage = computed(() => (batchImportRunning.value ? 'import' : 'analyze'))
-const batchImportResourceLabel = computed(() => {
-  if (detailIsManga.value) {
-    return '漫画'
-  }
-
-  if (detailIsAsmr.value) {
-    return '音声'
-  }
-
-  if (isAudioCategory.value) {
-    return '音乐'
-  }
-
-  if (isNovelCategory.value) {
-    return '小说'
-  }
-
-  if (String(categorySettings.value.extendTable ?? '') === 'video_meta') {
-    return '电影'
-  }
-
-  if (isSingleImageCategory.value) {
-    return '图片'
-  }
-
-  return '游戏'
-})
+const batchImportResourceLabel = computed(() => categoryProfile.value.labels.batchImportResourceLabel)
 const batchAnalyzePercent = computed(() =>
   batchAnalyzeTotal.value > 0
     ? Math.min(100, Math.round((batchAnalyzeCurrent.value / batchAnalyzeTotal.value) * 100))
@@ -662,113 +753,56 @@ const selectableBatchImportItems = computed(() =>
 const selectedBatchImportCount = computed(() =>
   batchImportItems.value.filter((item) => item.checked).length
 )
-const selectedResourceCount = computed(() => selectedResourceIds.value.length)
-const resourceSelectionMode = computed(() => selectedResourceCount.value > 0 || selectionModeManuallyEnabled.value)
-const currentPageResourceIds = computed(() =>
-  resourceList.value
-    .map((item) => String(item?.id ?? '').trim())
-    .filter(Boolean)
-)
-const currentCategoryBatchInBackground = computed(() =>
-  batchProgressRunning.value && batchAnalyzeInBackground.value
-)
-
+let selectedResourceCount: ComputedRef<number> = computed(() => 0)
+let resourceSelectionMode: ComputedRef<boolean> = computed(() => false)
+let currentPageResourceIds: ComputedRef<string[]> = computed(() => [])
+let currentCategoryBatchInBackground: ComputedRef<boolean> = computed(() => false)
 const pageSizeOptions = [
-  { label: '12 / 页', value: 12 },
-  { label: '24 / 页', value: 24 },
-  { label: '48 / 页', value: 48 },
-  { label: '96 / 页', value: 96 }
-]
+  {label: '12 / 页', value: 12},
+  {label: '24 / 页', value: 24},
+  {label: '48 / 页', value: 48},
+  {label: '96 / 页', value: 96}
+] as const
+let normalizedAuthorList: ComputedRef<Array<{ id: string; name: string; count: number }>> = computed(() => [])
+let normalizedActorList: ComputedRef<Array<{ id: string; name: string; count: number }>> = computed(() => [])
+let normalizedEngineList: ComputedRef<Array<{
+  id: string;
+  name: string;
+  icon?: string;
+  count: number
+}>> = computed(() => [])
+const normalizedEngineOptionList = computed(() =>
+  engineOptionList.value
+    .map((option: any) => {
+      const rawIcon = String(option?.extra?.icon ?? '').trim()
+      const icon = !rawIcon
+        ? ''
+        : /^(?:https?:|data:|file:|\/|[a-zA-Z]:[\\/])/.test(rawIcon)
+          ? rawIcon
+          : engineIconUrlByName.get(rawIcon) ?? rawIcon
 
-const normalizedAuthorList = computed(() =>
-  authorList.value
-    .map((author) => ({
-      id: author.id ?? author.authorId ?? '',
-      name: author.name ?? author.authorName ?? '',
-      count: Number(author.count ?? 0)
-    }))
-    .filter((author) => author.id && author.name)
-)
-
-const normalizedActorList = computed(() =>
-  actorList.value
-    .map((actor) => {
-      const name = String(actor?.name ?? actor?.actorName ?? '').trim()
       return {
-        id: name,
-        name,
-        count: Number(actor?.count ?? 0)
+        id: String(option?.value ?? '').trim(),
+        name: String(option?.label ?? '').trim(),
+        icon
       }
     })
-    .filter((actor) => actor.id && actor.name)
+    .filter((item: any) => item.id && item.name)
 )
-
-const normalizedEngineList = computed(() =>
-  engineList.value
-    .map((engine) => ({
-      id: engine.id ?? engine.engineId ?? '',
-      name: engine.name ?? engine.engineName ?? '',
-      icon: resolveEngineIcon(engine.icon ?? engine.extra?.icon ?? ''),
-      count: Number(engine.count ?? 0)
-    }))
-    .filter((engine) => engine.id && engine.name)
-)
-
-const normalizedTagList = computed(() =>
-  tagList.value
-    .map((tag) => ({
-      id: tag.id ?? tag.tagId ?? '',
-      name: tag.name ?? tag.tagName ?? '',
-      count: Number(tag.count ?? 0)
-    }))
-    .filter((tag) => tag.id && tag.name)
-)
-
-const normalizedTypeList = computed(() =>
-  typeList.value
-    .map((type) => ({
-      id: type.id ?? type.typeId ?? '',
-      name: type.name ?? type.typeName ?? '',
-      count: Number(type.count ?? 0)
-    }))
-    .filter((type) => type.id && type.name)
-)
-
-const normalizedAuthorSearch = computed(() => authorSearch.value.trim().toLowerCase())
-const normalizedActorSearch = computed(() => actorSearch.value.trim().toLowerCase())
-const normalizedAlbumSearch = computed(() => albumSearch.value.trim().toLowerCase())
-const normalizedTagSearch = computed(() => tagSearch.value.trim().toLowerCase())
-const normalizedTypeSearch = computed(() => typeSearch.value.trim().toLowerCase())
-
-const filteredAuthorList = computed(() => {
-  if (!normalizedAuthorSearch.value) {
-    return normalizedAuthorList.value
-  }
-
-  return normalizedAuthorList.value.filter((author) =>
-    String(author.name).toLowerCase().includes(normalizedAuthorSearch.value)
-  )
-})
-
-const filteredActorList = computed(() => {
-  if (!normalizedActorSearch.value) {
-    return normalizedActorList.value
-  }
-
-  return normalizedActorList.value.filter((actor) =>
-    String(actor.name).toLowerCase().includes(normalizedActorSearch.value)
-  )
-})
-
-const filteredEngineList = computed(() => normalizedEngineList.value)
-const normalizedAlbumList = computed(() =>
-  albumList.value
-    .map((album) => ({
-      name: String(album?.name ?? album?.albumName ?? '').trim(),
-      count: Number(album?.count ?? 0)
-    }))
-    .filter((album) => album.name)
-)
+let normalizedTagList: ComputedRef<Array<{ id: string; name: string; count: number }>> = computed(() => [])
+let normalizedTypeList: ComputedRef<Array<{ id: string; name: string; count: number }>> = computed(() => [])
+let normalizedAlbumList: ComputedRef<Array<{ name: string; count: number }>> = computed(() => [])
+let filteredAuthorList: ComputedRef<Array<{ id: string; name: string; count: number }>> = computed(() => [])
+let filteredActorList: ComputedRef<Array<{ id: string; name: string; count: number }>> = computed(() => [])
+let filteredEngineList: ComputedRef<Array<{
+  id: string;
+  name: string;
+  icon?: string;
+  count: number
+}>> = computed(() => [])
+let filteredTagList: ComputedRef<Array<{ id: string; name: string; count: number }>> = computed(() => [])
+let filteredTypeList: ComputedRef<Array<{ id: string; name: string; count: number }>> = computed(() => [])
+let filteredAlbumList: ComputedRef<Array<{ name: string; count: number }>> = computed(() => [])
 const websiteTypeSelectOptions = computed(() =>
   websiteTypeOptions.value.map((item: any) => {
     const icon = resolveStoreIcon(String(item?.extra?.icon ?? ''))
@@ -779,98 +813,117 @@ const websiteTypeSelectOptions = computed(() =>
     }
   })
 )
-
-const filteredTagList = computed(() => {
-  if (!normalizedTagSearch.value) {
-    return normalizedTagList.value
-  }
-
-  return normalizedTagList.value.filter((tag) =>
-    String(tag.name).toLowerCase().includes(normalizedTagSearch.value)
-  )
-})
+const normalizedLanguageList = computed(() =>
+  languageOptions.value
+    .map((item: any) => ({
+      id: String(item?.value ?? item?.id ?? '').trim(),
+      name: String(item?.label ?? item?.name ?? '').trim()
+    }))
+    .filter((item) => item.id && item.name)
+)
 
 const categoryName = computed(() => {
   return categoryInfo.value?.name || '资源'
 })
 
-const filteredAlbumList = computed(() => {
-  if (!normalizedAlbumSearch.value) {
-    return normalizedAlbumList.value
-  }
-
-  return normalizedAlbumList.value.filter((album) =>
-    String(album.name).toLowerCase().includes(normalizedAlbumSearch.value)
-  )
-})
-
 const descriptionLabel = computed(() =>
-  categorySettings.value.extendTable === 'game_meta' ? '游戏简介' : `${categoryName.value}描述`
+  categoryProfile.value.flags.isGame ? '游戏简介' : `${categoryName.value}描述`
 )
-const isAudioCategory = computed(() => categorySettings.value.extendTable === 'audio_meta')
-const videoActorLabel = computed(() => '声优/演员')
+const isAudioCategory = computed(() => categoryProfile.value.flags.isAudio)
+const showActorFilter = computed(() => isVideoCategory.value || detailIsAsmr.value)
+const actorFilterLabel = computed(() => detailIsAsmr.value ? '声优' : '声优/演员')
 
 const descriptionPlaceholder = computed(() =>
-  categorySettings.value.extendTable === 'game_meta' ? '请输入游戏简介' : `请输入${categoryName.value}描述`
+  categoryProfile.value.flags.isGame ? '请输入游戏简介' : `请输入${categoryName.value}描述`
 )
 const authorInputPlaceholder = computed(() =>
   isAudioCategory.value ? '可输入多个艺术家，按回车创建标签' : `请输入${categorySettings.value.authorText ?? '作者'}`
 )
 
-const isSingleImageCategory = computed(() => categorySettings.value.extendTable === 'single_image_meta')
-const isNovelCategory = computed(() => categorySettings.value.extendTable === 'novel_meta')
-const startText = computed(() => {
-  if (isSingleImageCategory.value) {
-    return '查看'
-  }
-
-  if (categorySettings.value.extendTable === 'multi_image_meta' || isNovelCategory.value) {
-    return '阅读'
-  }
-
-  return categorySettings.value.startText || '启动'
-})
-const showZoneLaunch = computed(() => categorySettings.value.extendTable === 'game_meta')
+const isSingleImageCategory = computed(() => categoryProfile.value.flags.isSingleImage)
+const isNovelCategory = computed(() => categoryProfile.value.flags.isNovel)
+const startText = computed(() => categoryProfile.value.labels.startText)
+const showZoneLaunch = computed(() => categoryProfile.value.features.showZoneLaunch)
 const canZoneLaunch = computed(() => Boolean(localeEmulatorPath.value.trim()))
-const showAdminLaunch = computed(() => categorySettings.value.extendTable === 'software_meta')
-const showMtoolLaunch = computed(() => categorySettings.value.extendTable === 'game_meta')
+const showAdminLaunch = computed(() => categoryProfile.value.features.showAdminLaunch)
+const showMtoolLaunch = computed(() => categoryProfile.value.features.showMtoolLaunch)
 const canMtoolLaunch = computed(() => Boolean(mtoolPath.value.trim()))
-const showScreenshotFolder = computed(() => categorySettings.value.extendTable === 'game_meta')
-const completedExtendTable = computed(() => String(categorySettings.value.extendTable ?? '').trim())
-const isVideoCategory = computed(() => completedExtendTable.value === 'video_meta')
-const isWebsiteCategory = computed(() => completedExtendTable.value === 'website_meta')
-const isVideoFolderCategory = computed(() =>
-  isVideoCategory.value && String(categorySettings.value.resourcePathType ?? '').trim() === 'folder'
-)
-const showCompletedToggle = computed(() => ['game_meta', 'novel_meta', 'video_meta'].includes(completedExtendTable.value))
-const completedActionLabel = computed(() => {
-  if (isNovelCategory.value) {
-    return '读完'
-  }
-
-  if (isVideoCategory.value) {
-    return '播完'
-  }
-
-  return '通关'
-})
+const showScreenshotFolder = computed(() => categoryProfile.value.features.showScreenshotFolder)
+const isVideoCategory = computed(() => categoryProfile.value.flags.isVideo)
+const isWebsiteCategory = computed(() => categoryProfile.value.flags.isWebsite)
+const isVideoFolderCategory = computed(() => categoryProfile.value.flags.isVideoFolder)
+const showCompletedToggle = computed(() => categoryProfile.value.features.showCompletedToggle)
+const completedActionLabel = computed(() => categoryProfile.value.labels.completedActionLabel)
 const completedStateLabel = computed(() => `已${completedActionLabel.value}`)
-const showCompletedFilter = computed(() => categorySettings.value.showCompletedFilter === true)
+const showCompletedFilter = computed(() =>
+  categorySettings.value.showCompletedFilter === true
+  || categoryProfile.value.features.showCompletedToggle
+)
 const effectiveCompletedOnly = computed(() => showCompletedFilter.value && completedOnly.value)
-const showCardCover = computed(() => categorySettings.value.extendTable !== 'software_meta')
-const showDeleteFiles = computed(() => categorySettings.value.extendTable === 'game_meta')
-const showEngineFilter = computed(() => categorySettings.value.extendTable === 'game_meta')
-const showAuthorFilter = computed(() => !isWebsiteCategory.value)
-const showMissingFilter = computed(() => !isWebsiteCategory.value)
-const showRunningFilter = computed(() => !isWebsiteCategory.value)
-const isSoftwareCategory = computed(() => categorySettings.value.extendTable === 'software_meta')
-const showCardDefaultAppOpen = computed(() => ![
-  'game_meta',
-  'software_meta',
-  'website_meta',
-  'multi_image_meta',
-  'asmr_meta'
-].includes(String(categorySettings.value.extendTable ?? '').trim()) && !isVideoFolderCategory.value)
+let buildResourceQuery!: (page: number, size: number) => {
+  keyword: string
+  authorIds: string[]
+  actorNames: string[]
+  albumNames: string[]
+  engineIds: string[]
+  tagIds: string[]
+  typeIds: string[]
+  missingOnly: boolean
+  favoriteOnly: boolean
+  completedOnly: boolean
+  runningOnly: boolean
+  page: number
+  pageSize: number
+  sortBy: string
+}
+let resetSelected!: () => void
+let resetCategoryListState!: () => void
+const listQueryState = useCategoryListQueryState({
+  keyword,
+  missingFile,
+  favoriteOnly,
+  completedOnly,
+  runningOnly,
+  effectiveCompletedOnly,
+  selectedAuthorList,
+  selectedActorList,
+  selectedAlbumList,
+  selectedEngineList,
+  selectedTagList,
+  selectedTypeList,
+  authorSearch,
+  actorSearch,
+  albumSearch,
+  tagSearch,
+  typeSearch,
+  selectionModeManuallyEnabled,
+  selectedResourceIds,
+  resourceList,
+  totalResources,
+  authorList,
+  actorList,
+  albumList,
+  engineList,
+  languageOptions,
+  websiteTypeOptions,
+  tagList,
+  typeList,
+  currentPage,
+  sortBy,
+  pageSize
+})
+buildResourceQuery = listQueryState.buildResourceQuery
+resetSelected = listQueryState.resetSelected
+resetCategoryListState = listQueryState.resetCategoryListState
+const showCardCover = computed(() => categoryProfile.value.features.showCardCover)
+const showDeleteFiles = computed(() => categoryProfile.value.features.showDeleteFiles)
+const showEngineFilter = computed(() => categoryProfile.value.features.showEngineFilter)
+const showAuthorFilter = computed(() => categoryProfile.value.features.showAuthorFilter)
+const showMissingFilter = computed(() => categoryProfile.value.features.showMissingFilter)
+const showRunningFilter = computed(() => categoryProfile.value.features.showRunningFilter)
+const isSoftwareCategory = computed(() => categoryProfile.value.flags.isSoftware)
+const showCardDefaultAppOpen = computed(() => categoryProfile.value.features.showCardDefaultAppOpen)
+let filterSectionsStyle: ComputedRef<{ gridTemplateRows: string }> = computed(() => ({gridTemplateRows: ''}))
 const softwareScriptShellType = computed<'powershell' | 'cmd'>(() =>
   softwareScriptRuntimes.value.find((item) => item.value === softwareScriptRuntimePath.value)?.shellType ?? 'powershell'
 )
@@ -879,26 +932,6 @@ const softwareScriptPlaceholder = computed(() =>
     ? '例如：\nSet-Location d:/myDir\n. .\\venv\\Scripts\\Activate.ps1\npy -3.10 run.py'
     : '例如：\ncd /d d:/myDir\ncall .\\venv\\Scripts\\activate\npy -3.10 run.py'
 )
-const filterSectionCount = computed(() => {
-  let count = detailIsAsmr.value ? 2 : 3
-  if (!showAuthorFilter.value) {
-    count -= 1
-  }
-  if (isVideoCategory.value) {
-    count += 1
-  }
-  if (isAudioCategory.value) {
-    count += 1
-  }
-  if (showEngineFilter.value) {
-    count += 1
-  }
-  return count
-})
-
-const filterSectionsStyle = computed(() => ({
-  gridTemplateRows: `repeat(${filterSectionCount.value}, minmax(0, 1fr))`
-}))
 const detailLogs = computed(() =>
   [...(selectedDetailResource.value?.logs ?? [])]
     .filter((logItem: any) => !logItem?.isDeleted)
@@ -912,9 +945,6 @@ const visibleDetailLogs = computed(() => detailLogs.value.slice(0, visibleLogCou
 const hasMoreDetailLogs = computed(() => visibleLogCount.value < detailLogs.value.length)
 const noMore = computed(() => detailLogs.value.length > 5 && !hasMoreDetailLogs.value)
 const detailStats = computed(() => selectedDetailResource.value?.stats ?? null)
-const detailUsesWebsiteTerms = computed(() => detailIsWebsite.value)
-const detailUsesBrowseTerms = computed(() => isSingleImageCategory.value || detailIsManga.value || detailIsNovel.value)
-const detailUsesPlayTerms = computed(() => detailIsAsmr.value || detailIsAudio.value || isVideoCategory.value)
 const sortActionTerms = computed(() => {
   if (isWebsiteCategory.value) {
     return {
@@ -947,108 +977,47 @@ const sortActionTerms = computed(() => {
   }
 })
 const sortOptions = computed(() => [
-  { label: '最新添加', value: 'createTime-desc' },
-  { label: '最早添加', value: 'createTime-asc' },
-  { label: '名称 A-Z', value: 'title-asc' },
-  { label: '名称 Z-A', value: 'title-desc' },
-  { label: `最后${sortActionTerms.value.latest}最近`, value: 'lastAccessTime-desc' },
-  { label: `最后${sortActionTerms.value.latest}最早`, value: 'lastAccessTime-asc' },
-  { label: `${sortActionTerms.value.runtime}时长最长`, value: 'totalRuntime-desc' },
-  { label: `${sortActionTerms.value.runtime}时长最短`, value: 'totalRuntime-asc' },
-  { label: `首次${sortActionTerms.value.first}最近`, value: 'firstAccessTime-desc' },
-  { label: `首次${sortActionTerms.value.first}最早`, value: 'firstAccessTime-asc' }
+  {label: '最新添加', value: 'createTime-desc'},
+  {label: '最早添加', value: 'createTime-asc'},
+  {label: '名称 A-Z', value: 'title-asc'},
+  {label: '名称 Z-A', value: 'title-desc'},
+  {label: `最后${sortActionTerms.value.latest}最近`, value: 'lastAccessTime-desc'},
+  {label: `最后${sortActionTerms.value.latest}最早`, value: 'lastAccessTime-asc'},
+  {label: `${sortActionTerms.value.runtime}时长最长`, value: 'totalRuntime-desc'},
+  {label: `${sortActionTerms.value.runtime}时长最短`, value: 'totalRuntime-asc'},
+  {label: `首次${sortActionTerms.value.first}最近`, value: 'firstAccessTime-desc'},
+  {label: `首次${sortActionTerms.value.first}最早`, value: 'firstAccessTime-asc'}
 ])
-const detailStatsText = computed(() => ({
-  firstAccess: detailUsesWebsiteTerms.value ? '第一次访问' : (detailUsesBrowseTerms.value ? '第一次浏览' : (detailUsesPlayTerms.value ? '第一次播放' : '第一次启动')),
-  lastAccess: detailUsesWebsiteTerms.value ? '最后一次访问' : (detailUsesBrowseTerms.value ? '最后一次浏览' : (detailUsesPlayTerms.value ? '最后一次播放' : '最后一次启动')),
-  accessCount: detailUsesWebsiteTerms.value ? '访问次数' : (detailUsesBrowseTerms.value ? '浏览次数' : (detailUsesPlayTerms.value ? '播放次数' : '启动次数')),
-  totalRuntime: detailUsesBrowseTerms.value ? '浏览总时长' : (detailUsesPlayTerms.value ? '播放总时长' : '运行总时长'),
-}))
-const detailShowTotalRuntime = computed(() => !detailIsWebsite.value)
-const detailPreviewSectionTitle = computed(() => {
-  if (detailIsManga.value) return ''
-  if (String(categoryName.value ?? '').trim() === '电影') return '截图'
-  return '游戏截图'
-})
-const detailGallerySectionTitle = computed(() => {
-  if (detailIsManga.value) return '图片预览'
-  if (detailIsAsmr.value) return '音声目录'
-  if (isVideoCategory.value) return '播放日志'
-  return '启动日志'
-})
-const detailDirectorySectionTitle = computed(() => detailIsAsmr.value ? detailGallerySectionTitle.value : '番剧目录')
-const detailDirectoryEmptyText = computed(() => detailIsAsmr.value ? '暂无音频文件' : '暂无目录内容')
-const detailEmptyLogDescription = computed(() => isVideoCategory.value ? '暂无播放日志' : '暂无启动日志')
-const detailLogModeLabel = computed(() => isVideoCategory.value ? '播放方式' : '启动方式')
-const detailLogDurationLabel = computed(() => isVideoCategory.value ? '播放时长' : '运行时长')
-const detailShowLogs = computed(() => !detailIsWebsite.value && !isSingleImageCategory.value && !detailIsManga.value && !detailIsAudio.value)
-const hasDetailDescription = computed(() => {
-  const rawDescription = String(selectedDetailResource.value?.description ?? '').trim()
-  if (!rawDescription) {
-    return false
-  }
-
-  const plainText = rawDescription
-    .replace(/<br\s*\/?>/gi, '')
-    .replace(/<\/?p[^>]*>/gi, '')
-    .replace(/<[^>]*>/g, '')
-    .replace(/&nbsp;/gi, ' ')
-    .trim()
-
-  return Boolean(plainText)
-})
-const detailReadingProgressText = computed(() => {
-  if (detailIsNovel.value) {
-    const lastReadPercent = Math.max(0, Math.min(1, Number(selectedDetailResource.value?.novelMeta?.lastReadPercent ?? 0)))
-    return `${Math.round(lastReadPercent * 100)}%`
-  }
-
-  if (!detailIsManga.value) {
-    return ''
-  }
-
-  const lastReadPage = Math.max(0, Number(selectedDetailResource.value?.multiImageMeta?.lastReadPage ?? 0))
-  const totalPages = Math.max(0, detailScreenshotPaths.value.length)
-
-  if (!totalPages) {
-    return '0 / 0'
-  }
-
-  return `${Math.min(lastReadPage + 1, totalPages)} / ${totalPages}`
-})
-const detailPlaybackProgressText = computed(() => {
-  if (detailIsAudio.value) {
-    const lastPlayTime = Math.max(0, Number(selectedDetailResource.value?.audioMeta?.lastPlayTime ?? 0))
-    return lastPlayTime > 0 ? formatDuration(lastPlayTime) : '暂无'
-  }
-
-  if (isVideoCategory.value) {
-    const lastPlayTime = Math.max(0, Number(selectedDetailResource.value?.videoMeta?.lastPlayTime ?? 0))
-    return lastPlayTime > 0 ? formatDuration(lastPlayTime) : '暂无'
-  }
-
-  if (!detailIsAsmr.value) {
-    return ''
-  }
-
-  const lastPlayFile = String(selectedDetailResource.value?.asmrMeta?.lastPlayFile ?? '').trim()
-  if (!lastPlayFile) {
-    return '暂无'
-  }
-
-  const normalizedPath = lastPlayFile.replace(/\\/g, '/')
-  const fileName = normalizedPath.split('/').pop() || normalizedPath
-  const lastPlayTime = Math.max(0, Number(selectedDetailResource.value?.asmrMeta?.lastPlayTime ?? 0))
-
-  return `${fileName} ${formatDuration(lastPlayTime)}`
-})
-const detailGalleryItems = computed(() =>
-  detailScreenshotPaths.value.map((filePath, index) => ({
-    filePath,
-    index,
-    url: detailGalleryImageUrls.value[filePath] ?? ''
-  }))
-)
+let detailUsesBrowseTerms!: ComputedRef<boolean>
+let detailUsesPlayTerms!: ComputedRef<boolean>
+let detailStatsText!: ComputedRef<{
+  firstAccess: string
+  lastAccess: string
+  accessCount: string
+  totalRuntime: string
+}>
+let detailShowTotalRuntime!: ComputedRef<boolean>
+let detailPreviewSectionTitle!: ComputedRef<string>
+let detailGallerySectionTitle!: ComputedRef<string>
+let detailDirectorySectionTitle!: ComputedRef<string>
+let detailDirectoryEmptyText!: ComputedRef<string>
+let detailEmptyLogDescription!: ComputedRef<string>
+let detailLogModeLabel!: ComputedRef<string>
+let detailLogDurationLabel!: ComputedRef<string>
+let detailShowLogs!: ComputedRef<boolean>
+let hasDetailDescription!: ComputedRef<boolean>
+let detailReadingProgressText!: ComputedRef<string>
+let detailPlaybackProgressText!: ComputedRef<string>
+let detailGalleryItems!: ComputedRef<Array<{ filePath: string; index: number; url: string }>>
+let detailMetaItems!: ComputedRef<Array<{
+  label: string;
+  value: string;
+  icon?: string;
+  full?: boolean;
+  copyValue?: string;
+  clampLines?: number
+}>>
+let detailDisplayPath!: ComputedRef<string>
 
 const collectAudioTreeImagePaths = (nodes: any[]): string[] => {
   const imagePaths: string[] = []
@@ -1074,8 +1043,20 @@ const collectAudioTreeImagePaths = (nodes: any[]): string[] => {
 }
 
 const detailAudioImagePaths = computed(() => collectAudioTreeImagePaths(detailAudioTree.value))
-const collectAudioTreeTracks = (nodes: any[]): Array<{ path: string; label: string; duration?: number | null; hasSubtitle?: boolean; subtitlePath?: string }> => {
-  const tracks: Array<{ path: string; label: string; duration?: number | null; hasSubtitle?: boolean; subtitlePath?: string }> = []
+const collectAudioTreeTracks = (nodes: any[]): Array<{
+  path: string;
+  label: string;
+  duration?: number | null;
+  hasSubtitle?: boolean;
+  subtitlePath?: string
+}> => {
+  const tracks: Array<{
+    path: string;
+    label: string;
+    duration?: number | null;
+    hasSubtitle?: boolean;
+    subtitlePath?: string
+  }> = []
 
   const visit = (items: any[]) => {
     for (const item of items) {
@@ -1107,8 +1088,22 @@ const detailAudioPlaylist = computed(() => collectAudioTreeTracks(detailAudioTre
 const collectAudioTreeVideoTracks = (
   nodes: any[],
   resource: any = selectedDetailResource.value
-): Array<{ path: string; label: string; resourceId?: string; resourceTitle?: string; coverSrc?: string; subtitlePath?: string }> => {
-  const tracks: Array<{ path: string; label: string; resourceId?: string; resourceTitle?: string; coverSrc?: string; subtitlePath?: string }> = []
+): Array<{
+  path: string;
+  label: string;
+  resourceId?: string;
+  resourceTitle?: string;
+  coverSrc?: string;
+  subtitlePath?: string
+}> => {
+  const tracks: Array<{
+    path: string;
+    label: string;
+    resourceId?: string;
+    resourceTitle?: string;
+    coverSrc?: string;
+    subtitlePath?: string
+  }> = []
   const resourceTitle = String(resource?.title ?? selectedDetailResource.value?.title ?? categoryName.value ?? '视频播放')
   const resourceId = String(resource?.id ?? selectedDetailResource.value?.id ?? '').trim()
 
@@ -1139,15 +1134,25 @@ const collectAudioTreeVideoTracks = (
   return tracks
 }
 
-const getDetailVideoSubItems = (resource: any) =>
-  (Array.isArray(resource?.videoSubs) ? resource.videoSubs : [])
+const getDetailMediaSubItems = (items: any[]) =>
+  (Array.isArray(items) ? items : [])
     .map((item: any) => ({
       id: String(item?.id ?? ''),
       fileName: String(item?.fileName ?? '').trim(),
       relativePath: normalizePathValue(String(item?.relativePath ?? '')),
+      kind: String(item?.kind ?? 'video').trim(),
       coverPath: String(item?.coverPath ?? '').trim(),
       sortOrder: Number.isFinite(Number(item?.sortOrder)) ? Number(item.sortOrder) : Number.MAX_SAFE_INTEGER,
-      isVisible: item?.isVisible !== false
+      isVisible: item?.isVisible !== false,
+      hasSubtitle: item?.hasSubtitle === true,
+      duration: item?.duration ?? null,
+      bitrate: item?.bitrate ?? null,
+      sampleRate: item?.sampleRate ?? null,
+      frameRate: item?.frameRate ?? null,
+      audioBitrate: item?.audioBitrate ?? null,
+      audioSampleRate: item?.audioSampleRate ?? null,
+      width: item?.width ?? null,
+      height: item?.height ?? null
     }))
     .filter((item) => item.relativePath)
     .sort((left, right) => {
@@ -1158,6 +1163,59 @@ const getDetailVideoSubItems = (resource: any) =>
 
       return compareByFileName(left.fileName || left.relativePath, right.fileName || right.relativePath)
     })
+
+const getDetailVideoSubItems = (resource: any) => getDetailMediaSubItems(resource?.videoSubs)
+const getDetailAsmrSubItems = (resource: any) => getDetailMediaSubItems(resource?.asmrSubs)
+
+const applyStoredDetailAudioTreeMetadata = (nodes: any[], resource: any): any[] => {
+  const subItems = isVideoFolderCategory.value
+    ? getDetailVideoSubItems(resource)
+    : getDetailAsmrSubItems(resource)
+  if (!subItems.length) {
+    return nodes
+  }
+
+  const metadataMap = new Map(subItems.map((item) => [item.relativePath.toLowerCase(), item] as const))
+  const basePath = String(resource?.basePath ?? '')
+  const visit = (entries: any[]): any[] =>
+    entries.map((entry) => {
+      if (!entry) {
+        return entry
+      }
+
+      if (Array.isArray(entry.children) && entry.children.length) {
+        return {
+          ...entry,
+          children: visit(entry.children)
+        }
+      }
+
+      if (!entry.path) {
+        return {...entry}
+      }
+
+      const metadata = metadataMap.get(getRelativeVideoPath(basePath, String(entry.path)).toLowerCase())
+      if (!metadata) {
+        return {...entry}
+      }
+
+      return {
+        ...entry,
+        hasSubtitle: metadata.hasSubtitle ?? entry.hasSubtitle ?? false,
+        duration: metadata.duration ?? entry.duration ?? null,
+        bitrate: metadata.bitrate ?? entry.bitrate ?? null,
+        sampleRate: metadata.sampleRate ?? entry.sampleRate ?? null,
+        frameRate: metadata.frameRate ?? entry.frameRate ?? null,
+        audioBitrate: metadata.audioBitrate ?? entry.audioBitrate ?? null,
+        audioSampleRate: metadata.audioSampleRate ?? entry.audioSampleRate ?? null,
+        width: metadata.width ?? entry.width ?? null,
+        height: metadata.height ?? entry.height ?? null,
+        __metadataResolved: true
+      }
+    })
+
+  return visit(Array.isArray(nodes) ? nodes : [])
+}
 
 const getVideoSubCoverPreviewSrc = (resource: any, relativePath: string | null | undefined) =>
   videoSubCoverPreviewUrls.value[getVideoSubCoverKey(resource, relativePath)] ?? ''
@@ -1173,24 +1231,29 @@ const refreshVideoSubCoverPreviewUrls = async (resource: any) => {
     return
   }
 
-  const updates = await Promise.all(videoSubItems.map(async (item) => {
+  const nextMap = {...videoSubCoverPreviewUrls.value}
+  const pendingItems = videoSubItems.filter((item) => {
     const coverPath = String(item.coverPath ?? '').trim()
+    const cacheKey = getVideoSubCoverKey(resource, item.relativePath)
     if (!coverPath) {
-      return {
-        key: getVideoSubCoverKey(resource, item.relativePath),
-        value: ''
-      }
+      nextMap[cacheKey] = ''
+      return false
     }
 
+    return !String(nextMap[cacheKey] ?? '').trim()
+  })
+
+  if (!pendingItems.length) {
+    videoSubCoverPreviewUrls.value = nextMap
+    return
+  }
+
+  const updates = await Promise.all(pendingItems.map(async (item) => {
+    const coverPath = String(item.coverPath ?? '').trim()
     try {
       return {
         key: getVideoSubCoverKey(resource, item.relativePath),
-        value: (await window.api.dialog.getImagePreviewUrl(coverPath, {
-          maxWidth: 320,
-          maxHeight: 180,
-          fit: 'cover',
-          quality: 78
-        })) ?? ''
+        value: await resolveVideoSubCoverPreviewUrl(coverPath)
       }
     } catch {
       return {
@@ -1200,11 +1263,30 @@ const refreshVideoSubCoverPreviewUrls = async (resource: any) => {
     }
   }))
 
-  const nextMap = { ...videoSubCoverPreviewUrls.value }
   for (const item of updates) {
     nextMap[item.key] = item.value
   }
   videoSubCoverPreviewUrls.value = nextMap
+}
+
+const scheduleVideoSubCoverPreviewRefresh = (resource: any) => {
+  requestAnimationFrame(() => {
+    void refreshVideoSubCoverPreviewUrls(resource)
+  })
+}
+
+const applyDetailAudioTreePresentation = (
+  targetResource: any = selectedDetailResource.value,
+  shouldApply: () => boolean = () => true
+) => {
+  if (!shouldApply()) {
+    return
+  }
+
+  detailAudioTree.value = reorderVideoTreeBySubItems(
+    applyStoredDetailAudioTreeMetadata(detailAudioTree.value, targetResource),
+    targetResource
+  )
 }
 
 const sortVideoTracksBySubItems = <T extends { path: string; label?: string }>(tracks: T[], resource: any) => {
@@ -1254,7 +1336,13 @@ const reorderVideoTreeBySubItems = (nodes: any[], resource: any): any[] => {
   const basePath = String(resource?.basePath ?? '')
   const orderMap = new Map<string, number>(videoSubItems.map((item, index) => [item.relativePath.toLowerCase(), index]))
   const visibleMap = new Map<string, boolean>(videoSubItems.map((item) => [item.relativePath.toLowerCase(), item.isVisible]))
+  const visibleOrderMap = new Map<string, number>(
+    videoSubItems
+      .filter((item) => item.isVisible !== false)
+      .map((item, index) => [item.relativePath.toLowerCase(), index])
+  )
   const coverPathMap = new Map(videoSubItems.map((item) => [item.relativePath.toLowerCase(), item.coverPath ?? '']))
+  const metadataMap = new Map(videoSubItems.map((item) => [item.relativePath.toLowerCase(), item] as const))
 
   const visit = (entries: any[]): any[] =>
     entries
@@ -1268,13 +1356,24 @@ const reorderVideoTreeBySubItems = (nodes: any[], resource: any): any[] => {
           if (visibleMap.get(relativePath) === false) {
             return null
           }
-          const orderIndex = orderMap.get(relativePath)
+          const orderIndex = visibleOrderMap.get(relativePath)
+          const metadata = metadataMap.get(relativePath)
 
           return {
             ...entry,
             coverPath: coverPathMap.get(relativePath) ?? '',
             coverPreviewSrc: getVideoSubCoverPreviewSrc(resource, relativePath),
-            sortOrderLabel: orderIndex != null ? orderIndex + 1 : ''
+            sortOrderLabel: orderIndex != null ? orderIndex + 1 : '',
+            hasSubtitle: metadata?.hasSubtitle ?? entry.hasSubtitle ?? false,
+            duration: metadata?.duration ?? entry.duration ?? null,
+            bitrate: metadata?.bitrate ?? entry.bitrate ?? null,
+            sampleRate: metadata?.sampleRate ?? entry.sampleRate ?? null,
+            frameRate: metadata?.frameRate ?? entry.frameRate ?? null,
+            audioBitrate: metadata?.audioBitrate ?? entry.audioBitrate ?? null,
+            audioSampleRate: metadata?.audioSampleRate ?? entry.audioSampleRate ?? null,
+            width: metadata?.width ?? entry.width ?? null,
+            height: metadata?.height ?? entry.height ?? null,
+            __metadataResolved: true
           }
         }
 
@@ -1290,7 +1389,7 @@ const reorderVideoTreeBySubItems = (nodes: any[], resource: any): any[] => {
           }
         }
 
-        return { ...entry }
+        return {...entry}
       })
       .filter((entry): entry is any => Boolean(entry))
       .sort((left, right) => {
@@ -1298,8 +1397,8 @@ const reorderVideoTreeBySubItems = (nodes: any[], resource: any): any[] => {
           if (entry?.isDirectory) {
             const childIndexes = Array.isArray(entry.children)
               ? entry.children
-                  .map((child: any) => resolveOrderIndex(child))
-                  .filter((value: number | null): value is number => value != null)
+                .map((child: any) => resolveOrderIndex(child))
+                .filter((value: number | null): value is number => value != null)
               : []
             return childIndexes.length ? Math.min(...childIndexes) : null
           }
@@ -1346,25 +1445,7 @@ const getAudioPlayerCoverPreview = async (resource: any) => {
     return detailCoverPreviewSrc.value
   }
 
-  const coverPath = normalizeCoverPreviewSource(String(resource?.coverPath ?? ''))
-  if (!coverPath) {
-    return ''
-  }
-
-  if (/^https?:\/\//i.test(coverPath) || /^data:/i.test(coverPath)) {
-    return coverPath
-  }
-
-  try {
-    return (await window.api.dialog.getImagePreviewUrl(String(resource?.coverPath ?? ''), {
-      maxWidth: 960,
-      maxHeight: 720,
-      fit: 'inside',
-      quality: 84
-    })) ?? ''
-  } catch {
-    return ''
-  }
+  return await resolveAudioPlayerCoverPreviewUrl(String(resource?.coverPath ?? ''))
 }
 
 const getAudioPlayerArtistText = (resource: any) => {
@@ -1378,23 +1459,6 @@ const getAudioPlayerArtistText = (resource: any) => {
 
   return String(resource?.audioMeta?.artist ?? '').trim()
 }
-
-const buildResourceQuery = (page: number, size: number) => ({
-  keyword: keyword.value.trim(),
-  authorIds: [...selectedAuthorList.value],
-  actorNames: [...selectedActorList.value],
-  albumNames: [...selectedAlbumList.value],
-  engineIds: [...selectedEngineList.value],
-  tagIds: [...selectedTagList.value],
-  typeIds: [...selectedTypeList.value],
-  missingOnly: missingFile.value,
-  favoriteOnly: favoriteOnly.value,
-  completedOnly: effectiveCompletedOnly.value,
-  runningOnly: runningOnly.value,
-  page,
-  pageSize: size,
-  sortBy: sortBy.value
-})
 
 const loadAllCategoryResources = async () => {
   const targetPageSize = Math.max(totalResources.value, resourceList.value.length, 1)
@@ -1433,7 +1497,18 @@ const buildMusicPlaylistTrack = (resource: any) => {
   }
 }
 
-const applyAudioPlayerSession = async (resource: any, playlist: Array<{ path: string; label: string; duration?: number | null; resourceId?: string; resourceTitle?: string; artist?: string; coverSrc?: string; coverPath?: string; hasSubtitle?: boolean; subtitlePath?: string }>, initialPath: string, initialTime = 0) => {
+const applyAudioPlayerSession = async (resource: any, playlist: Array<{
+  path: string;
+  label: string;
+  duration?: number | null;
+  resourceId?: string;
+  resourceTitle?: string;
+  artist?: string;
+  coverSrc?: string;
+  coverPath?: string;
+  hasSubtitle?: boolean;
+  subtitlePath?: string
+}>, initialPath: string, initialTime = 0) => {
   await loadPlaybackResumeRestartThresholds()
   audioPlayerPlaylist.value = [...playlist]
   audioPlayerDisplayMode.value = String(resource?.category?.referencePath ?? resource?.extendTable ?? categorySettings.value.extendTable ?? '').trim() === 'audio_meta'
@@ -1444,6 +1519,7 @@ const applyAudioPlayerSession = async (resource: any, playlist: Array<{ path: st
     resourceId: String(resource?.id ?? ''),
     initialPath,
     initialTime: Math.max(0, Number(initialTime ?? 0)),
+    sessionVersion: Number(audioPlayerStore.sessionVersion.value ?? 0) + 1,
     audioResumeRestartThreshold: audioPlaybackResumeRestartThreshold.value,
     title: String(resource?.title ?? categoryName.value ?? '音频播放器'),
     artist: getAudioPlayerArtistText(resource),
@@ -1461,65 +1537,11 @@ const resolveResourceAudioTree = async (resource: any) => {
     return detailAudioTree.value
   }
 
-  const directoryTree = await window.api.dialog.getDirectoryAudioTree(String(resource?.basePath ?? ''))
-  return reorderVideoTreeBySubItems(directoryTree, resource)
-}
-
-const openAsmrPlaybackFromLaunch = async (resource: any) => {
-  try {
-    const audioTree = await resolveResourceAudioTree(resource)
-    const allTracks = collectAudioTreeTracks(audioTree)
-    if (!allTracks.length) {
-      showNotifyByType('warning', '播放音频', '当前没有可播放的音频文件')
-      return
-    }
-
-    const lastPlayFile = String(resource?.asmrMeta?.lastPlayFile ?? '').trim()
-    const lastPlayTime = Math.max(0, Number(resource?.asmrMeta?.lastPlayTime ?? 0))
-    const normalizedLastPlayFile = normalizeAudioPath(lastPlayFile)
-    const resumeTrack = normalizedLastPlayFile
-      ? allTracks.find((track) => normalizeAudioPath(track.path) === normalizedLastPlayFile)
-      : null
-
-    if (!resumeTrack) {
-      await applyAudioPlayerSession(resource, allTracks, String(allTracks[0]?.path ?? ''), 0)
-      return
-    }
-
-    const resumeDirectory = getAudioDirectoryPath(resumeTrack.path)
-    const directoryTracks = allTracks.filter((track) => getAudioDirectoryPath(track.path) === resumeDirectory)
-    const playlist = directoryTracks.length ? directoryTracks : allTracks
-    await applyAudioPlayerSession(resource, playlist, resumeTrack.path, lastPlayTime)
-  } catch {
-    showNotifyByType('error', '播放音频', '读取音声目录失败')
-  }
-}
-
-const openAudioPlaybackFromLaunch = async (resource: any) => {
-  const targetPath = getResourceFilePath(resource)
-  if (!targetPath) {
-    showNotifyByType('warning', '播放音频', '当前音乐路径无效')
-    return
-  }
-
-  const allResources = await loadAllCategoryResources()
-  const playlist = allResources
-    .map((item: any) => buildMusicPlaylistTrack(item))
-    .filter((item): item is NonNullable<typeof item> => Boolean(item))
-  const normalizedTargetPath = normalizeAudioPath(targetPath)
-  const matchedTrack = playlist.find((item) => normalizeAudioPath(item.path) === normalizedTargetPath)
-
-  if (!playlist.length || !matchedTrack) {
-    showNotifyByType('warning', '播放音频', '当前没有可播放的音乐资源')
-    return
-  }
-
-  await applyAudioPlayerSession(
-    resource,
-    playlist,
-    matchedTrack.path,
-    Math.max(0, Number(resource?.audioMeta?.lastPlayTime ?? 0))
+  const directoryTree = await window.api.dialog.getDirectoryAudioTree(
+    String(resource?.basePath ?? ''),
+    {includeMetadata: false}
   )
+  return reorderVideoTreeBySubItems(applyStoredDetailAudioTreeMetadata(directoryTree, resource), resource)
 }
 
 const getVideoPlayerCoverPreview = async (resource: any) => {
@@ -1528,25 +1550,7 @@ const getVideoPlayerCoverPreview = async (resource: any) => {
     return detailCoverPreviewSrc.value
   }
 
-  const coverPath = normalizeCoverPreviewSource(String(resource?.coverPath ?? ''))
-  if (!coverPath) {
-    return ''
-  }
-
-  if (/^https?:\/\//i.test(coverPath) || /^data:/i.test(coverPath)) {
-    return coverPath
-  }
-
-  try {
-    return (await window.api.dialog.getImagePreviewUrl(String(resource?.coverPath ?? ''), {
-      maxWidth: 320,
-      maxHeight: 200,
-      fit: 'cover',
-      quality: 80
-    })) ?? ''
-  } catch {
-    return ''
-  }
+  return await resolveVideoPlayerCoverPreviewUrl(String(resource?.coverPath ?? ''))
 }
 
 const buildVideoPlaylistTrack = async (resource: any) => {
@@ -1564,74 +1568,6 @@ const buildVideoPlaylistTrack = async (resource: any) => {
   }
 }
 
-const openVideoPlaybackFromLaunch = async (resource: any) => {
-  await loadPlaybackResumeRestartThresholds()
-  if (isVideoFolderCategory.value) {
-    let playbackResource = resource
-    const resourceId = String(resource?.id ?? '').trim()
-    if (resourceId) {
-      try {
-        const detailResult = await window.api.service.getResourceDetail(resourceId)
-        if (detailResult?.type === 'success' && detailResult?.data) {
-          playbackResource = detailResult.data
-        }
-      } catch {
-        // ignore detail fetch errors and fall back to current resource
-      }
-    }
-
-    await refreshVideoSubCoverPreviewUrls(playbackResource)
-    const audioTree = await resolveResourceAudioTree(playbackResource)
-      const playlist = sortVideoTracksBySubItems(collectAudioTreeVideoTracks(audioTree, playbackResource), playbackResource)
-    if (!playlist.length) {
-      showNotifyByType('warning', '播放视频', '当前没有可播放的视频文件')
-      return
-    }
-
-    const lastPlayFile = String(playbackResource?.videoMeta?.lastPlayFile ?? '').trim()
-    const normalizedLastPlayFile = lastPlayFile.replace(/\\/g, '/')
-    const resumeTrack = normalizedLastPlayFile
-      ? playlist.find((item) => item.path.replace(/\\/g, '/') === normalizedLastPlayFile)
-      : null
-
-    videoPlayerPlaylist.value = playlist
-    videoPlayerInitialPath.value = resumeTrack?.path ?? String(playlist[0]?.path ?? '')
-    videoPlayerInitialTime.value = resumeTrack ? Math.max(0, Number(playbackResource?.videoMeta?.lastPlayTime ?? 0)) : 0
-    videoPlayerTitle.value = String(playbackResource?.title ?? categoryName.value ?? '视频播放')
-    showVideoPlayer.value = true
-    return
-  }
-
-  const targetPath = getResourceFilePath(resource)
-  if (!targetPath) {
-    showNotifyByType('warning', '播放视频', '当前视频路径无效')
-    return
-  }
-
-  const allResources = await loadAllCategoryResources()
-  const playlist = (await Promise.all(allResources.map((item: any) => buildVideoPlaylistTrack(item))))
-    .filter((item): item is NonNullable<typeof item> => Boolean(item))
-  const normalizedTargetPath = targetPath.replace(/\\/g, '/')
-  const matchedTrack = playlist.find((item) => item.path.replace(/\\/g, '/') === normalizedTargetPath)
-
-  if (!playlist.length || !matchedTrack) {
-    showNotifyByType('warning', '播放视频', '当前没有可播放的视频资源')
-    return
-  }
-
-  const lastPlayFile = String(resource?.videoMeta?.lastPlayFile ?? '').trim()
-  const normalizedLastPlayFile = lastPlayFile.replace(/\\/g, '/')
-  const resumeTrack = normalizedLastPlayFile
-    ? playlist.find((item) => item.path.replace(/\\/g, '/') === normalizedLastPlayFile)
-    : null
-
-  videoPlayerPlaylist.value = playlist
-  videoPlayerInitialPath.value = resumeTrack?.path ?? matchedTrack.path
-  videoPlayerInitialTime.value = resumeTrack ? Math.max(0, Number(resource?.videoMeta?.lastPlayTime ?? 0)) : 0
-  videoPlayerTitle.value = String(resource?.title ?? categoryName.value ?? '视频播放')
-  showVideoPlayer.value = true
-}
-
 const handleAddMusicToPlaylist = async (resource: any) => {
   if (!isAudioCategory.value) {
     return
@@ -1647,7 +1583,7 @@ const handleAddMusicToPlaylist = async (resource: any) => {
   const hasActiveMusicPlaylist = audioPlayerDisplayMode.value === 'music' && audioPlayerPlaylist.value.length > 0
 
   if (!hasActiveMusicPlaylist) {
-    await openAudioPlaybackFromLaunch(resource)
+    await readerPlayerActions.openAudioPlaybackFromLaunch(resource)
     showNotifyByType('success', '加入播放列表', `已按当前筛选条件开始播放“${resource?.title ?? '当前音乐'}”`)
     return
   }
@@ -1660,244 +1596,8 @@ const handleAddMusicToPlaylist = async (resource: any) => {
 
   const nextPlaylist = [...audioPlayerPlaylist.value, track]
   audioPlayerPlaylist.value = nextPlaylist
-  setAudioPlayerSession({ playlist: nextPlaylist })
+  setAudioPlayerSession({playlist: nextPlaylist})
   showNotifyByType('success', '加入播放列表', `已将“${track.resourceTitle || track.label}”加入播放列表`)
-}
-
-const formatAudioBitrate = (bitrate: number | null | undefined) => {
-  const normalized = Number(bitrate ?? 0)
-  if (!Number.isFinite(normalized) || normalized <= 0) {
-    return '未知'
-  }
-
-  return `${Math.round(normalized / 1000)} kbps`
-}
-
-const formatAudioSampleRate = (sampleRate: number | null | undefined) => {
-  const normalized = Number(sampleRate ?? 0)
-  if (!Number.isFinite(normalized) || normalized <= 0) {
-    return '未知'
-  }
-
-  return `${normalized} Hz`
-}
-
-const formatFrameRate = (frameRate: number | null | undefined) => {
-  const normalized = Number(frameRate ?? 0)
-  if (!Number.isFinite(normalized) || normalized <= 0) {
-    return '未知'
-  }
-
-  return `${normalized.toFixed(normalized >= 10 ? 0 : 2)} fps`
-}
-
-const formatImageResolution = (width: number | null | undefined, height: number | null | undefined) => {
-  const normalizedWidth = Number(width ?? 0)
-  const normalizedHeight = Number(height ?? 0)
-  if (!Number.isFinite(normalizedWidth) || normalizedWidth <= 0 || !Number.isFinite(normalizedHeight) || normalizedHeight <= 0) {
-    return '未知'
-  }
-
-  return `${normalizedWidth} × ${normalizedHeight}`
-}
-
-const closeDetailAudioContextMenu = () => {
-  detailAudioContextMenuVisible.value = false
-  detailAudioContextMenuTarget.value = null
-}
-
-const handleOpenAudioTreeContextMenu = (event: MouseEvent, option: any) => {
-  if (!option || option?.isDirectory) {
-    return
-  }
-
-  event.preventDefault()
-  event.stopPropagation()
-  detailAudioContextMenuTarget.value = option
-  detailAudioContextMenuX.value = event.clientX
-  detailAudioContextMenuY.value = event.clientY
-  detailAudioContextMenuVisible.value = true
-}
-
-const detailAudioContextMenuOptions = computed(() => {
-  const option = detailAudioContextMenuTarget.value
-  if (!option || option?.isDirectory) {
-    return []
-  }
-
-  if (option?.kind === 'image') {
-    return [
-      { label: '查看', key: 'view' },
-      { label: `分辨率: ${formatImageResolution(option?.width, option?.height)}`, key: 'resolution', disabled: true }
-    ]
-  }
-
-  if (option?.kind === 'video') {
-    return [
-      { label: '播放', key: 'play' },
-      { label: '使用默认应用播放', key: 'play-default' },
-      { label: `时长: ${formatAsmrDuration(option?.duration)}`, key: 'duration', disabled: true },
-      { label: `分辨率: ${formatImageResolution(option?.width, option?.height)}`, key: 'resolution', disabled: true },
-      { label: `比特率: ${formatAudioBitrate(option?.bitrate)}`, key: 'bitrate', disabled: true },
-      { label: `帧速率: ${formatFrameRate(option?.frameRate)}`, key: 'frameRate', disabled: true },
-      { label: `音频比特率: ${formatAudioBitrate(option?.audioBitrate)}`, key: 'audioBitrate', disabled: true },
-      { label: `音频采样率: ${formatAudioSampleRate(option?.audioSampleRate)}`, key: 'audioSampleRate', disabled: true }
-    ]
-  }
-
-  return [
-    { label: '播放', key: 'play' },
-    { label: '使用默认应用播放', key: 'play-default' },
-    { label: `时长: ${formatAsmrDuration(option?.duration)}`, key: 'duration', disabled: true },
-    { label: `比特率: ${formatAudioBitrate(option?.bitrate)}`, key: 'bitrate', disabled: true },
-    { label: `采样率: ${formatAudioSampleRate(option?.sampleRate)}`, key: 'sampleRate', disabled: true }
-  ]
-})
-
-const detailAudioContextMenuPosition = computed(() => {
-  const menuWidth = 220
-  const optionCount = detailAudioContextMenuOptions.value.length
-  const menuHeight = Math.max(56, optionCount * 34 + 16)
-  const viewportWidth = typeof window === 'undefined' ? 0 : window.innerWidth
-  const viewportHeight = typeof window === 'undefined' ? 0 : window.innerHeight
-  const padding = 12
-
-  const safeX = viewportWidth > 0
-    ? Math.max(padding, Math.min(detailAudioContextMenuX.value, viewportWidth - menuWidth - padding))
-    : detailAudioContextMenuX.value
-  const safeY = viewportHeight > 0
-    ? Math.max(padding, Math.min(detailAudioContextMenuY.value, viewportHeight - menuHeight - padding))
-    : detailAudioContextMenuY.value
-
-  return {
-    x: safeX,
-    y: safeY
-  }
-})
-
-const handleOpenAudioTreeImage = async (imagePath: string) => {
-  const normalizedPath = String(imagePath ?? '').trim()
-  if (!normalizedPath) {
-    return
-  }
-
-  const imagePaths = detailAudioImagePaths.value
-  const initialIndex = imagePaths.findIndex((filePath) => filePath === normalizedPath)
-  if (initialIndex < 0) {
-    return
-  }
-
-  pictureViewerImagePaths.value = [...imagePaths]
-  pictureViewerResourceIds.value = []
-  pictureViewerInitialIndex.value = initialIndex
-  pictureViewerAllowDelete.value = false
-  await loadPictureViewerScrollMode()
-  showPictureViewer.value = true
-}
-
-const openAudioPlayer = async (targetPath: string) => {
-  const normalizedPath = String(targetPath ?? '').trim()
-  if (!normalizedPath) {
-    return
-  }
-
-  const allTracks = detailAudioPlaylist.value
-  if (!allTracks.length) {
-    showNotifyByType('warning', '播放音频', '当前没有可播放的音频文件')
-    return
-  }
-
-  const targetDirectory = getAudioDirectoryPath(normalizedPath)
-  const directoryTracks = allTracks.filter((track) => getAudioDirectoryPath(track.path) === targetDirectory)
-  const playlist = directoryTracks.length ? directoryTracks : allTracks
-
-  await applyAudioPlayerSession(selectedDetailResource.value, playlist, normalizedPath, 0)
-}
-
-const openAudioTreeVideoPlayer = async (targetPath: string) => {
-  const normalizedPath = String(targetPath ?? '').trim()
-  if (!normalizedPath) {
-    return
-  }
-
-  const allTracks = detailAudioVideoPlaylist.value
-  if (!allTracks.length) {
-    showNotifyByType('warning', '播放视频', '当前没有可播放的视频文件')
-    return
-  }
-
-  const targetDirectory = getAudioDirectoryPath(normalizedPath)
-  const directoryTracks = allTracks.filter((track) => getAudioDirectoryPath(track.path) === targetDirectory)
-  const playlist = directoryTracks.length ? directoryTracks : allTracks
-  const normalizedTargetPath = normalizedPath.replace(/\\/g, '/')
-  const matchedTrack = playlist.find((track) => track.path.replace(/\\/g, '/') === normalizedTargetPath)
-  await loadPlaybackResumeRestartThresholds()
-
-  videoPlayerPlaylist.value = playlist
-  videoPlayerInitialPath.value = matchedTrack?.path ?? normalizedPath
-  const lastPlayFile = String(selectedDetailResource.value?.videoMeta?.lastPlayFile ?? '').trim().replace(/\\/g, '/')
-  const normalizedMatchedPath = String(matchedTrack?.path ?? normalizedPath).replace(/\\/g, '/')
-  videoPlayerInitialTime.value = lastPlayFile && lastPlayFile === normalizedMatchedPath
-    ? Math.max(0, Number(selectedDetailResource.value?.videoMeta?.lastPlayTime ?? 0))
-    : 0
-  videoPlayerTitle.value = String(selectedDetailResource.value?.title ?? categoryName.value ?? '视频播放')
-  showVideoPlayer.value = true
-}
-
-const handleAudioTreePlay = (option: any) => {
-  if (!option?.path) {
-    return
-  }
-
-  if (option?.kind === 'video') {
-    void openAudioTreeVideoPlayer(String(option.path))
-    return
-  }
-
-  void openAudioPlayer(String(option.path))
-}
-
-const handleOpenPathWithDefaultApp = async (targetPath: string, title = '使用默认应用播放') => {
-  const normalizedPath = String(targetPath ?? '').trim()
-  if (!normalizedPath) {
-    showNotifyByType('warning', title, '当前文件路径无效')
-    return
-  }
-
-  try {
-    const message = await window.api.dialog.openPath(normalizedPath)
-    if (message) {
-      showNotifyByType('error', title, message)
-      return
-    }
-
-    showNotifyByType('success', title, '已使用默认应用打开文件')
-  } catch (error) {
-    showNotifyByType('error', title, error instanceof Error ? error.message : '打开文件失败')
-  }
-}
-
-const handleSelectDetailAudioContextMenu = (key: string) => {
-  const option = detailAudioContextMenuTarget.value
-  closeDetailAudioContextMenu()
-
-  if (!option || option?.isDirectory) {
-    return
-  }
-
-  if (key === 'view' && option?.kind === 'image') {
-    void handleOpenAudioTreeImage(String(option?.path ?? ''))
-    return
-  }
-
-  if (key === 'play-default' && (option?.kind === 'audio' || option?.kind === 'video')) {
-    void handleOpenPathWithDefaultApp(String(option?.path ?? ''), '使用默认应用播放')
-    return
-  }
-
-  if (key === 'play' && (option?.kind === 'audio' || option?.kind === 'video')) {
-    handleAudioTreePlay(option)
-  }
 }
 
 const recordResourceAccessIfPossible = async (resource: any, title: string) => {
@@ -1921,28 +1621,28 @@ const renderAudioTreeFileLabel = (option: any, icon: string, label: string) => h
 }, [
   option?.kind === 'video'
     ? h('div', {
-        class: 'detail-audio-tree__video-cover-shell'
-      }, [
-        option?.coverPreviewSrc
-          ? h('img', {
-              src: String(option.coverPreviewSrc),
-              alt: '',
-              class: 'detail-audio-tree__video-cover'
-            })
-          : h('div', {
-              class: 'detail-audio-tree__video-cover detail-audio-tree__video-cover--empty'
-            }, 'VIDEO'),
-        h('span', {
-          class: 'detail-audio-tree__video-cover-index'
-        }, String(option?.sortOrderLabel ?? ''))
-      ])
+      class: 'detail-audio-tree__video-cover-shell'
+    }, [
+      option?.coverPreviewSrc
+        ? h('img', {
+          src: String(option.coverPreviewSrc),
+          alt: '',
+          class: 'detail-audio-tree__video-cover'
+        })
+        : h('div', {
+          class: 'detail-audio-tree__video-cover detail-audio-tree__video-cover--empty'
+        }),
+      h('span', {
+        class: 'detail-audio-tree__video-cover-index'
+      }, String(option?.sortOrderLabel ?? ''))
+    ])
     : null,
   h('div', {
     class: 'detail-audio-tree__file-title'
   }, [
-      h('span', null, `${icon} ${label}`),
-      option?.hasSubtitle
-        ? h('span', {
+    h('span', null, `${icon} ${label}`),
+    option?.hasSubtitle
+      ? h('span', {
         class: 'detail-audio-tree__subtitle-badge',
         style: {
           display: 'inline-flex',
@@ -1958,13 +1658,13 @@ const renderAudioTreeFileLabel = (option: any, icon: string, label: string) => h
           whiteSpace: 'nowrap'
         }
       }, '字幕')
-        : null
-    ])
+      : null
   ])
+])
 
-const renderAudioTreeLabel = ({ option }: { option: any }) => {
+const renderAudioTreeLabel = ({option}: { option: any }) => {
   if (option?.isDirectory) {
-    return h('span', { class: 'detail-audio-tree__label' }, `📁 ${option.label}`)
+    return h('span', {class: 'detail-audio-tree__label'}, `📁 ${option.label}`)
   }
 
   if (option?.kind === 'image') {
@@ -1978,7 +1678,7 @@ const renderAudioTreeLabel = ({ option }: { option: any }) => {
   return renderAudioTreeFileLabel(option, '🎵', String(option?.label ?? ''))
 }
 
-const renderAudioTreeSuffix = ({ option }: { option: any }) => {
+const renderAudioTreeSuffix = ({option}: { option: any }) => {
   if (option?.isDirectory) {
     return null
   }
@@ -2056,7 +1756,7 @@ const getWebsiteResourceUrl = (resource: any) =>
   normalizeWebsiteUrl(resource?.websiteMeta?.url ?? resource?.meta?.website ?? resource?.website ?? '')
 const detailCanLaunch = computed(() => {
   const resource = selectedDetailResource.value
-  if (categorySettings.value.extendTable === 'website_meta') {
+  if (categoryProfile.value.flags.isWebsite) {
     return Boolean(getWebsiteResourceUrl(resource))
   }
 
@@ -2065,13 +1765,36 @@ const detailCanLaunch = computed(() => {
 const detailCanStop = computed(() => {
   return Boolean(selectedDetailResource.value?.isRunning)
 })
-const detailIsSoftware = computed(() => categorySettings.value.extendTable === 'software_meta')
-const detailIsManga = computed(() => categorySettings.value.extendTable === 'multi_image_meta')
-const detailIsAsmr = computed(() => categorySettings.value.extendTable === 'asmr_meta')
-const detailIsAudio = computed(() => categorySettings.value.extendTable === 'audio_meta')
-const detailIsNovel = computed(() => categorySettings.value.extendTable === 'novel_meta')
-const detailIsVideo = computed(() => categorySettings.value.extendTable === 'video_meta')
-const detailIsWebsite = computed(() => categorySettings.value.extendTable === 'website_meta')
+const detailIsSoftware = computed(() => categoryProfile.value.flags.isSoftware)
+const detailIsManga = computed(() => categoryProfile.value.flags.isManga)
+const detailIsAsmr = computed(() => categoryProfile.value.flags.isAsmr)
+const detailIsAudio = computed(() => categoryProfile.value.flags.isAudio)
+const detailIsNovel = computed(() => categoryProfile.value.flags.isNovel)
+const detailIsVideo = computed(() => categoryProfile.value.flags.isVideo)
+const detailIsWebsite = computed(() => categoryProfile.value.flags.isWebsite)
+const {
+  coverPreviewSrc,
+  detailCoverPreviewSrc,
+  detailScreenshotPreviewSrc,
+  detailWebsiteFaviconSrc,
+  detailGalleryImageUrls,
+  normalizeCoverPreviewSource,
+  normalizeWebsiteIconSource,
+  resolveCoverPreviewUrl,
+  resolveVideoSubCoverPreviewUrl,
+  resolveAudioPlayerCoverPreviewUrl,
+  resolveVideoPlayerCoverPreviewUrl
+} = useCategoryPreviewAssets({
+  formCoverPath: computed(() => String(formData.value?.coverPath ?? '')),
+  detailCoverPath: computed(() => String(selectedDetailResource.value?.coverPath ?? '')),
+  currentScreenshotPath: computed(() => String(currentScreenshotPath.value ?? '')),
+  detailIsWebsite,
+  detailWebsiteFaviconPath: computed(() => String(selectedDetailResource.value?.websiteMeta?.favicon ?? '')),
+  detailScreenshotPaths,
+  onFormCoverPreviewError: (message) => {
+    showNotifyByType('error', '预览失败', message)
+  }
+})
 const detailWebsiteUrl = computed(() => getWebsiteResourceUrl(selectedDetailResource.value))
 const detailWebsiteIsDownloadLink = computed(() => Boolean(
   selectedDetailResource.value?.websiteMeta?.isDownloadLink
@@ -2088,111 +1811,6 @@ const detailWebsitePlaceholderEmoji = computed(() =>
   )
 )
 const detailWebsiteCoverPlaceholderText = computed(() => detailWebsiteIsDownloadLink.value ? '下载链接' : '网站封面')
-const detailMetaItems = computed(() => {
-  const resource = selectedDetailResource.value
-  if (!resource) {
-    return []
-  }
-
-  const pushItem = (
-    items: Array<{ label: string; value: string; icon?: string; full?: boolean; copyValue?: string; clampLines?: number }>,
-    label: string,
-    value: unknown,
-    icon?: string,
-    full = false,
-    copyValue?: string,
-    clampLines?: number
-  ) => {
-    const normalizedValue = String(value ?? '').trim()
-    if (normalizedValue) {
-      items.push({
-        label,
-        value: normalizedValue,
-        icon,
-        full,
-        copyValue: String(copyValue ?? '').trim() || undefined,
-        clampLines: Number(clampLines) > 0 ? Number(clampLines) : undefined
-      })
-    }
-  }
-
-  const items: Array<{ label: string; value: string; icon?: string; full?: boolean; copyValue?: string; clampLines?: number }> = []
-  const extendTable = categorySettings.value.extendTable
-
-  if (extendTable === 'game_meta') {
-    pushItem(items, '昵称', resource.gameMeta?.nickname)
-    pushItem(items, '中文名', resource.gameMeta?.nameZh)
-    pushItem(items, '日文名', resource.gameMeta?.nameJp)
-    pushItem(items, '英文名', resource.gameMeta?.nameEn)
-    pushItem(items, '语言', resource.gameMeta?.language)
-    pushItem(items, '版本', resource.gameMeta?.version)
-
-    const engineId = String(resource.gameMeta?.engine ?? '').trim()
-    const engineItem = normalizedEngineList.value.find((item) => item.id === engineId)
-    const engineName = engineItem?.name ?? engineId
-    pushItem(items, '引擎', engineName, engineItem?.icon)
-  } else if (extendTable === 'software_meta') {
-    pushItem(items, '版本', resource.softwareMeta?.version)
-    pushItem(items, '命令行参数', resource.softwareMeta?.commandLineArgs)
-  } else if (extendTable === 'video_meta') {
-    pushItem(
-      items,
-      videoActorLabel.value,
-      Array.isArray(resource.actors) ? resource.actors.map((item: any) => String(item?.name ?? '')).filter(Boolean).join(' / ') : ''
-    )
-    pushItem(items, '年份', resource.videoMeta?.year)
-  } else if (extendTable === 'asmr_meta') {
-    pushItem(items, '脚本', resource.asmrMeta?.scenario)
-    pushItem(
-      items,
-      '声优',
-      Array.isArray(resource.actors) ? resource.actors.map((item: any) => String(item?.name ?? '')).filter(Boolean).join(' / ') : ''
-    )
-    pushItem(items, '画师', resource.asmrMeta?.illust)
-    pushItem(items, '总时长', formatAsmrDuration(resource.asmrMeta?.duration))
-    pushItem(items, '语言', resource.asmrMeta?.language)
-  } else if (extendTable === 'audio_meta') {
-    pushItem(
-      items,
-      '艺术家',
-      Array.isArray(resource.authors)
-        ? resource.authors.map((item: any) => String(item?.name ?? '')).filter(Boolean).join(' / ')
-        : resource.audioMeta?.artist
-    )
-    pushItem(items, '专辑', resource.audioMeta?.album)
-    pushItem(items, '比特率', formatAudioBitrate(resource.audioMeta?.bitrate))
-    pushItem(items, '采样率', formatAudioSampleRate(resource.audioMeta?.sampleRate))
-    pushItem(items, '歌词路径', resource.audioMeta?.lyricsPath)
-    pushItem(items, '总时长', formatDuration(resource.audioMeta?.duration))
-  } else if (extendTable === 'novel_meta') {
-    pushItem(items, '译者', resource.novelMeta?.translator)
-    pushItem(items, 'ISBN', resource.novelMeta?.isbn)
-    pushItem(items, '发行年', Number(resource.novelMeta?.year) > 0 ? resource.novelMeta?.year : '')
-    pushItem(items, '出版社', resource.novelMeta?.publisher)
-  } else if (extendTable === 'website_meta') {
-    pushItem(
-      items,
-      detailWebsiteAddressLabel.value,
-      detailWebsiteUrl.value,
-      undefined,
-      true,
-      detailWebsiteUrl.value,
-      detailWebsiteIsDownloadLink.value ? 3 : undefined
-    )
-    if (detailWebsiteIsDownloadLink.value) {
-      pushItem(items, '链接类型', '下载链接')
-    } else {
-      pushItem(
-        items,
-        detailWebsiteIconLabel.value,
-        detailWebsiteFaviconSrc.value ? '已获取' : detailWebsitePlaceholderEmoji.value,
-        detailWebsiteFaviconSrc.value || normalizeWebsiteIconSource(String(resource.websiteMeta?.favicon ?? ''))
-      )
-    }
-  }
-
-  return items
-})
 const handleCopyText = async (text: string, label = '内容') => {
   const normalizedText = String(text ?? '')
   if (!normalizedText.trim()) {
@@ -2224,7 +1842,6 @@ const detailStores = computed(() =>
       .filter((item: any) => item.name)
     : []
 )
-const detailDisplayPath = computed(() => buildDisplayBasePath(selectedDetailResource.value))
 const ratingComment = computed(() => getRatingComment(detailRatingDraft.value))
 const hasPendingRatingChange = computed(() => {
   if (!selectedDetailResource.value) {
@@ -2233,32 +1850,13 @@ const hasPendingRatingChange = computed(() => {
 
   return Number(selectedDetailResource.value.rating ?? -1) !== Number(detailRatingDraft.value)
 })
-const detailWebsiteFaviconSrc = ref('')
-
-const normalizeWebsiteIconSource = (iconPath: string) => {
-  const normalizedPath = String(iconPath ?? '').trim()
-  if (!normalizedPath) {
-    return ''
-  }
-
-  if (normalizedPath.startsWith('//')) {
-    return `https:${normalizedPath}`
-  }
-
-  return normalizedPath
+let totalPages: ComputedRef<number> = computed(() => 1)
+let handleJumpPage: () => void = () => {
 }
-
-const totalPages = computed(() => Math.max(1, Math.ceil(totalResources.value / pageSize.value)))
-
-const filteredTypeList = computed(() => {
-  if (!normalizedTypeSearch.value) {
-    return normalizedTypeList.value
-  }
-
-  return normalizedTypeList.value.filter((type) =>
-    String(type.name).toLowerCase().includes(normalizedTypeSearch.value)
-  )
-})
+let handleShowResourceDetail: (resource: any) => void = () => {
+}
+let fetchData: () => Promise<void> = async () => {
+}
 
 const tagSelectOptions = computed(() =>
   normalizedTagList.value
@@ -2285,6 +1883,14 @@ const authorSelectOptions = computed(() =>
     }))
     .filter((item) => item.label && item.value)
 )
+const actorSelectOptions = computed(() =>
+  normalizedActorList.value
+    .map((actor) => ({
+      label: actor.name,
+      value: actor.name
+    }))
+    .filter((item) => item.label && item.value)
+)
 const albumSelectOptions = computed(() =>
   normalizedAlbumList.value
     .map((album) => ({
@@ -2293,48 +1899,6 @@ const albumSelectOptions = computed(() =>
     }))
     .filter((item) => item.label && item.value)
 )
-const batchLabelIsSingleValue = computed(() => batchLabelField.value === 'album')
-const batchLabelOptions = computed(() => {
-  if (batchLabelField.value === 'tags') {
-    return tagSelectOptions.value
-  }
-
-  if (batchLabelField.value === 'types') {
-    return typeSelectOptions.value
-  }
-
-  if (batchLabelField.value === 'authors') {
-    return authorSelectOptions.value
-  }
-
-  return albumSelectOptions.value
-})
-const batchLabelTitle = computed(() => {
-  const fieldLabel = batchLabelField.value === 'tags'
-    ? '标签'
-    : batchLabelField.value === 'types'
-      ? '分类'
-      : batchLabelField.value === 'authors'
-        ? '歌手'
-        : '专辑'
-  const actionLabel = batchLabelMode.value === 'add' ? '添加' : '移除'
-  return `批量${actionLabel}${fieldLabel}`
-})
-const batchLabelPlaceholder = computed(() => {
-  if (batchLabelField.value === 'album') {
-    return batchLabelMode.value === 'add'
-      ? '可选择已有专辑，也可输入新的专辑名'
-      : '请选择或输入需要移除的专辑名'
-  }
-
-  const fieldLabel = batchLabelField.value === 'tags'
-    ? '标签'
-    : batchLabelField.value === 'types'
-      ? '分类'
-      : '歌手'
-  return `可选择已有${fieldLabel}，也可输入新${fieldLabel}，按空格、顿号、英文逗号或回车批量添加`
-})
-
 const pageStyle = computed(() => ({
   backgroundColor: injectedIsDark.value ? '#121212' : '#f7f8fa',
   color: injectedIsDark.value ? 'rgba(255, 255, 245, 0.86)' : '#1f2329'
@@ -2420,18 +1984,6 @@ const splitManualValues = (input: string) => {
   return mergedValues
 }
 
-const normalizeCoverPreviewSource = (coverPath: string) => {
-  if (!coverPath) {
-    return ''
-  }
-
-  if (coverPath.startsWith('//')) {
-    return `https:${coverPath}`
-  }
-
-  return coverPath
-}
-
 const formatAudioCoverCandidateQuery = (query: Record<string, string>) =>
   Object.entries(query ?? {})
     .map(([key, value]) => {
@@ -2441,35 +1993,23 @@ const formatAudioCoverCandidateQuery = (query: Record<string, string>) =>
     .filter(Boolean)
     .join(' / ')
 
-const resolveCoverPreviewUrl = async (coverPath: string) => {
-  const normalizedCoverPath = normalizeCoverPreviewSource(String(coverPath ?? '').trim())
-  if (!normalizedCoverPath) {
-    return ''
-  }
-
-  if (/^https?:\/\//i.test(normalizedCoverPath) || /^data:/i.test(normalizedCoverPath)) {
-    return normalizedCoverPath
-  }
-
-  try {
-    return (await window.api.dialog.getImagePreviewUrl(normalizedCoverPath, {
-      maxWidth: 480,
-      maxHeight: 320,
-      fit: 'cover',
-      quality: 84
-    })) ?? ''
-  } catch {
-    return ''
-  }
-}
-
 const closeAudioCoverCandidateModal = () => {
   showAudioCoverCandidateModal.value = false
   audioCoverCandidates.value = []
 }
 
-const handleUseAudioCoverCandidate = (coverPath: string) => {
-  formData.value.coverPath = String(coverPath ?? '').trim()
+const handleUseAudioCoverCandidate = (candidate: {
+  coverPath?: string
+  albumName?: string
+}) => {
+  formData.value.coverPath = String(candidate?.coverPath ?? '').trim()
+  const albumName = String(candidate?.albumName ?? '').trim()
+  if (albumName) {
+    formData.value.meta = {
+      ...(formData.value.meta ?? {}),
+      album: albumName
+    }
+  }
   closeAudioCoverCandidateModal()
 }
 
@@ -2493,12 +2033,20 @@ const handleUseVideoSubCoverCandidate = (coverPath: string) => {
   closeVideoSubCoverCandidateModal()
 }
 
-const formatVideoFrameTime = (seconds: number) => {
-  const normalizedSeconds = Math.max(0, Math.floor(Number(seconds ?? 0)))
-  const minutes = Math.floor(normalizedSeconds / 60)
-  const restSeconds = normalizedSeconds % 60
-  return `${minutes}:${String(restSeconds).padStart(2, '0')}`
-}
+const {
+  formatVideoFrameTime,
+  formatDateTime,
+  formatDuration,
+  formatAsmrDuration,
+  formatLogEndTime,
+  formatLogDuration,
+  formatLaunchMode,
+  getRatingEmoji,
+  formatAudioBitrate,
+  formatAudioSampleRate,
+  formatFrameRate,
+  formatImageResolution
+} = useCategoryDetailFormatters()
 
 const fixedVideoCoverCandidates = computed(() =>
   videoCoverCandidates.value.filter((candidate) => candidate.group === 'fixed')
@@ -2508,83 +2056,55 @@ const randomVideoCoverCandidates = computed(() =>
   videoCoverCandidates.value.filter((candidate) => candidate.group === 'random')
 )
 
-const formatDateTime = (value: string | number | Date | null | undefined) => {
-  if (!value) {
-    return '暂无'
-  }
-
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return String(value)
-  }
-
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`
-}
-
-const formatDuration = (seconds: number | null | undefined) => {
-  const totalSeconds = Math.max(0, Number(seconds ?? 0))
-  const hours = Math.floor(totalSeconds / 3600)
-  const minutes = Math.floor((totalSeconds % 3600) / 60)
-  const remainSeconds = totalSeconds % 60
-
-  if (hours > 0) {
-    return `${hours}小时 ${minutes}分钟 ${remainSeconds}秒`
-  }
-
-  if (minutes > 0) {
-    return `${minutes}分钟 ${remainSeconds}秒`
-  }
-
-  return `${remainSeconds}秒`
-}
-
-const formatAsmrDuration = (seconds: number | null | undefined) => {
-  const normalizedSeconds = Number(seconds ?? 0)
-  if (normalizedSeconds === -1) {
-    return '计算中'
-  }
-
-  return formatDuration(normalizedSeconds)
-}
-
-const isUnknownEndTime = (value: string | number | Date | null | undefined) => {
-  if (!value) {
-    return false
-  }
-
-  const date = new Date(value)
-  return !Number.isNaN(date.getTime()) && date.getTime() === new Date(ResourceLogSpecialTime.UNKNOWN_END_TIME).getTime()
-}
-
-const formatLogEndTime = (value: string | number | Date | null | undefined) => {
-  if (isUnknownEndTime(value)) {
-    return '未检测到结束时间'
-  }
-
-  return formatDateTime(value)
-}
-
-const formatLogDuration = (logItem: { endTime?: string | number | Date | null; duration?: number | null }) => {
-  if (isUnknownEndTime(logItem?.endTime)) {
-    return '未知'
-  }
-
-  return formatDuration(logItem?.duration)
-}
-
-const formatLaunchMode = (launchMode: string | null | undefined, usePlayTerms = false) => {
-  switch (String(launchMode ?? '').trim()) {
-    case ResourceLaunchMode.ADMIN:
-      return '管理员启动'
-    case ResourceLaunchMode.MTOOL:
-      return 'MTool 启动'
-    case ResourceLaunchMode.LOCALE_EMULATOR:
-      return 'LE 转区启动'
-    case ResourceLaunchMode.NORMAL:
-    default:
-      return usePlayTerms ? '普通播放' : '普通启动'
-  }
-}
+;({
+  detailUsesBrowseTerms,
+  detailUsesPlayTerms,
+  detailStatsText,
+  detailShowTotalRuntime,
+  detailPreviewSectionTitle,
+  detailGallerySectionTitle,
+  detailDirectorySectionTitle,
+  detailDirectoryEmptyText,
+  detailEmptyLogDescription,
+  detailLogModeLabel,
+  detailLogDurationLabel,
+  detailShowLogs,
+  hasDetailDescription,
+  detailReadingProgressText,
+  detailPlaybackProgressText,
+  detailGalleryItems,
+  detailMetaItems,
+  detailDisplayPath
+} = useCategoryDetailPresentation({
+  selectedDetailResource,
+  categoryName,
+  categorySettings,
+  categoryProfile,
+  actorFilterLabel,
+  detailIsManga,
+  detailIsAsmr,
+  detailIsAudio,
+  detailIsNovel,
+  detailIsWebsite,
+  isVideoCategory,
+  detailScreenshotPaths,
+  detailGalleryImageUrls,
+  detailWebsiteAddressLabel,
+  detailWebsiteIconLabel,
+  detailWebsiteIsDownloadLink,
+  detailWebsitePlaceholderEmoji,
+  detailWebsiteFaviconSrc,
+  detailWebsiteUrl,
+  normalizedEngineList,
+  normalizedEngineOptionList,
+  normalizedLanguageList,
+  normalizeWebsiteIconSource,
+  formatDuration,
+  formatAsmrDuration,
+  formatAudioBitrate,
+  formatAudioSampleRate,
+  buildDisplayBasePath
+}))
 
 const getRatingComment = (rating: number | null | undefined) => {
   const normalizedRating = Number(rating ?? 0)
@@ -2598,20 +2118,6 @@ const getRatingComment = (rating: number | null | undefined) => {
   if (normalizedRating >= 0.6) return '拉'
   if (normalizedRating > 0) return '拉完了'
   return '区'
-}
-
-const getRatingEmoji = (rating: number | null | undefined) => {
-  const normalizedRating = Number(rating ?? 0)
-
-  if (normalizedRating >= 4.9) return '🔥🔥'
-  if (normalizedRating >= 4.5) return '🔥'
-  if (normalizedRating > 4) return '👑'
-  if (normalizedRating > 3) return '😎'
-  if (normalizedRating > 2) return '🙂'
-  if (normalizedRating >= 1.1) return '😮‍💨'
-  if (normalizedRating > 0) return '🫠'
-  if (normalizedRating === 0) return '👎'
-  return ''
 }
 
 const normalizeSelectedValues = (values: string[]) => {
@@ -2670,6 +2176,44 @@ const getResourceNameFromBasePath = (basePath: string) => {
   return lastSegment
 }
 
+const batchImportState = useCategoryBatchImportState({
+  categoryId,
+  batchImportItems,
+  batchImportFetchInfoEnabled,
+  batchAnalyzeCurrent,
+  batchAnalyzeTotal,
+  batchAnalyzeMessage,
+  batchAnalyzeRunning,
+  batchImportRunning,
+  batchAnalyzeCancelled,
+  batchAnalyzeInBackground,
+  batchAnalyzeToastDismissed,
+  showBatchImportLoading,
+  showBatchImportModal,
+  batchProgressRunning,
+  batchProgressStage,
+  batchImportResourceLabel,
+  getBatchImportOngoingId,
+  getResourceNameFromBasePath,
+  upsertOngoingCenterItem,
+  removeOngoingCenterItem
+})
+const ensureBatchImportState = batchImportState.ensureBatchImportState
+const syncBatchImportRefsFromState = batchImportState.syncBatchImportRefsFromState
+const syncBatchImportStateFromRefs = batchImportState.syncBatchImportStateFromRefs
+const patchBatchImportState = batchImportState.patchBatchImportState
+const syncBatchImportOngoingCenter = (targetCategoryId = categoryId.value) =>
+  batchImportState.syncBatchImportOngoingCenter(targetCategoryId, handleReopenBatchImportProgress)
+const clearBatchImportOngoingCenter = batchImportState.clearBatchImportOngoingCenter
+const handleBatchImportRunInBackground = () =>
+  batchImportState.handleBatchImportRunInBackground(syncBatchImportOngoingCenter)
+const handleReopenBatchImportProgress = () =>
+  batchImportState.handleReopenBatchImportProgress(syncBatchImportOngoingCenter)
+const handleDismissBatchImportProgressToast = batchImportState.handleDismissBatchImportProgressToast
+const handleStopBatchImportAnalysis = batchImportState.handleStopBatchImportAnalysis
+const handleCloseBatchImportModal = () =>
+  batchImportState.handleCloseBatchImportModal(isBatchImportSubmitting.value)
+
 const getFileNameWithoutExtension = (basePath: string) => {
   const normalizedPath = String(basePath ?? '').replace(/\\/g, '/')
   const fileName = normalizedPath.split('/').pop() ?? ''
@@ -2687,266 +2231,6 @@ const getFileNameWithoutExtension = (basePath: string) => {
 }
 
 
-const readComicProgress = async (resourceId: string) => {
-  const normalizedResourceId = String(resourceId ?? '').trim()
-  if (!normalizedResourceId) {
-    return 0
-  }
-
-  try {
-    const result = await window.api.service.getMultiImageReadingProgress(normalizedResourceId)
-    return Math.max(0, Math.floor(Number(result?.data?.lastReadPage ?? 0)))
-  } catch {
-    return 0
-  }
-}
-
-const writeComicProgress = async (resourceId: string, pageIndex: number) => {
-  const normalizedResourceId = String(resourceId ?? '').trim()
-  if (!normalizedResourceId) {
-    return
-  }
-
-  try {
-    await window.api.service.updateMultiImageReadingProgress(
-      normalizedResourceId,
-      Math.max(0, Math.floor(Number(pageIndex ?? 0)))
-    )
-  } catch {
-    // ignore progress persistence failure
-  }
-}
-
-const startComicReadingSession = async (resource: any) => {
-  const resourceId = String(resource?.id ?? '').trim()
-  if (!resourceId) {
-    return false
-  }
-
-  const result = await window.api.service.startReadingResource(resourceId)
-  const resultType = result?.type ?? 'info'
-  if (resultType === 'error' || resultType === 'warning') {
-    showNotifyByType(resultType, '开始阅读', result?.message ?? '开始阅读失败')
-    return false
-  }
-
-  return true
-}
-
-const stopPictureViewingSession = async () => {
-  const resourceId = String(currentPictureViewerResourceId.value ?? '').trim()
-  if (!resourceId) {
-    return
-  }
-
-  currentPictureViewerResourceId.value = ''
-  const result = await window.api.service.stopResource(resourceId)
-  if (result?.type === 'error') {
-    showNotifyByType('error', '结束查看图片', result?.message ?? '结束查看图片失败')
-    return
-  }
-
-  await fetchData()
-}
-
-const handlePictureViewerIndexChange = async (index: number) => {
-  const nextResourceId = String(pictureViewerResourceIds.value[Math.max(0, Math.floor(Number(index ?? 0)))] ?? '').trim()
-  if (!nextResourceId) {
-    return
-  }
-
-  const currentResourceId = String(currentPictureViewerResourceId.value ?? '').trim()
-  if (!currentResourceId || currentResourceId === nextResourceId) {
-    currentPictureViewerResourceId.value = nextResourceId
-    return
-  }
-
-  const stopResult = await window.api.service.stopResource(currentResourceId)
-  if (stopResult?.type === 'error') {
-    showNotifyByType('error', '切换图片', stopResult?.message ?? '结束上一张图片浏览失败')
-    return
-  }
-
-  currentPictureViewerResourceId.value = ''
-  const startResult = await window.api.service.startReadingResource(nextResourceId)
-  const startResultType = startResult?.type ?? 'info'
-  if (startResultType === 'error' || startResultType === 'warning') {
-    showNotifyByType(startResultType, '切换图片', startResult?.message ?? '开始浏览下一张图片失败')
-    return
-  }
-
-  currentPictureViewerResourceId.value = nextResourceId
-  await fetchData()
-}
-
-const stopComicReadingSession = async () => {
-  const resourceId = String(currentComicReaderResourceId.value ?? '').trim()
-  if (!resourceId) {
-    return
-  }
-
-  currentComicReaderResourceId.value = ''
-  const result = await window.api.service.stopResource(resourceId)
-  if (result?.type === 'error') {
-    showNotifyByType('error', '结束阅读', result?.message ?? '结束阅读失败')
-    return
-  }
-
-  await fetchData()
-}
-
-const openComicReader = async (resource: any, pageIndex?: number | null) => {
-  const resourceId = String(resource?.id ?? '').trim()
-  if (!resourceId) {
-    showNotifyByType('warning', '漫画阅读', '当前漫画资源无效')
-    return
-  }
-
-  if (showComicReader.value && currentComicReaderResourceId.value && currentComicReaderResourceId.value !== resourceId) {
-    await stopComicReadingSession()
-  }
-
-  await refreshDetailScreenshots(
-    Number.isFinite(Number(pageIndex)) ? Number(pageIndex) : await readComicProgress(resourceId),
-    resource
-  )
-  if (!detailScreenshotPaths.value.length) {
-    showNotifyByType('warning', '漫画阅读', '当前漫画目录中没有可阅读的图片')
-    return
-  }
-
-  const started = await startComicReadingSession(resource)
-  if (!started) {
-    return
-  }
-
-  const preferredIndex = Number.isFinite(Number(pageIndex)) ? Number(pageIndex) : await readComicProgress(resourceId)
-  const resolvedIndex = Math.min(
-    Math.max(0, Math.floor(preferredIndex)),
-    Math.max(0, detailScreenshotPaths.value.length - 1)
-  )
-
-  currentScreenshotIndex.value = resolvedIndex
-  currentComicReaderResourceId.value = resourceId
-  comicReaderImagePaths.value = [...detailScreenshotPaths.value]
-  comicReaderInitialIndex.value = resolvedIndex
-  showPictureViewer.value = false
-  showComicReader.value = true
-  await writeComicProgress(resourceId, resolvedIndex)
-  await fetchData()
-}
-
-const handleComicReaderPageChange = (index: number) => {
-  currentScreenshotIndex.value = Math.max(0, Math.floor(Number(index ?? 0)))
-  void writeComicProgress(currentComicReaderResourceId.value, currentScreenshotIndex.value)
-}
-
-const readNovelProgress = async (resourceId: string) => {
-  const result = await window.api.service.getNovelReadingProgress(resourceId)
-  return Math.max(0, Math.min(1, Number(result?.data?.lastReadPercent ?? 0)))
-}
-
-const markNovelCompletedIfNeeded = async (resourceId: string, progressPercent: number) => {
-  const normalizedResourceId = String(resourceId ?? '').trim()
-  const normalizedProgress = Math.max(0, Math.min(1, Number(progressPercent ?? 0)))
-  if (!normalizedResourceId || normalizedProgress < 0.995) {
-    return
-  }
-
-  const targetResource = resourceList.value.find((item) => String(item?.id ?? '') === normalizedResourceId)
-  if (targetResource?.isCompleted) {
-    return
-  }
-
-  const result = await window.api.service.updateResourceCompleted(normalizedResourceId, true)
-  if (result?.type === 'error') {
-    return
-  }
-
-  if (targetResource) {
-    targetResource.isCompleted = true
-  }
-  completedResourceCount.value = await window.api.db.getCompletedResourceCountByCategoryId(categoryId.value)
-}
-
-const writeNovelProgress = async (resourceId: string, progressPercent: number) => {
-  const normalizedResourceId = String(resourceId ?? '').trim()
-  if (!normalizedResourceId) {
-    return
-  }
-
-  const normalizedProgress = Math.max(0, Math.min(1, Number(progressPercent ?? 0)))
-  await window.api.service.updateNovelReadingProgress(
-    normalizedResourceId,
-    normalizedProgress
-  )
-  await markNovelCompletedIfNeeded(normalizedResourceId, normalizedProgress)
-}
-
-const stopTextReadingSession = async () => {
-  const resourceId = String(currentTextReaderResourceId.value ?? '').trim()
-  if (!resourceId) {
-    return
-  }
-
-  currentTextReaderResourceId.value = ''
-  const result = await window.api.service.stopResource(resourceId)
-  if (result?.type === 'error') {
-    showNotifyByType('error', '结束阅读', result?.message ?? '结束阅读失败')
-    return
-  }
-
-  await fetchData()
-}
-
-const stopPdfReadingSession = async () => {
-  const resourceId = String(currentPdfReaderResourceId.value ?? '').trim()
-  if (!resourceId) {
-    return
-  }
-
-  currentPdfReaderResourceId.value = ''
-  const result = await window.api.service.stopResource(resourceId)
-  if (result?.type === 'error') {
-    showNotifyByType('error', '结束阅读', result?.message ?? '结束阅读失败')
-    return
-  }
-
-  await fetchData()
-}
-
-const stopEpubReadingSession = async () => {
-  const resourceId = String(currentEpubReaderResourceId.value ?? '').trim()
-  if (!resourceId) {
-    return
-  }
-
-  currentEpubReaderResourceId.value = ''
-  const result = await window.api.service.stopResource(resourceId)
-  if (result?.type === 'error') {
-    showNotifyByType('error', '结束阅读', result?.message ?? '结束阅读失败')
-    return
-  }
-
-  await fetchData()
-}
-
-const stopEbookReadingSession = async () => {
-  const resourceId = String(currentEbookReaderResourceId.value ?? '').trim()
-  if (!resourceId) {
-    return
-  }
-
-  currentEbookReaderResourceId.value = ''
-  const result = await window.api.service.stopResource(resourceId)
-  if (result?.type === 'error') {
-    showNotifyByType('error', '结束阅读', result?.message ?? '结束阅读失败')
-    return
-  }
-
-  await fetchData()
-}
-
 const getFileName = (basePath: string) => {
   const normalizedPath = String(basePath ?? '').replace(/\\/g, '/')
   return normalizedPath.split('/').pop() ?? ''
@@ -2962,467 +2246,93 @@ const getResourceFilePath = (resource: any) => {
   return String(buildDisplayBasePath(resource) ?? '').trim()
 }
 
-const startNovelReaderSession = async (resource: any, title: string) => {
-  const resourceId = String(resource?.id ?? '').trim()
-  if (!resourceId) {
-    showNotifyByType('warning', title, '当前小说资源无效')
-    return false
+const readerSessions = useCategoryReaderSessions({
+  categoryId,
+  completedResourceCount,
+  resourceList,
+  currentScreenshotIndex,
+  pictureViewerResourceIds,
+  currentPictureViewerResourceId,
+  currentComicReaderResourceId,
+  currentTextReaderResourceId,
+  currentPdfReaderResourceId,
+  currentEpubReaderResourceId,
+  currentEbookReaderResourceId,
+  textReaderInitialProgress,
+  pdfReaderInitialProgress,
+  epubReaderInitialProgress,
+  ebookReaderInitialProgress,
+  showEbookReader,
+  showNotifyByType,
+  fetchData: async () => {
+    await fetchData()
   }
+})
 
-  const result = await window.api.service.startReadingResource(resourceId)
-  const resultType = result?.type ?? 'info'
-  if (resultType === 'error' || resultType === 'warning') {
-    showNotifyByType(resultType, '开始阅读', result?.message ?? '开始阅读失败')
-    return false
-  }
+const {
+  readComicProgress,
+  writeComicProgress,
+  startComicReadingSession,
+  stopPictureViewingSession,
+  handlePictureViewerIndexChange,
+  stopComicReadingSession,
+  handleComicReaderPageChange,
+  readNovelProgress,
+  stopTextReadingSession,
+  stopPdfReadingSession,
+  stopEpubReadingSession,
+  stopEbookReadingSession,
+  startNovelReaderSession,
+  handleTextReaderProgressChange,
+  handlePdfReaderProgressChange,
+  handleEpubReaderProgressChange,
+  handleEbookReaderProgressChange,
+  handleEbookReaderShowUpdate
+} = readerSessions
 
-  return true
-}
+const editorPathAnalysis = useCategoryEditorPathAnalysis({
+  formData,
+  categorySettings,
+  detailIsAsmr,
+  websiteTypeOptions,
+  showNotifyByType,
+  confirmDialog,
+  getFileNameWithoutExtension,
+  getResourceNameFromBasePath,
+  normalizeAudioAuthorList,
+  joinAudioAuthorNames,
+  syncAudioAuthorFields
+})
 
-const openTextReader = async (resource: any) => {
-  const resourceId = String(resource?.id ?? '').trim()
-  const filePath = getResourceFilePath(resource)
+const {
+  applyDefaultPathName,
+  applyNovelFileAnalysis,
+  applyGamePathAnalysis,
+  buildAudioFetchPayload,
+  fetchAudioLyricsSilently,
+  fetchAudioAlbumCoverSilently,
+  applyAudioPathAnalysis,
+  applyMultiImageDirectoryAnalysis,
+  applyAudioCoverAnalysis
+} = editorPathAnalysis
 
-  if (!resourceId || !filePath) {
-    showNotifyByType('warning', 'TXT 阅读', '当前小说资源无效')
-    return
-  }
+const editorSoftwareScript = useCategoryEditorSoftwareScript({
+  formData,
+  basePathFormItemRef,
+  showSoftwareScriptModal,
+  softwareScriptDraft,
+  softwareScriptRuntimePath,
+  softwareScriptRuntimes,
+  softwareScriptShellType,
+  showNotifyByType
+})
 
-  if (showTextReader.value && currentTextReaderResourceId.value && currentTextReaderResourceId.value !== resourceId) {
-    await stopTextReadingSession()
-  }
-  if (showPdfReader.value) {
-    await stopPdfReadingSession()
-  }
-  if (showEpubReader.value) {
-    await stopEpubReadingSession()
-  }
-  if (showEbookReader.value) {
-    await stopEbookReadingSession()
-  }
-  if (!(await startNovelReaderSession(resource, 'TXT 阅读'))) {
-    return
-  }
-
-  textReaderInitialProgress.value = await readNovelProgress(resourceId)
-  textReaderFilePath.value = filePath
-  textReaderTitle.value = String(resource?.title ?? getFileNameWithoutExtension(filePath) ?? categoryName.value)
-  currentTextReaderResourceId.value = resourceId
-  showPictureViewer.value = false
-  showComicReader.value = false
-  showPdfReader.value = false
-  showEpubReader.value = false
-  showTextReader.value = true
-  showEbookReader.value = false
-  await fetchData()
-}
-
-const openPdfReader = async (resource: any) => {
-  const resourceId = String(resource?.id ?? '').trim()
-  const filePath = getResourceFilePath(resource)
-
-  if (!resourceId || !filePath) {
-    showNotifyByType('warning', 'PDF 阅读', '当前小说资源无效')
-    return
-  }
-
-  if (showPdfReader.value && currentPdfReaderResourceId.value && currentPdfReaderResourceId.value !== resourceId) {
-    await stopPdfReadingSession()
-  }
-  if (showTextReader.value) {
-    await stopTextReadingSession()
-  }
-  if (showEpubReader.value) {
-    await stopEpubReadingSession()
-  }
-  if (showEbookReader.value) {
-    await stopEbookReadingSession()
-  }
-  if (!(await startNovelReaderSession(resource, 'PDF 阅读'))) {
-    return
-  }
-
-  pdfReaderInitialProgress.value = await readNovelProgress(resourceId)
-  pdfReaderFilePath.value = filePath
-  pdfReaderTitle.value = String(resource?.title ?? getFileNameWithoutExtension(filePath) ?? categoryName.value)
-  currentPdfReaderResourceId.value = resourceId
-  showPictureViewer.value = false
-  showComicReader.value = false
-  showTextReader.value = false
-  showEpubReader.value = false
-  showEbookReader.value = false
-  showPdfReader.value = true
-  await fetchData()
-}
-
-const openEpubReader = async (resource: any) => {
-  const resourceId = String(resource?.id ?? '').trim()
-  const filePath = getResourceFilePath(resource)
-
-  if (!resourceId || !filePath) {
-    showNotifyByType('warning', 'EPUB 阅读', '当前小说资源无效')
-    return
-  }
-
-  if (showEpubReader.value && currentEpubReaderResourceId.value && currentEpubReaderResourceId.value !== resourceId) {
-    await stopEpubReadingSession()
-  }
-  if (showTextReader.value) {
-    await stopTextReadingSession()
-  }
-  if (showPdfReader.value) {
-    await stopPdfReadingSession()
-  }
-  if (showEbookReader.value) {
-    await stopEbookReadingSession()
-  }
-  if (!(await startNovelReaderSession(resource, 'EPUB 阅读'))) {
-    return
-  }
-
-  epubReaderInitialProgress.value = await readNovelProgress(resourceId)
-  epubReaderFilePath.value = filePath
-  epubReaderTitle.value = String(resource?.title ?? getFileNameWithoutExtension(filePath) ?? categoryName.value)
-  currentEpubReaderResourceId.value = resourceId
-  showPictureViewer.value = false
-  showComicReader.value = false
-  showTextReader.value = false
-  showPdfReader.value = false
-  showEpubReader.value = true
-  showEbookReader.value = false
-  await fetchData()
-}
-
-const openEbookReader = async (resource: any) => {
-  const resourceId = String(resource?.id ?? '').trim()
-  const filePath = getResourceFilePath(resource)
-
-  if (!resourceId || !filePath) {
-    showNotifyByType('warning', '电子书阅读', '当前小说资源无效')
-    return
-  }
-
-  if (showEbookReader.value && currentEbookReaderResourceId.value && currentEbookReaderResourceId.value !== resourceId) {
-    await stopEbookReadingSession()
-  }
-  if (showTextReader.value) {
-    await stopTextReadingSession()
-  }
-  if (showPdfReader.value) {
-    await stopPdfReadingSession()
-  }
-  if (showEpubReader.value) {
-    await stopEpubReadingSession()
-  }
-  if (!(await startNovelReaderSession(resource, '电子书阅读'))) {
-    return
-  }
-
-  ebookReaderInitialProgress.value = await readNovelProgress(resourceId)
-  ebookReaderFilePath.value = filePath
-  ebookReaderTitle.value = String(resource?.title ?? getFileNameWithoutExtension(filePath) ?? categoryName.value)
-  currentEbookReaderResourceId.value = resourceId
-  showPictureViewer.value = false
-  showComicReader.value = false
-  showTextReader.value = false
-  showPdfReader.value = false
-  showEpubReader.value = false
-  showEbookReader.value = true
-  await fetchData()
-}
-
-const handleTextReaderProgressChange = (progressPercent: number) => {
-  const resourceId = String(currentTextReaderResourceId.value ?? '').trim()
-  textReaderInitialProgress.value = Math.max(0, Math.min(1, Number(progressPercent ?? 0)))
-  if (resourceId) {
-    void writeNovelProgress(resourceId, textReaderInitialProgress.value)
-  }
-}
-
-const handlePdfReaderProgressChange = (progressPercent: number) => {
-  const resourceId = String(currentPdfReaderResourceId.value ?? '').trim()
-  pdfReaderInitialProgress.value = Math.max(0, Math.min(1, Number(progressPercent ?? 0)))
-  if (resourceId) {
-    void writeNovelProgress(resourceId, pdfReaderInitialProgress.value)
-  }
-}
-
-const handleEpubReaderProgressChange = (progressPercent: number) => {
-  const resourceId = String(currentEpubReaderResourceId.value ?? '').trim()
-  epubReaderInitialProgress.value = Math.max(0, Math.min(1, Number(progressPercent ?? 0)))
-  if (resourceId) {
-    void writeNovelProgress(resourceId, epubReaderInitialProgress.value)
-  }
-}
-
-const handleEbookReaderProgressChange = (progressPercent: number) => {
-  const resourceId = String(currentEbookReaderResourceId.value ?? '').trim()
-  ebookReaderInitialProgress.value = Math.max(0, Math.min(1, Number(progressPercent ?? 0)))
-  if (resourceId) {
-    void writeNovelProgress(resourceId, ebookReaderInitialProgress.value)
-  }
-}
-
-const handleEbookReaderShowUpdate = (visible: boolean) => {
-  showEbookReader.value = visible
-  if (!visible && currentEbookReaderResourceId.value) {
-    void stopEbookReadingSession()
-  }
-}
-
-const openNovelReader = async (resource: any) => {
-  const filePath = getResourceFilePath(resource)
-  const extension = filePath.replace(/\\/g, '/').split('/').pop()?.split('.').pop()?.toLowerCase() ?? ''
-
-  if (['txt', 'md', 'markdown'].includes(extension)) {
-    await openTextReader(resource)
-    return
-  }
-
-  if (extension === 'pdf') {
-    await openPdfReader(resource)
-    return
-  }
-
-  if (extension === 'epub') {
-    await openEpubReader(resource)
-    return
-  }
-
-  if (['mobi', 'azw', 'azw3'].includes(extension)) {
-    await openEbookReader(resource)
-    return
-  }
-
-  showNotifyByType('warning', '阅读', '当前阅读器暂只支持 TXT、MD、PDF、EPUB、MOBI 和 AZW3 文件')
-}
-
-const normalizeSoftwareScript = (script: string) => {
-  return String(script ?? '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-}
-
-const normalizeSoftwareScriptForShell = (script: string, shellType: 'powershell' | 'cmd') => {
-  const lines = normalizeSoftwareScript(script)
-  return lines.join(shellType === 'cmd' ? ' && ' : '; ')
-}
-
-const denormalizeSoftwareScript = (command: string) => {
-  return String(command ?? '')
-    .replace(/\s*&&\s*/g, '\n')
-    .replace(/\s*;\s*/g, '\n')
-    .trim()
-}
-
-const resolveSoftwareScriptShell = (basePath: string) => {
-  const normalizedPath = String(basePath ?? '').replace(/\\/g, '/').toLowerCase()
-  return normalizedPath.endsWith('/powershell.exe') || normalizedPath.endsWith('/pwsh.exe') ? 'powershell' : 'cmd'
-}
-
-const ensureSoftwareScriptRuntimes = async () => {
-  const runtimes = await window.api.dialog.getAvailableScriptRuntimes()
-  softwareScriptRuntimes.value = Array.isArray(runtimes) ? runtimes : []
-  return softwareScriptRuntimes.value
-}
-
-const applyDefaultPathName = (basePath: string) => {
-  if (categorySettings.value.extendTable === 'audio_meta') {
-    const fileStem = getFileNameWithoutExtension(basePath)
-    if (fileStem) {
-      formData.value.name = fileStem
-    }
-    return
-  }
-
-  if (categorySettings.value.extendTable === 'single_image_meta') {
-    const fileStem = getFileNameWithoutExtension(basePath)
-    if (fileStem) {
-      formData.value.name = fileStem
-    }
-    return
-  }
-
-  if (
-    categorySettings.value.extendTable === 'software_meta'
-    || categorySettings.value.extendTable === 'novel_meta'
-    || categorySettings.value.extendTable === 'video_meta'
-  ) {
-    const fileStem = getFileNameWithoutExtension(basePath)
-    if (fileStem) {
-      formData.value.name = fileStem
-    }
-    return
-  }
-
-  if (categorySettings.value.extendTable === 'multi_image_meta') {
-    const resourceName = getResourceNameFromBasePath(basePath)
-    if (resourceName) {
-      formData.value.name = resourceName
-    }
-    return
-  }
-
-  if (categorySettings.value.resourcePathType !== 'file') {
-    return
-  }
-
-  const resourceName = getResourceNameFromBasePath(basePath)
-  if (resourceName) {
-    formData.value.name = resourceName
-  }
-}
-
-const applyNovelFileAnalysis = async (basePath: string) => {
-  if (String(categorySettings.value.extendTable ?? '').trim() !== 'novel_meta') {
-    return
-  }
-
-  try {
-    const result = await window.api.service.analyzeNovelFilePath(basePath)
-    const analysis = result?.data ?? {}
-    const coverDataUrl = String(analysis?.coverDataUrl ?? '').trim()
-    const isbn = String(analysis?.isbn ?? '').trim()
-
-    if (coverDataUrl && !String(formData.value?.coverPath ?? '').trim()) {
-      formData.value.coverPath = coverDataUrl
-    }
-
-    formData.value.meta = {
-      ...(formData.value.meta ?? {}),
-      isbn
-    }
-  } catch {
-    // 小说元数据只是辅助信息，读取失败不阻断添加资源。
-  }
-}
-
-const handleOpenSoftwareScriptModal = () => {
-  void (async () => {
-    if (!isSoftwareCategory.value) {
-      return
-    }
-
-    const runtimes = await ensureSoftwareScriptRuntimes()
-    const currentBasePath = String(formData.value?.basePath ?? '').trim()
-    const normalizedCurrentBasePath = currentBasePath.toLowerCase()
-    const matchedRuntime = runtimes.find((item) => String(item.value ?? '').trim().toLowerCase() === normalizedCurrentBasePath)
-    const fallbackShellType = resolveSoftwareScriptShell(currentBasePath)
-    const fallbackRuntime = matchedRuntime
-      ?? runtimes.find((item) => item.shellType === fallbackShellType)
-      ?? runtimes.find((item) => item.shellType === 'powershell')
-      ?? runtimes[0]
-
-    softwareScriptRuntimePath.value = String(fallbackRuntime?.value ?? '')
-    softwareScriptDraft.value = denormalizeSoftwareScript(String(formData.value?.meta?.commandLineArgs ?? ''))
-    showSoftwareScriptModal.value = true
-  })()
-}
-
-const handleConfirmSoftwareScript = async () => {
-  const normalizedCommand = normalizeSoftwareScriptForShell(softwareScriptDraft.value, softwareScriptShellType.value)
-  if (!normalizedCommand) {
-    showNotifyByType('warning', '脚本执行', '请先输入至少一条命令')
-    return
-  }
-
-  if (!String(softwareScriptRuntimePath.value ?? '').trim()) {
-    showNotifyByType('warning', '脚本执行', '请先选择脚本运行器')
-    return
-  }
-
-  formData.value.basePath = softwareScriptRuntimePath.value
-  formData.value.meta = {
-    ...(formData.value.meta ?? {}),
-    commandLineArgs: normalizedCommand
-  }
-
-  if (!String(formData.value.name ?? '').trim() || String(formData.value.name ?? '').trim().toLowerCase() === 'cmd') {
-    formData.value.name = '脚本启动'
-  }
-
-  showSoftwareScriptModal.value = false
-  await nextTick()
-  await basePathFormItemRef.value?.validate({ trigger: 'change' })
-}
-
-const applyGamePathAnalysis = async (basePath: string) => {
-  if (!['game_meta', 'asmr_meta'].includes(String(categorySettings.value.extendTable ?? '').trim())) {
-    return
-  }
-
-  formData.value.name = getResourceNameFromBasePath(basePath)
-
-  try {
-    const analysis = await window.api.service.analyzeGamePath(basePath)
-    if (!analysis) {
-      return
-    }
-
-    if (analysis.name) {
-      formData.value.name = analysis.name
-    }
-
-    if (analysis.gameId) {
-      formData.value.meta.gameId = analysis.gameId
-    }
-
-    if (detailIsAsmr.value && analysis.gameId) {
-      formData.value.meta.websiteType = String(
-        websiteTypeOptions.value.find((item: any) => String(item?.label ?? '').trim().toLowerCase() === 'dlsite')?.value ?? ''
-      )
-    } else if (analysis.websiteType) {
-      formData.value.meta.websiteType = analysis.websiteType
-    }
-  } catch (error) {
-    notify('error', '分析失败', error instanceof Error ? error.message : '分析游戏路径失败')
-  }
-}
-
-const showNotifyByType = (type: string, title: string, content: string) => {
-  const normalizedType = type === 'warn' ? 'warning' : type
-  notify(normalizedType as 'success' | 'error' | 'info' | 'warning', title, content)
-}
-
-const enrichBatchImportItem = async (item: any) => {
-  if (detailIsManga.value) {
-    return {
-      ...item,
-      launchFileIcon: '',
-      fetchInfoEnabled: item.fetchInfoEnabled !== false
-    }
-  }
-
-  if (detailIsAsmr.value) {
-    return {
-      ...item,
-      launchFileIcon: '',
-      fetchInfoEnabled: item.fetchInfoEnabled !== false
-    }
-  }
-
-  if (!item?.launchFilePath) {
-    return {
-      ...item,
-      launchFileIcon: ''
-    }
-  }
-
-  try {
-    return {
-      ...item,
-      launchFileIcon: (await window.api.dialog.getFileIconAsDataUrl(item.launchFilePath)) ?? '',
-      fetchInfoEnabled: item.fetchInfoEnabled !== false
-    }
-  } catch {
-    return {
-      ...item,
-      launchFileIcon: '',
-      fetchInfoEnabled: item.fetchInfoEnabled !== false
-    }
-  }
-}
+const {
+  ensureSoftwareScriptRuntimes,
+  resolveSoftwareScriptShell,
+  denormalizeSoftwareScript,
+  handleConfirmSoftwareScript
+} = editorSoftwareScript
 
 const addResourceRule = computed(() => ({
   basePath: {
@@ -3464,319 +2374,33 @@ const addResourceRule = computed(() => ({
   }
 }))
 
-const getRouteQueryText = (value: unknown) => {
-  const rawValue = Array.isArray(value) ? value[0] : value
-  return String(rawValue ?? '').trim()
-}
-
-const getRouteKeyword = () => getRouteQueryText(route.query.keyword)
-const getRouteAutoOpenResourceId = () => getRouteQueryText(route.query.resourceId)
-const shouldAutoOpenRouteDetail = () => getRouteQueryText(route.query.openDetail) === '1'
-
-const getAutoOpenResourceKey = () => {
-  const targetResourceId = getRouteAutoOpenResourceId()
-  if (!categoryId.value || !targetResourceId || !shouldAutoOpenRouteDetail()) {
-    return ''
-  }
-
-  return `${categoryId.value}:${targetResourceId}:${getRouteKeyword()}`
-}
-
-const openRouteRequestedResourceDetail = () => {
-  const autoOpenKey = getAutoOpenResourceKey()
-  if (!autoOpenKey || autoOpenKey === handledAutoOpenResourceKey) {
-    return
-  }
-
-  const targetResourceId = getRouteAutoOpenResourceId()
-  const targetResource = resourceList.value.find((item) => String(item?.id ?? '') === targetResourceId)
-  if (!targetResource) {
-    return
-  }
-
-  handledAutoOpenResourceKey = autoOpenKey
-  handleShowResourceDetail(targetResource)
-}
-
-const fetchData = async () => {
-  if (!categoryId.value) return
-  const requestId = ++fetchDataRequestId
-  loading.value = true
-  try {
-    const activeCategoryId = String(categoryId.value ?? '').trim()
-    const resourceQuery = {
-      keyword: keyword.value.trim(),
-      authorIds: [...selectedAuthorList.value],
-      actorNames: [...selectedActorList.value],
-      albumNames: [...selectedAlbumList.value],
-      engineIds: [...selectedEngineList.value],
-      tagIds: [...selectedTagList.value],
-      typeIds: [...selectedTypeList.value],
-      missingOnly: missingFile.value,
-      favoriteOnly: favoriteOnly.value,
-      completedOnly: effectiveCompletedOnly.value,
-      runningOnly: runningOnly.value,
-      page: currentPage.value,
-      pageSize: pageSize.value,
-      sortBy: sortBy.value
-    }
-
-    // 1. 获取分类元数据
-    const nextCategoryInfo = await window.api.db.getCategoryById(activeCategoryId)
-    if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
-      return
-    }
-
-    categoryInfo.value = nextCategoryInfo
-    websiteTypeOptions.value = await window.api.db.getSelectDictData(
-      detailIsManga.value
-        ? DictType.MANGA_SITE_TYPE
-        : detailIsAsmr.value
-          ? DictType.ASMR_SITE_TYPE
-          : DictType.GAME_SITE_TYPE
-    )
-    if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
-      return
-    }
-    const localeEmulatorSetting = await window.api.db.getSetting(Settings.LOCALE_EMULATOR_PATH)
-    localeEmulatorPath.value = String(localeEmulatorSetting?.value ?? '')
-    const mtoolSetting = await window.api.db.getSetting(Settings.MTOOL_PATH)
-    mtoolPath.value = String(mtoolSetting?.value ?? '')
-    if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
-      return
-    }
-    // 2. 获取该分类下的资源列表（带标签）
-      const resourceResponse = await window.api.db.getResourceByCategoryId(activeCategoryId, resourceQuery)
-      if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
-        return
-      }
-      resourceList.value = resourceResponse?.items ?? []
-      totalResources.value = Number(resourceResponse?.total ?? 0)
-      openRouteRequestedResourceDetail()
-      if (selectedDetailResource.value?.id) {
-        const matchedDetailResource = resourceList.value.find((item) => item.id === selectedDetailResource.value.id)
-        if (matchedDetailResource) {
-          selectedDetailResource.value = matchedDetailResource
-        }
-      }
-    // 3. 获取作者列表
-    authorList.value = await window.api.db.getAuthorByCategoryId(activeCategoryId)
-    actorList.value = isVideoCategory.value
-      ? await window.api.db.getActorByCategoryId(activeCategoryId)
-      : []
-    albumList.value = isAudioCategory.value
-      ? await window.api.db.getAlbumByCategoryId(activeCategoryId)
-      : []
-    if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
-      return
-    }
-    assignSanitizedSelectedFilterValues(selectedAuthorList, normalizedAuthorList.value, 'id')
-    assignSanitizedSelectedFilterValues(selectedActorList, normalizedActorList.value, 'id')
-    assignSanitizedSelectedFilterValues(selectedAlbumList, normalizedAlbumList.value, 'name')
-    // 4. 获取引擎列表
-    engineList.value = showEngineFilter.value
-      ? await window.api.db.getEngineByCategoryId(activeCategoryId)
-      : []
-    if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
-      return
-    }
-    assignSanitizedSelectedFilterValues(selectedEngineList, normalizedEngineList.value, 'id')
-    // 4. 获取统计
-    missingResourceCount.value = await window.api.db.getMissingResourceCountByCategoryId(activeCategoryId)
-    favoriteResourceCount.value = await window.api.db.getFavoriteResourceCountByCategoryId(activeCategoryId)
-    completedResourceCount.value = await window.api.db.getCompletedResourceCountByCategoryId(activeCategoryId)
-    runningResourceCount.value = await window.api.db.getRunningResourceCountByCategoryId(activeCategoryId)
-    if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
-      return
-    }
-    // 5. 获取标签列表
-    tagList.value = await window.api.db.getTagByCategoryId(activeCategoryId)
-    assignSanitizedSelectedFilterValues(selectedTagList, normalizedTagList.value, 'id')
-    // 6. 获取分类列表
-    typeList.value = await window.api.db.getTypeByCategoryId(activeCategoryId)
-    if (requestId !== fetchDataRequestId || activeCategoryId !== String(categoryId.value ?? '').trim()) {
-      return
-    }
-    assignSanitizedSelectedFilterValues(selectedTypeList, normalizedTypeList.value, 'id')
-
-  } catch (error) {
-    if (requestId === fetchDataRequestId) {
-      showNotifyByType('error', '加载失败', error instanceof Error ? error.message : '加载分类数据失败')
-    }
-  } finally {
-    if (requestId === fetchDataRequestId) {
-      loading.value = false
-    }
-  }
-}
-
-const resetSelected = () => {
-  missingFile.value = false
-  favoriteOnly.value = false
-  completedOnly.value = false
-  runningOnly.value = false
-  selectedAuthorList.value = []
-  selectedActorList.value = []
-  selectedAlbumList.value = []
-  selectedEngineList.value = []
-  selectedTagList.value = []
-  selectedTypeList.value = []
-  authorSearch.value = ''
-  actorSearch.value = ''
-  albumSearch.value = ''
-  tagSearch.value = ''
-  typeSearch.value = ''
-}
-
-const handleJumpPage = () => {
-  const nextPage = Math.min(
-    totalPages.value,
-    Math.max(1, Number(jumpPageInput.value ?? currentPage.value))
-  )
-
-  jumpPageInput.value = nextPage
-  currentPage.value = nextPage
-}
-
-// 监控路由 ID 变化
-watch(categoryId, (nextCategoryId, previousCategoryId) => {
-  if (previousCategoryId) {
-    syncBatchImportStateFromRefs(previousCategoryId)
-  }
-
-  suppressAutoFetch.value = true
-  syncBatchImportRefsFromState(String(nextCategoryId ?? ''))
-  keyword.value = getRouteKeyword()
-  resetSelected()
-  selectionModeManuallyEnabled.value = false
-  selectedResourceIds.value = []
-  resourceList.value = []
-  totalResources.value = 0
-  authorList.value = []
-  actorList.value = []
-  albumList.value = []
-  engineList.value = []
-  tagList.value = []
-  typeList.value = []
-  currentPage.value = 1
-  suppressAutoFetch.value = false
-  fetchData()
-}, { immediate: true })
-
-watch(
-  () => [route.query.keyword, route.query.resourceId, route.query.openDetail],
-  () => {
-    if (!categoryId.value) {
-      return
-    }
-
-    suppressAutoFetch.value = true
-    keyword.value = getRouteKeyword()
-    currentPage.value = 1
-    suppressAutoFetch.value = false
-    fetchData()
-  }
-)
-
-watch(
-  [keyword, missingFile, favoriteOnly, completedOnly, runningOnly, selectedAuthorList, selectedActorList, selectedAlbumList, selectedEngineList, selectedTagList, selectedTypeList, pageSize, sortBy],
-  () => {
-    if (suppressAutoFetch.value) {
-      return
-    }
-    currentPage.value = 1
-    fetchData()
-  },
-  { deep: true }
-)
-
-watch(showCompletedFilter, (visible) => {
-  if (!visible) {
-    completedOnly.value = false
-  }
-})
-
-watch(isWebsiteCategory, (visible) => {
-  if (visible) {
-    missingFile.value = false
-    runningOnly.value = false
-  }
-}, { immediate: true })
-
-watch(showVideoPlayer, (visible) => {
-  if (visible) {
-    hasOpenedVideoPlayer = true
-    return
-  }
-
-  if (hasOpenedVideoPlayer) {
-    void fetchData()
-  }
-})
-
-watch(currentPage, () => {
-  if (suppressAutoFetch.value) {
-    jumpPageInput.value = currentPage.value
-    return
-  }
-  jumpPageInput.value = currentPage.value
-  fetchData()
-})
-
-watch(totalPages, (value) => {
-  if (currentPage.value > value) {
-    currentPage.value = value
-    return
-  }
-
-  jumpPageInput.value = Math.min(value, Math.max(1, Number(jumpPageInput.value ?? currentPage.value)))
-})
-
-let stopResourceStateListener: null | (() => void) = null
-let stopBatchImportProgressListener: null | (() => void) = null
-
 onMounted(() => {
   void loadPlaybackResumeRestartThresholds()
   window.addEventListener('click', closeDetailAudioContextMenu)
   window.addEventListener('resize', closeDetailAudioContextMenu)
-  stopResourceStateListener = window.api.service.onResourceStateChanged((message) => {
-    if (message.categoryId !== categoryId.value) {
-      return
-    }
-
-    void fetchData()
-  })
-
-  stopBatchImportProgressListener = window.api.service.onBatchImportProgress((message) => {
-    const targetCategoryId = String(message.categoryId ?? '').trim()
-    if (!targetCategoryId) {
-      return
-    }
-
-    patchBatchImportState(targetCategoryId, {
-      analyzeTotal: Number(message.total ?? 0),
-      analyzeCurrent: Number(message.current ?? 0),
-      analyzeMessage: String(message.message ?? ''),
-      importRunning: !message.done && message.stage === 'import',
-      analyzeRunning: !message.done && message.stage === 'analyze',
-      showLoading: !message.done && targetCategoryId === categoryId.value
-    })
-
-    if (message.done) {
-      patchBatchImportState(targetCategoryId, {
-        importRunning: false,
-        analyzeRunning: false,
-        showLoading: false
-      })
-      clearBatchImportOngoingCenter(targetCategoryId)
-      return
-    }
-
-    syncBatchImportOngoingCenter(targetCategoryId)
-  })
-
   window.addEventListener('mousemove', handleDetailDrawerResizeMove)
   window.addEventListener('mouseup', handleDetailDrawerResizeEnd)
+  reportCategoryRoutePerf('category-mounted')
+  void nextTick(() => {
+    requestAnimationFrame(() => {
+      reportCategoryRoutePerf('category-mounted-frame')
+    })
+  })
+})
+
+onBeforeMount(() => {
+  const perf = readCategoryRoutePerf()
+  if (!perf || String(perf.categoryId ?? '') !== String(categoryId.value ?? '')) {
+    return
+  }
+
+  emitRendererTiming('category route perf', {
+    phase: 'category-before-mount',
+    elapsedMs: Math.round(performance.now() - Number(perf.startedAt ?? 0)),
+    from: perf.from,
+    to: perf.to,
+    categoryId: perf.categoryId
+  })
 })
 
 const updateDetailDescriptionHeight = async () => {
@@ -3814,161 +2438,27 @@ onBeforeUnmount(() => {
   if (showEpubReader.value) {
     void stopEpubReadingSession()
   }
-  stopResourceStateListener?.()
-  stopResourceStateListener = null
-  stopBatchImportProgressListener?.()
-  stopBatchImportProgressListener = null
   window.removeEventListener('mousemove', handleDetailDrawerResizeMove)
   window.removeEventListener('mouseup', handleDetailDrawerResizeEnd)
   document.body.style.userSelect = ''
 })
 
 watch(
-  () => formData.value?.coverPath,
-  async (coverPath) => {
-    if (!coverPath) {
-      coverPreviewSrc.value = ''
+  () => [loading.value, resourceList.value.length] as const,
+  ([isLoading, count]) => {
+    if (isLoading) {
       return
     }
 
-    if (
-      coverPath.startsWith('screenshot://') ||
-      coverPath.startsWith('auto://') ||
-      coverPath.startsWith('custom://')
-    ) {
-      coverPreviewSrc.value = ''
-      return
-    }
-
-    const normalizedCoverPath = normalizeCoverPreviewSource(coverPath)
-    if (/^https?:\/\//i.test(normalizedCoverPath) || /^data:/i.test(normalizedCoverPath)) {
-      coverPreviewSrc.value = normalizedCoverPath
-      return
-    }
-
-    try {
-      coverPreviewSrc.value = (await window.api.dialog.getImagePreviewUrl(coverPath, {
-        maxWidth: 720,
-        maxHeight: 480,
-        fit: 'inside',
-        quality: 82
-      })) ?? ''
-    } catch (error) {
-      showNotifyByType('error', '预览失败', error instanceof Error ? error.message : '加载封面预览失败')
-      coverPreviewSrc.value = ''
-    }
-  },
-  { immediate: true }
-)
-
-watch(
-  () => selectedDetailResource.value?.coverPath,
-  async (coverPath) => {
-    if (!coverPath) {
-      detailCoverPreviewSrc.value = ''
-      return
-    }
-
-    const normalizedCoverPath = normalizeCoverPreviewSource(coverPath)
-    if (/^https?:\/\//i.test(normalizedCoverPath) || /^data:/i.test(normalizedCoverPath)) {
-      detailCoverPreviewSrc.value = normalizedCoverPath
-      return
-    }
-
-    try {
-      detailCoverPreviewSrc.value = (await window.api.dialog.getImagePreviewUrl(coverPath, {
-        maxWidth: 960,
-        maxHeight: 720,
-        fit: 'inside',
-        quality: 84
-      })) ?? ''
-    } catch {
-      detailCoverPreviewSrc.value = ''
-    }
-  },
-  { immediate: true }
-)
-
-watch(
-  () => currentScreenshotPath.value,
-  async (filePath) => {
-    if (!filePath) {
-      detailScreenshotPreviewSrc.value = ''
-      return
-    }
-
-    try {
-      detailScreenshotPreviewSrc.value = (await window.api.dialog.getImagePreviewUrl(filePath, {
-        maxWidth: 960,
-        maxHeight: 720,
-        fit: 'inside',
-        quality: 84
-      })) ?? ''
-    } catch {
-      detailScreenshotPreviewSrc.value = ''
-    }
-  },
-  { immediate: true }
-)
-
-watch(
-  () => [detailIsWebsite.value, selectedDetailResource.value?.websiteMeta?.favicon] as const,
-  async ([isWebsite, favicon]) => {
-    if (!isWebsite || !favicon) {
-      detailWebsiteFaviconSrc.value = ''
-      return
-    }
-
-    const normalizedFavicon = normalizeWebsiteIconSource(String(favicon))
-    if (!normalizedFavicon) {
-      detailWebsiteFaviconSrc.value = ''
-      return
-    }
-
-    if (/^https?:\/\//i.test(normalizedFavicon) || /^data:/i.test(normalizedFavicon)) {
-      detailWebsiteFaviconSrc.value = normalizedFavicon
-      return
-    }
-
-    try {
-      detailWebsiteFaviconSrc.value = (await window.api.dialog.getImagePreviewUrl(normalizedFavicon, {
-        maxWidth: 64,
-        maxHeight: 64,
-        fit: 'cover',
-        quality: 80
-      })) ?? ''
-    } catch {
-      detailWebsiteFaviconSrc.value = ''
-    }
-  },
-  { immediate: true }
-)
-
-watch(
-  () => [...detailScreenshotPaths.value],
-  async (paths) => {
-    if (!paths.length) {
-      detailGalleryImageUrls.value = {}
-      return
-    }
-
-    const urlEntries = await Promise.all(paths.map(async (filePath) => {
-      try {
-        const previewUrl = await window.api.dialog.getImagePreviewUrl(filePath, {
-          maxWidth: 360,
-          maxHeight: 480,
-          fit: 'cover',
-          quality: 76
+    void nextTick(() => {
+      requestAnimationFrame(() => {
+        reportCategoryRoutePerf('category-list-visible', {
+          itemCount: count
         })
-        return [filePath, previewUrl ?? ''] as const
-      } catch {
-        return [filePath, ''] as const
-      }
-    }))
-
-    detailGalleryImageUrls.value = Object.fromEntries(urlEntries.filter(([, url]) => url))
+      })
+    })
   },
-  { immediate: true }
+  { flush: 'post' }
 )
 
 watch(
@@ -3976,7 +2466,7 @@ watch(
   (rating) => {
     detailRatingDraft.value = Number(rating ?? -1)
   },
-  { immediate: true }
+  {immediate: true}
 )
 
 watch(
@@ -3985,13 +2475,6 @@ watch(
     updateDetailDescriptionHeight()
   }
 )
-
-watch(showEditModal, (visible) => {
-  if (!visible) {
-    editingResourceId.value = ''
-    editInitialFormData.value = null
-  }
-})
 
 watch(showPictureViewer, (visible, previousVisible) => {
   if (visible || !previousVisible || !currentPictureViewerResourceId.value) {
@@ -4042,1817 +2525,172 @@ watch(showEpubReader, (visible, previousVisible) => {
   void stopEpubReadingSession()
 })
 
-watch(
-  [
-    batchImportItems,
-    batchImportFetchInfoEnabled,
-    batchAnalyzeCurrent,
-    batchAnalyzeTotal,
-    batchAnalyzeMessage,
-    batchAnalyzeRunning,
-    batchImportRunning,
-    batchAnalyzeCancelled,
-    batchAnalyzeInBackground,
-    batchAnalyzeToastDismissed,
-    showBatchImportLoading,
-    showBatchImportModal
-  ],
-  () => {
-    if (categoryId.value) {
-      syncBatchImportStateFromRefs(categoryId.value)
-    }
-  },
-  { deep: true }
-)
-
 // --- E. 交互事件 ---
-const handleAddResource = () => {
-  editingResourceId.value = ''
-  editInitialFormData.value = null
-  formData.value = createEmptyFormData()
-  showModal.value = true
-}
-
-const syncBatchImportOngoingCenter = (targetCategoryId = categoryId.value) => {
-  if (!targetCategoryId) {
-    return
-  }
-
-  const state = ensureBatchImportState(targetCategoryId)
-  const isRunning = state.analyzeRunning || state.importRunning
-  if (!isRunning) {
-    clearBatchImportOngoingCenter(targetCategoryId)
-    return
-  }
-
-  const [, secondLine] = String(state.analyzeMessage ?? '').split('\n')
-  const currentDirectoryName = getResourceNameFromBasePath(secondLine || state.analyzeMessage || '')
-    || secondLine
-    || state.analyzeMessage
-    || '正在准备分析目录'
-  const current = Number(state.analyzeCurrent ?? 0)
-  const total = Number(state.analyzeTotal ?? 0)
-  const displayIndex = Math.min(total, current + 1)
-  const progress = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0
-  const title = state.importRunning ? '批量导入进行中' : '批量导入'
-  const resourceLabel = targetCategoryId === categoryId.value ? batchImportResourceLabel.value : '资源'
-  const contentPrefix = state.importRunning
-    ? `正在导入第 ${displayIndex} / ${total} 个${resourceLabel}`
-    : `正在分析第 ${displayIndex} / ${total} 个目录`
-  upsertOngoingCenterItem({
-    id: getBatchImportOngoingId(targetCategoryId),
-    title,
-    content: `${contentPrefix}\n${currentDirectoryName}`,
-    progress,
-    onClick: () => {
-      if (targetCategoryId === categoryId.value) {
-        handleReopenBatchImportProgress()
-      }
-    }
-  })
-}
-
-const clearBatchImportOngoingCenter = (targetCategoryId = categoryId.value) => {
-  if (!targetCategoryId) {
-    return
-  }
-
-  removeOngoingCenterItem(getBatchImportOngoingId(targetCategoryId))
-}
-
-const handleBatchImportClick = () => {
-  void (async () => {
-    const targetCategoryId = categoryId.value
-    if (isSingleImageCategory.value) {
-      await handleBatchImportImages()
-      return
-    }
-
-    if (detailIsManga.value) {
-      await handleBatchImportComics()
-      return
-    }
-
-    if (detailIsAsmr.value) {
-      await handleBatchImportAsmrs()
-      return
-    }
-
-    if (isAudioCategory.value) {
-      await handleBatchImportAudioFiles()
-      return
-    }
-
-    if (isNovelCategory.value) {
-      await handleBatchImportNovelFiles()
-      return
-    }
-
-    if (isVideoCategory.value && String(categorySettings.value.resourcePathType ?? '') === 'file') {
-      await handleBatchImportVideoFiles()
-      return
-    }
-
-    if (isVideoFolderCategory.value) {
-      await handleBatchImportAnimeDirectories()
-      return
-    }
-
-    const currentState = ensureBatchImportState(targetCategoryId)
-
-    if (currentState.analyzeRunning || currentState.importRunning) {
-      patchBatchImportState(targetCategoryId, {
-        analyzeInBackground: false,
-        analyzeToastDismissed: false,
-        showLoading: true
-      })
-      syncBatchImportOngoingCenter(targetCategoryId)
-      return
-    }
-
-    try {
-      const directoryPaths = await window.api.dialog.selectFolders()
-      if (!directoryPaths?.length) {
-        return
-      }
-
-      patchBatchImportState(targetCategoryId, {
-        items: [],
-        fetchInfoEnabled: true,
-        analyzeTotal: directoryPaths.length,
-        analyzeCurrent: 0,
-        analyzeMessage: '正在分析游戏启动文件，请稍候...',
-        analyzeCancelled: false,
-        analyzeInBackground: false,
-        analyzeToastDismissed: false,
-        analyzeRunning: true,
-        importRunning: false,
-        showLoading: true,
-        showPreview: false
-      })
-      syncBatchImportOngoingCenter(targetCategoryId)
-
-      const items = await analyzeBatchImportDirectories(targetCategoryId, directoryPaths)
-
-      patchBatchImportState(targetCategoryId, {
-        items,
-        showPreview: items.length > 0,
-        showLoading: false
-      })
-
-      if (!items.length && ensureBatchImportState(targetCategoryId).analyzeCancelled) {
-        showNotifyByType('info', '批量导入', '已停止分析')
-      }
-    } finally {
-      patchBatchImportState(targetCategoryId, {
-        analyzeRunning: false,
-        analyzeInBackground: false,
-        showLoading: false,
-        analyzeToastDismissed: false
-      })
-      clearBatchImportOngoingCenter(targetCategoryId)
-    }
-  })()
-}
-
-const analyzeBatchImportComicDirectories = async (targetCategoryId: string, directoryPaths: string[]) => {
-  const items: any[] = new Array(directoryPaths.length)
-  let nextIndex = 0
-  let completedCount = 0
-
-  const updateAnalyzeProgress = (directoryPath?: string, index?: number) => {
-    const currentDirectoryName = getResourceNameFromBasePath(directoryPath || '') || directoryPath || '正在准备分析目录'
-    const currentIndex = typeof index === 'number'
-      ? Math.min(directoryPaths.length, index + 1)
-      : Math.min(directoryPaths.length, completedCount + 1)
-
-    patchBatchImportState(targetCategoryId, {
-      analyzeCurrent: completedCount,
-      analyzeMessage: `正在分析第 ${currentIndex} / ${directoryPaths.length} 个漫画目录\n${currentDirectoryName}`
-    })
-    syncBatchImportOngoingCenter()
-  }
-
-  const worker = async () => {
-    while (!ensureBatchImportState(targetCategoryId).analyzeCancelled) {
-      const currentIndex = nextIndex
-      nextIndex += 1
-
-      if (currentIndex >= directoryPaths.length) {
-        return
-      }
-
-      const directoryPath = directoryPaths[currentIndex]
-      const directoryName = getResourceNameFromBasePath(directoryPath)
-      updateAnalyzeProgress(directoryName || directoryPath, currentIndex)
-
-      try {
-        const analysisResult = await window.api.service.analyzeMultiImageDirectory(directoryPath)
-        const analysisData = analysisResult?.data ?? {}
-        const imageCount = Math.max(0, Number(analysisData?.imageCount ?? 0))
-        items[currentIndex] = await enrichBatchImportItem({
-          directoryPath: String(analysisData?.directoryPath ?? directoryPath),
-          directoryName: String(analysisData?.directoryName ?? directoryName ?? ''),
-          coverPath: String(analysisData?.coverPath ?? ''),
-          imageCount,
-          exists: Boolean(analysisData?.exists),
-          existingResourceTitle: String(analysisData?.existingResourceTitle ?? ''),
-          checked: !analysisData?.exists && imageCount > 0,
-          errorMessage: analysisResult?.type === 'error' ? String(analysisResult?.message ?? '') : ''
-        })
-      } catch (error) {
-        items[currentIndex] = {
-          directoryPath,
-          directoryName,
-          coverPath: '',
-          imageCount: 0,
-          exists: false,
-          checked: false,
-          errorMessage: error instanceof Error ? error.message : '分析失败'
-        }
-      } finally {
-        completedCount += 1
-        patchBatchImportState(targetCategoryId, {
-          analyzeCurrent: completedCount
-        })
-        syncBatchImportOngoingCenter()
-      }
-    }
-  }
-
-  const workerCount = Math.min(directoryPaths.length, BATCH_ANALYZE_CONCURRENCY)
-  await Promise.all(Array.from({ length: workerCount }, () => worker()))
-
-  return items.filter(Boolean)
-}
-
-const handleBatchImportComics = async () => {
-  const targetCategoryId = categoryId.value
-  const currentState = ensureBatchImportState(targetCategoryId)
-
-  if (currentState.analyzeRunning || currentState.importRunning) {
-    patchBatchImportState(targetCategoryId, {
-      analyzeInBackground: false,
-      analyzeToastDismissed: false,
-      showLoading: true
-    })
-    syncBatchImportOngoingCenter(targetCategoryId)
-    return
-  }
-
-  try {
-    const directoryPaths = await window.api.dialog.selectFolders()
-    if (!directoryPaths?.length) {
-      return
-    }
-
-    patchBatchImportState(targetCategoryId, {
-      items: [],
-      fetchInfoEnabled: true,
-      analyzeTotal: directoryPaths.length,
-      analyzeCurrent: 0,
-      analyzeMessage: '正在分析漫画目录，请稍候...',
-      analyzeCancelled: false,
-      analyzeInBackground: false,
-      analyzeToastDismissed: false,
-      analyzeRunning: true,
-      importRunning: false,
-      showLoading: true,
-      showPreview: false
-    })
-    syncBatchImportOngoingCenter(targetCategoryId)
-
-    const items = await analyzeBatchImportComicDirectories(targetCategoryId, directoryPaths)
-
-    patchBatchImportState(targetCategoryId, {
-      items,
-      showPreview: items.length > 0,
-      showLoading: false
-    })
-
-    if (!items.length && ensureBatchImportState(targetCategoryId).analyzeCancelled) {
-      showNotifyByType('info', '批量导入漫画', '已停止分析')
-    }
-  } finally {
-    patchBatchImportState(targetCategoryId, {
-      analyzeRunning: false,
-      analyzeInBackground: false,
-      showLoading: false,
-      analyzeToastDismissed: false
-    })
-    clearBatchImportOngoingCenter(targetCategoryId)
-  }
-}
-
-const applyAudioCoverAnalysis = async () => {
-  if (String(categorySettings.value.extendTable ?? '').trim() !== 'audio_meta') {
-    return
-  }
-}
-
-const buildAudioFetchPayload = (basePath: string, analysis?: any) => ({
-  basePath: String(basePath ?? '').trim(),
-  title: String(analysis?.name ?? formData.value?.name ?? '').trim(),
-  album: String(analysis?.album ?? formData.value?.meta?.album ?? '').trim(),
-  artist: String(analysis?.artist ?? formData.value?.author ?? '').trim(),
-  artists: normalizeAudioAuthorList([
-    ...(Array.isArray(analysis?.artists) ? analysis.artists : []),
-    ...(Array.isArray(formData.value?.authors) ? formData.value.authors : []),
-    String(analysis?.artist ?? formData.value?.author ?? '').trim()
-  ])
-})
-
-const fetchAudioLyricsSilently = async (payload: any) => {
-  const fetchAudioLyrics = window.api?.service?.fetchAudioLyrics
-  if (typeof fetchAudioLyrics !== 'function') {
-    return {
-      type: 'error',
-      message: '当前窗口尚未加载最新接口，请重启应用后再试'
-    }
-  }
-
-  return await fetchAudioLyrics({
-    basePath: String(payload?.basePath ?? ''),
-    title: String(payload?.title ?? ''),
-    album: String(payload?.album ?? ''),
-    artist: String(payload?.artist ?? ''),
-    artists: Array.isArray(payload?.artists) ? payload.artists.map((item: string) => String(item ?? '')).filter(Boolean) : []
-  })
-}
-
-const fetchAudioAlbumCoverSilently = async (payload: any) => {
-  const fetchAudioAlbumCover = window.api?.service?.fetchAudioAlbumCover
-  if (typeof fetchAudioAlbumCover !== 'function') {
-    return {
-      type: 'error',
-      message: '当前窗口尚未加载最新接口，请重启应用后再试'
-    }
-  }
-
-  return await fetchAudioAlbumCover({
-    basePath: String(payload?.basePath ?? ''),
-    title: String(payload?.title ?? ''),
-    album: String(payload?.album ?? ''),
-    artist: String(payload?.artist ?? ''),
-    artists: Array.isArray(payload?.artists) ? payload.artists.map((item: string) => String(item ?? '')).filter(Boolean) : []
-  })
-}
-
-const promptForMissingAudioAssets = async (basePath: string, analysis: any) => {
-  const fetchPayload = buildAudioFetchPayload(basePath, analysis)
-
-  if (!String(analysis?.lyricsPath ?? '').trim()) {
-    const confirmed = await confirmDialog('获取歌词', '未匹配到同名歌词文件，是否尝试自动获取歌词？')
-    if (confirmed) {
-      const result = await fetchAudioLyricsSilently(fetchPayload)
-      if (result?.type === 'success' && result?.data?.lyricsPath) {
-        formData.value.meta = {
-          ...(formData.value.meta ?? {}),
-          lyricsPath: String(result.data.lyricsPath)
-        }
-        showNotifyByType('success', '获取歌词', result?.message ?? '已获取歌词')
-      } else if (result?.message) {
-        showNotifyByType(result?.type ?? 'warning', '获取歌词', result.message)
-      }
-    }
-  }
-
-  if (!String(analysis?.embeddedCoverPath ?? '').trim()) {
-    const confirmed = await confirmDialog('获取专辑封面', '未检测到文件内嵌封面，是否尝试自动获取专辑封面？')
-    if (confirmed) {
-      const result = await fetchAudioAlbumCoverSilently(fetchPayload)
-      if (result?.type === 'success' && result?.data?.coverPath) {
-        formData.value.coverPath = String(result.data.coverPath)
-        showNotifyByType('success', '获取专辑封面', result?.message ?? '已获取专辑封面')
-      } else if (result?.message) {
-        showNotifyByType(result?.type ?? 'warning', '获取专辑封面', result.message)
-      }
-    }
-  }
-}
-
-const applyAudioPathAnalysis = async (basePath: string) => {
-  if (String(categorySettings.value.extendTable ?? '').trim() !== 'audio_meta') {
-    return
-  }
-
-  const fileStem = getFileNameWithoutExtension(basePath)
-  if (fileStem) {
-    formData.value.name = fileStem
-  }
-
-  try {
-    const analysis = await window.api.service.analyzeAudioFilePath(basePath)
-    if (!analysis) {
-      return
-    }
-
-    if (analysis.name) {
-      formData.value.name = String(analysis.name)
-    }
-
-    const authorNames = normalizeAudioAuthorList([
-      ...(Array.isArray(analysis.artists) ? analysis.artists : []),
-      String(analysis.artist ?? '').trim()
-    ])
-    syncAudioAuthorFields(formData.value, authorNames)
-
-    formData.value.meta = {
-      ...(formData.value.meta ?? {}),
-      artist: joinAudioAuthorNames(authorNames) || String(analysis.artist ?? formData.value.meta?.artist ?? ''),
-      album: String(analysis.album ?? formData.value.meta?.album ?? ''),
-      lyricsPath: String(analysis.lyricsPath ?? formData.value.meta?.lyricsPath ?? ''),
-      duration: Number.isFinite(Number(analysis.duration)) ? Math.max(0, Math.floor(Number(analysis.duration))) : Number(formData.value.meta?.duration ?? 0)
-    }
-    formData.value.coverPath = String(analysis.embeddedCoverPath ?? '').trim()
-    await promptForMissingAudioAssets(basePath, analysis)
-  } catch (error) {
-    notify('error', '分析失败', error instanceof Error ? error.message : '分析音乐文件失败')
-  }
-}
 
 const handleAudioAuthorsChange = (value: string[]) => {
   syncAudioAuthorFields(formData.value, value)
 }
 
-const handleFetchAlbumCover = async () => {
-  showNotifyByType('info', '获取专辑封面', '正在获取专辑封面，请稍候')
+const BATCH_ANALYZE_CONCURRENCY = Math.max(2, Math.min(6, (navigator.hardwareConcurrency || 4) - 2 || 2))
 
-  try {
-    const fetchAudioAlbumCover = window.api?.service?.fetchAudioAlbumCover
-    if (typeof fetchAudioAlbumCover !== 'function') {
-      showNotifyByType('error', '获取专辑封面', '当前窗口尚未加载最新接口，请重启应用后再试')
-      return
-    }
+const resourceEditor = useCategoryResourceEditor({
+  showModal,
+  showEditModal,
+  formData,
+  editingResourceId,
+  editInitialFormData,
+  formRef,
+  basePathFormItemRef,
+  showDetailDrawer,
+  selectedDetailResource,
+  isDragOver,
+  categoryInfo,
+  categoryName,
+  categorySettings,
+  createEmptyFormData,
+  cloneFormData,
+  mapResourceDetailToFormData,
+  syncAudioAuthorFields,
+  validateBasePathExtension,
+  normalizeWebsiteUrl,
+  closeVideoSubCoverCandidateModal,
+  fetchData: async () => {
+    await fetchData()
+  },
+  showNotifyByType,
+  getBasePathValidationMessage,
+  applyDefaultPathName,
+  applyAudioPathAnalysis,
+  applyAudioCoverAnalysis,
+  applyGamePathAnalysis,
+  applyNovelFileAnalysis,
+  applyMultiImageDirectoryAnalysis
+})
+const handleAddResource = resourceEditor.handleAddResource
+const handleCloseModal = resourceEditor.handleCloseModal
+const handleResetEditForm = resourceEditor.handleResetEditForm
+const handleRestoreDefaultEditForm = resourceEditor.handleRestoreDefaultEditForm
+const handleSubmitResource = resourceEditor.handleSubmitResource
+const handleEditResource = resourceEditor.handleEditResource
+const handleSubmitEditResource = resourceEditor.handleSubmitEditResource
+const handleDropResourceFile = resourceEditor.handleDropResourceFile
 
-    const payload = {
-      basePath: String(formData.value?.basePath ?? ''),
-      title: String(formData.value?.name ?? ''),
-      album: String(formData.value?.meta?.album ?? ''),
-      artist: String(formData.value?.author ?? ''),
-      artists: Array.isArray(formData.value?.authors)
-        ? formData.value.authors.map((item: string) => String(item ?? '')).filter(Boolean)
-        : []
-    }
+const batchImportCategoryActions = useCategoryBatchImportCategoryActions({
+  categoryId,
+  categoryInfo,
+  categorySettings,
+  detailIsManga,
+  detailIsAsmr,
+  ensureBatchImportState,
+  patchBatchImportState,
+  syncBatchImportOngoingCenter,
+  clearBatchImportOngoingCenter,
+  showNotifyByType,
+  confirmDialog,
+  getResourceNameFromBasePath,
+  getFileName,
+  getFileNameWithoutExtension,
+  validateBasePathExtension,
+  detectPixivIdFromFilePath,
+  normalizeAudioAuthorList,
+  joinAudioAuthorNames,
+  fetchData: async () => {
+    await fetchData()
+  },
+  cloneFormData,
+  mapResourceDetailToFormData,
+  syncAudioAuthorFields,
+  buildAudioFetchPayload,
+  fetchAudioLyricsSilently,
+  fetchAudioAlbumCoverSilently,
+  logger,
+  BATCH_ANALYZE_CONCURRENCY
+})
+const handleBatchImportImages = batchImportCategoryActions.handleBatchImportImages
+const handleBatchImportComics = batchImportCategoryActions.handleBatchImportComics
+const handleBatchImportAsmrs = batchImportCategoryActions.handleBatchImportAsmrs
+const handleBatchImportAudioFiles = batchImportCategoryActions.handleBatchImportAudioFiles
+const handleBatchImportNovelFiles = batchImportCategoryActions.handleBatchImportNovelFiles
+const handleBatchImportVideoFiles = batchImportCategoryActions.handleBatchImportVideoFiles
+const handleBatchImportAnimeDirectories = batchImportCategoryActions.handleBatchImportAnimeDirectories
 
-    const result = await fetchAudioAlbumCover(payload)
-
-    const resultType = result?.type ?? 'info'
-    const resultMessage = result?.message ?? '操作完成'
-
-    if (resultType === 'success') {
-      const rawCandidates = Array.isArray(result?.data?.coverCandidates) ? result.data.coverCandidates : []
-      const resolvedCandidates = await Promise.all(
-        rawCandidates.map(async (candidate: any) => {
-          const coverPath = String(candidate?.coverPath ?? '').trim()
-          return {
-            label: String(candidate?.label ?? '').trim(),
-            coverPath,
-            previewSrc: await resolveCoverPreviewUrl(coverPath),
-            queryText: formatAudioCoverCandidateQuery(candidate?.query ?? {})
-          }
-        })
-      )
-
-      const availableCandidates = resolvedCandidates.filter((candidate) => candidate.coverPath && candidate.previewSrc)
-
-      if (availableCandidates.length) {
-        audioCoverCandidates.value = availableCandidates
-        showAudioCoverCandidateModal.value = true
-      } else if (result?.data?.coverPath) {
-        formData.value.coverPath = String(result.data.coverPath)
-      }
-    }
-
-    showNotifyByType(resultType, '获取专辑封面', resultMessage)
-  } catch (error) {
-    showNotifyByType('error', '获取专辑封面', error instanceof Error ? error.message : '获取专辑封面失败')
-  }
+const batchImportWorkflow = useCategoryBatchImportWorkflow({
+  categoryId,
+  currentPage,
+  resourceList,
+  totalResources,
+  categorySettings,
+  detailIsManga,
+  detailIsAsmr,
+  isSingleImageCategory,
+  isAudioCategory,
+  isNovelCategory,
+  isVideoCategory,
+  isVideoFolderCategory,
+  batchImportItems,
+  batchImportFetchInfoEnabled,
+  isBatchImportSubmitting,
+  batchProgressRunning,
+  ensureBatchImportState,
+  patchBatchImportState,
+  syncBatchImportOngoingCenter,
+  clearBatchImportOngoingCenter,
+  handleBatchImportRunInBackground,
+  getResourceNameFromBasePath,
+  isBatchImportItemImportable,
+  showNotifyByType,
+  fetchData: async () => {
+    await fetchData()
+  },
+  resetCategoryListState,
+  logger,
+  handleBatchImportImages,
+  handleBatchImportComics,
+  handleBatchImportAsmrs,
+  handleBatchImportAudioFiles,
+  handleBatchImportNovelFiles,
+  handleBatchImportVideoFiles,
+  handleBatchImportAnimeDirectories,
+  BATCH_ANALYZE_CONCURRENCY
+})
+const handleBatchImportClick = batchImportWorkflow.handleBatchImportClick
+const handleBatchImportMaskClick = batchImportWorkflow.handleBatchImportMaskClick
+const handleSelectBatchLaunchFile = batchImportWorkflow.handleSelectBatchLaunchFile
+const handleBatchImportSelectAll = batchImportWorkflow.handleBatchImportSelectAll
+const handleBatchImportDeselectAll = batchImportWorkflow.handleBatchImportDeselectAll
+const handleBatchImportInvert = batchImportWorkflow.handleBatchImportInvert
+const canToggleBatchImportItem = batchImportWorkflow.canToggleBatchImportItem
+const handleToggleBatchImportItem = batchImportWorkflow.handleToggleBatchImportItem
+const handleConfirmBatchImport = batchImportWorkflow.handleConfirmBatchImport
+const handleBatchImportLoadingShowUpdate = (value: boolean) => {
+  showBatchImportLoading.value = value
 }
-
-const analyzeBatchImportAsmrDirectories = async (targetCategoryId: string, directoryPaths: string[]) => {
-  const items: any[] = new Array(directoryPaths.length)
-  let nextIndex = 0
-  let completedCount = 0
-
-  const updateAnalyzeProgress = (directoryPath?: string, index?: number) => {
-    const currentDirectoryName = getResourceNameFromBasePath(directoryPath || '') || directoryPath || '正在准备分析目录'
-    const currentIndex = typeof index === 'number'
-      ? Math.min(directoryPaths.length, index + 1)
-      : Math.min(directoryPaths.length, completedCount + 1)
-
-    patchBatchImportState(targetCategoryId, {
-      analyzeCurrent: completedCount,
-      analyzeMessage: `正在分析第 ${currentIndex} / ${directoryPaths.length} 个音声目录\n${currentDirectoryName}`
-    })
-    syncBatchImportOngoingCenter()
-  }
-
-  const worker = async () => {
-    while (!ensureBatchImportState(targetCategoryId).analyzeCancelled) {
-      const currentIndex = nextIndex
-      nextIndex += 1
-
-      if (currentIndex >= directoryPaths.length) {
-        return
-      }
-
-      const directoryPath = directoryPaths[currentIndex]
-      const directoryName = getResourceNameFromBasePath(directoryPath)
-      updateAnalyzeProgress(directoryName || directoryPath, currentIndex)
-
-      try {
-        const analysisResult = await window.api.service.analyzeAsmrDirectory(directoryPath)
-        const analysisData = analysisResult?.data ?? {}
-        const audioCount = Math.max(0, Number(analysisData?.audioCount ?? 0))
-        items[currentIndex] = await enrichBatchImportItem({
-          directoryPath: String(analysisData?.directoryPath ?? directoryPath),
-          directoryName: String(analysisData?.directoryName ?? directoryName ?? ''),
-          coverPath: String(analysisData?.coverPath ?? ''),
-          audioCount,
-          exists: Boolean(analysisData?.exists),
-          existingResourceTitle: String(analysisData?.existingResourceTitle ?? ''),
-          gameId: String(analysisData?.gameId ?? ''),
-          websiteType: String(analysisData?.websiteType ?? ''),
-          checked: !analysisData?.exists && audioCount > 0,
-          errorMessage: analysisResult?.type === 'error' ? String(analysisResult?.message ?? '') : ''
-        })
-      } catch (error) {
-        items[currentIndex] = {
-          directoryPath,
-          directoryName,
-          coverPath: '',
-          audioCount: 0,
-          exists: false,
-          checked: false,
-          errorMessage: error instanceof Error ? error.message : '分析失败'
-        }
-      } finally {
-        completedCount += 1
-        patchBatchImportState(targetCategoryId, {
-          analyzeCurrent: completedCount
-        })
-        syncBatchImportOngoingCenter()
-      }
-    }
-  }
-
-  const workerCount = Math.min(directoryPaths.length, BATCH_ANALYZE_CONCURRENCY)
-  await Promise.all(Array.from({ length: workerCount }, () => worker()))
-
-  return items.filter(Boolean)
+const handleBatchImportPreviewShowUpdate = (value: boolean) => {
+  showBatchImportModal.value = value
 }
-
-const handleBatchImportAsmrs = async () => {
-  const targetCategoryId = categoryId.value
-  const currentState = ensureBatchImportState(targetCategoryId)
-
-  if (currentState.analyzeRunning || currentState.importRunning) {
-    patchBatchImportState(targetCategoryId, {
-      analyzeInBackground: false,
-      analyzeToastDismissed: false,
-      showLoading: true
-    })
-    syncBatchImportOngoingCenter(targetCategoryId)
+const handleBatchImportFetchInfoEnabledUpdate = (value: boolean) => {
+  batchImportFetchInfoEnabled.value = Boolean(value)
+}
+const handleBatchImportItemCheckedChange = (index: number, value: boolean) => {
+  if (!batchImportItems.value[index]) {
     return
   }
 
-  try {
-    const directoryPaths = await window.api.dialog.selectFolders()
-    if (!directoryPaths?.length) {
-      return
-    }
-
-    patchBatchImportState(targetCategoryId, {
-      items: [],
-      fetchInfoEnabled: true,
-      analyzeTotal: directoryPaths.length,
-      analyzeCurrent: 0,
-      analyzeMessage: '正在分析音声目录，请稍候...',
-      analyzeCancelled: false,
-      analyzeInBackground: false,
-      analyzeToastDismissed: false,
-      analyzeRunning: true,
-      importRunning: false,
-      showLoading: true,
-      showPreview: false
-    })
-    syncBatchImportOngoingCenter(targetCategoryId)
-
-    const items = await analyzeBatchImportAsmrDirectories(targetCategoryId, directoryPaths)
-
-    patchBatchImportState(targetCategoryId, {
-      items,
-      showPreview: items.length > 0,
-      showLoading: false
-    })
-
-    if (!items.length && ensureBatchImportState(targetCategoryId).analyzeCancelled) {
-      showNotifyByType('info', '批量导入音声', '已停止分析')
-    }
-  } finally {
-    patchBatchImportState(targetCategoryId, {
-      analyzeRunning: false,
-      analyzeInBackground: false,
-      showLoading: false,
-      analyzeToastDismissed: false
-    })
-    clearBatchImportOngoingCenter(targetCategoryId)
-  }
+  batchImportItems.value[index].checked = value
 }
-
-const handleBatchImportImages = async () => {
-  try {
-    const extensions = [...(categorySettings.value.extensions ?? [])]
-    const filePaths = await window.api.dialog.selectFiles(extensions)
-
-    if (!Array.isArray(filePaths) || !filePaths.length) {
-      return
-    }
-
-    const imageSiteOptions = await window.api.db.getSelectDictData(DictType.IMAGE_SITE_TYPE)
-    const pixivWebsiteId = String(
-      imageSiteOptions.find((item: any) => String(item?.label ?? '').trim().toLowerCase() === 'pixiv')?.value ?? ''
-    ).trim()
-    const pixivMatches = filePaths
-      .map((item) => detectPixivIdFromFilePath(String(item ?? '').trim()))
-      .filter(Boolean)
-    const shouldFetchPixivInfo = pixivMatches.length > 0
-      ? await confirmDialog(
-          '批量导入图片',
-          `检测到 ${pixivMatches.length} 个文件名符合 Pixiv 格式，是否在导入时自动获取 Pixiv 信息？`
-        )
-      : false
-
-    let successCount = 0
-    let skippedCount = 0
-    let failedCount = 0
-    let pixivFetchedCount = 0
-
-    for (const filePath of filePaths) {
-      const normalizedPath = String(filePath ?? '').trim()
-      if (!normalizedPath) {
-        skippedCount += 1
-        continue
-      }
-
-      if (!validateBasePathExtension(normalizedPath)) {
-        skippedCount += 1
-        continue
-      }
-
-      const existsResult = await window.api.service.checkResourceExistsByPath(normalizedPath)
-      if (existsResult?.exists) {
-        skippedCount += 1
-        continue
-      }
-
-      if (existsResult?.type === 'error') {
-        failedCount += 1
-        continue
-      }
-
-      const pixivId = detectPixivIdFromFilePath(normalizedPath)
-      const fileStem = getFileNameWithoutExtension(normalizedPath)
-      const baseMeta = createEmptyMetaByType('single_image_meta') as unknown as ResourceMeta
-      let fetchedPixivData: any = null
-
-      if (shouldFetchPixivInfo && pixivId && pixivWebsiteId) {
-        const fetchResult = await window.api.service.fetchResourceInfo(pixivWebsiteId, pixivId)
-        if (fetchResult?.type === 'success' || fetchResult?.type === 'warning') {
-          fetchedPixivData = fetchResult?.data ?? null
-          if (fetchResult?.type === 'success') {
-            pixivFetchedCount += 1
-          }
-        }
-      }
-
-      const payload: ResourceForm = {
-        name: String(fetchedPixivData?.name ?? '').trim() || fileStem || getFileName(normalizedPath),
-        description: '',
-        coverPath: String(fetchedPixivData?.cover ?? '').trim() || normalizedPath,
-        basePath: normalizedPath,
-        author: String(fetchedPixivData?.author ?? '').trim(),
-        actors: [],
-        tags: Array.isArray(fetchedPixivData?.tag) ? fetchedPixivData.tag : [],
-        types: Array.isArray(fetchedPixivData?.type) ? fetchedPixivData.type : [],
-        categoryId: categoryInfo.value.id,
-        meta: {
-          ...baseMeta,
-          pixivId,
-          websiteType: pixivId ? pixivWebsiteId : '',
-          gameId: pixivId,
-          website: pixivId ? `https://www.pixiv.net/artworks/${pixivId}` : '',
-          format: String(normalizedPath.match(/\.([^.\\/]+)$/)?.[1] ?? '').toLowerCase()
-        }
-      }
-
-      const result = await window.api.service.saveResource(payload)
-      if (result?.type === 'error') {
-        failedCount += 1
-      } else {
-        successCount += 1
-      }
-    }
-
-    const notifyType = failedCount > 0 && successCount === 0 ? 'error' : 'success'
-    showNotifyByType(
-      notifyType,
-      '批量导入图片',
-      `导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}${shouldFetchPixivInfo ? `，获取 Pixiv 信息 ${pixivFetchedCount}` : ''}`
-    )
-
-    if (successCount > 0) {
-      await fetchData()
-    }
-  } catch (error) {
-    showNotifyByType('error', '批量导入图片', error instanceof Error ? error.message : '批量导入图片失败')
-  }
-}
-
-const buildBatchNovelResourcePayload = (filePath: string, analysis: any): ResourceForm => {
-  const fileStem = getFileNameWithoutExtension(filePath)
-  const novelMetaBase = createEmptyMetaByType('novel_meta') as unknown as ResourceMeta
-  const isbn = String(analysis?.isbn ?? '').trim()
-  const coverDataUrl = String(analysis?.coverDataUrl ?? '').trim()
-
-  return {
-    name: fileStem || getFileName(filePath),
-    description: '',
-    coverPath: coverDataUrl,
-    basePath: String(filePath ?? '').trim(),
-    author: '',
-    authors: [],
-    actors: [],
-    tags: [],
-    types: [],
-    categoryId: categoryInfo.value.id,
-    meta: {
-      ...novelMetaBase,
-      isbn,
-      lastReadPercent: 0
-    }
-  }
-}
-
-const handleBatchImportNovelFiles = async () => {
-  const targetCategoryId = categoryId.value
-  const currentState = ensureBatchImportState(targetCategoryId)
-
-  if (currentState.analyzeRunning || currentState.importRunning) {
-    patchBatchImportState(targetCategoryId, {
-      analyzeInBackground: false,
-      analyzeToastDismissed: false,
-      showLoading: true
-    })
-    syncBatchImportOngoingCenter(targetCategoryId)
+const handleBatchImportItemWebsiteTypeChange = (index: number, value: string) => {
+  if (!batchImportItems.value[index]) {
     return
   }
 
-  try {
-    const extensions = [...(categorySettings.value.extensions ?? [])]
-    const filePaths = await window.api.dialog.selectFiles(extensions)
-
-    if (!Array.isArray(filePaths) || !filePaths.length) {
-      return
-    }
-
-    patchBatchImportState(targetCategoryId, {
-      items: [],
-      fetchInfoEnabled: false,
-      analyzeTotal: filePaths.length,
-      analyzeCurrent: 0,
-      analyzeMessage: '正在准备导入小说，请稍候...',
-      analyzeCancelled: false,
-      analyzeInBackground: false,
-      analyzeToastDismissed: false,
-      analyzeRunning: false,
-      importRunning: true,
-      showLoading: true,
-      showPreview: false
-    })
-    syncBatchImportOngoingCenter(targetCategoryId)
-
-    let successCount = 0
-    let skippedCount = 0
-    let failedCount = 0
-
-    for (const [index, rawFilePath] of filePaths.entries()) {
-      if (ensureBatchImportState(targetCategoryId).analyzeCancelled) {
-        break
-      }
-
-      const filePath = String(rawFilePath ?? '').trim()
-      const fileName = getFileName(filePath) || filePath || '未知文件'
-      patchBatchImportState(targetCategoryId, {
-        analyzeCurrent: index,
-        analyzeMessage: `正在导入第 ${index + 1} / ${filePaths.length} 个小说\n${fileName}`
-      })
-      syncBatchImportOngoingCenter(targetCategoryId)
-
-      if (!filePath || !validateBasePathExtension(filePath)) {
-        skippedCount += 1
-        continue
-      }
-
-      const existsResult = await window.api.service.checkResourceExistsByPath(filePath)
-      if (existsResult?.exists) {
-        skippedCount += 1
-        continue
-      }
-
-      if (existsResult?.type === 'error') {
-        failedCount += 1
-        continue
-      }
-
-      let analysis: any = {}
-      try {
-        const analysisResult = await window.api.service.analyzeNovelFilePath(filePath)
-        analysis = analysisResult?.data ?? {}
-      } catch {
-        analysis = {}
-      }
-
-      const payload = buildBatchNovelResourcePayload(filePath, analysis)
-      const result = await window.api.service.saveResource(payload)
-      if (result?.type === 'error') {
-        failedCount += 1
-      } else {
-        successCount += 1
-      }
-    }
-
-    patchBatchImportState(targetCategoryId, {
-      analyzeCurrent: filePaths.length,
-      analyzeMessage: '小说批量导入完成'
-    })
-
-    const stopped = ensureBatchImportState(targetCategoryId).analyzeCancelled
-    const notifyType = failedCount > 0 && successCount === 0 ? 'error' : stopped ? 'warning' : 'success'
-    showNotifyByType(
-      notifyType,
-      '批量导入小说',
-      `${stopped ? '已停止，' : ''}导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}`
-    )
-
-    if (successCount > 0) {
-      await fetchData()
-    }
-  } catch (error) {
-    showNotifyByType('error', '批量导入小说', error instanceof Error ? error.message : '批量导入小说失败')
-  } finally {
-    patchBatchImportState(targetCategoryId, {
-      importRunning: false,
-      showLoading: false,
-      analyzeInBackground: false,
-      analyzeToastDismissed: false
-    })
-    clearBatchImportOngoingCenter(targetCategoryId)
-  }
+  batchImportItems.value[index].websiteType = String(value ?? '')
 }
-
-const buildBatchVideoResourcePayload = (filePath: string): ResourceForm => {
-  const fileStem = getFileNameWithoutExtension(filePath)
-  const videoMetaBase = createEmptyMetaByType('video_meta') as unknown as ResourceMeta
-
-  return {
-    name: fileStem || getFileName(filePath),
-    description: '',
-    coverPath: '',
-    basePath: String(filePath ?? '').trim(),
-    author: '',
-    authors: [],
-    actors: [],
-    tags: [],
-    types: [],
-    categoryId: categoryInfo.value.id,
-    meta: {
-      ...videoMetaBase,
-      year: null,
-      lastPlayFile: '',
-      lastPlayTime: 0
-    }
-  }
-}
-
-const handleBatchImportVideoFiles = async () => {
-  const targetCategoryId = categoryId.value
-  const currentState = ensureBatchImportState(targetCategoryId)
-
-  if (currentState.analyzeRunning || currentState.importRunning) {
-    patchBatchImportState(targetCategoryId, {
-      analyzeInBackground: false,
-      analyzeToastDismissed: false,
-      showLoading: true
-    })
-    syncBatchImportOngoingCenter(targetCategoryId)
+const handleBatchImportItemGameIdChange = (index: number, value: string) => {
+  if (!batchImportItems.value[index]) {
     return
   }
 
-  try {
-    const extensions = [...(categorySettings.value.extensions ?? [])]
-    const filePaths = await window.api.dialog.selectFiles(extensions)
-
-    if (!Array.isArray(filePaths) || !filePaths.length) {
-      return
-    }
-
-    patchBatchImportState(targetCategoryId, {
-      items: [],
-      fetchInfoEnabled: false,
-      analyzeTotal: filePaths.length,
-      analyzeCurrent: 0,
-      analyzeMessage: '正在准备导入电影，请稍候...',
-      analyzeCancelled: false,
-      analyzeInBackground: false,
-      analyzeToastDismissed: false,
-      analyzeRunning: false,
-      importRunning: true,
-      showLoading: true,
-      showPreview: false
-    })
-    syncBatchImportOngoingCenter(targetCategoryId)
-
-    let successCount = 0
-    let skippedCount = 0
-    let failedCount = 0
-
-    for (const [index, rawFilePath] of filePaths.entries()) {
-      if (ensureBatchImportState(targetCategoryId).analyzeCancelled) {
-        break
-      }
-
-      const filePath = String(rawFilePath ?? '').trim()
-      const fileName = getFileName(filePath) || filePath || '未知文件'
-      patchBatchImportState(targetCategoryId, {
-        analyzeCurrent: index,
-        analyzeMessage: `正在导入第 ${index + 1} / ${filePaths.length} 个电影\n${fileName}`
-      })
-      syncBatchImportOngoingCenter(targetCategoryId)
-
-      if (!filePath || !validateBasePathExtension(filePath)) {
-        skippedCount += 1
-        continue
-      }
-
-      const existsResult = await window.api.service.checkResourceExistsByPath(filePath)
-      if (existsResult?.exists) {
-        skippedCount += 1
-        continue
-      }
-
-      if (existsResult?.type === 'error') {
-        failedCount += 1
-        continue
-      }
-
-      const result = await window.api.service.saveResource(buildBatchVideoResourcePayload(filePath))
-      if (result?.type === 'error') {
-        failedCount += 1
-      } else {
-        successCount += 1
-      }
-    }
-
-    patchBatchImportState(targetCategoryId, {
-      analyzeCurrent: filePaths.length,
-      analyzeMessage: '电影批量导入完成'
-    })
-
-    const stopped = ensureBatchImportState(targetCategoryId).analyzeCancelled
-    const notifyType = failedCount > 0 && successCount === 0 ? 'error' : stopped ? 'warning' : 'success'
-    showNotifyByType(
-      notifyType,
-      '批量导入电影',
-      `${stopped ? '已停止，' : ''}导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}`
-    )
-
-    if (successCount > 0) {
-      await fetchData()
-    }
-  } catch (error) {
-    showNotifyByType('error', '批量导入电影', error instanceof Error ? error.message : '批量导入电影失败')
-  } finally {
-    patchBatchImportState(targetCategoryId, {
-      importRunning: false,
-      showLoading: false,
-      analyzeInBackground: false,
-      analyzeToastDismissed: false
-    })
-    clearBatchImportOngoingCenter(targetCategoryId)
-  }
-}
-
-const buildBatchAnimeResourcePayload = (directoryPath: string): ResourceForm => {
-  const directoryName = getResourceNameFromBasePath(directoryPath)
-  const videoMetaBase = createEmptyMetaByType('video_meta') as unknown as ResourceMeta
-
-  return {
-    name: directoryName || getFileName(directoryPath) || String(directoryPath ?? '').trim(),
-    description: '',
-    coverPath: '',
-    basePath: String(directoryPath ?? '').trim(),
-    author: '',
-    authors: [],
-    actors: [],
-    tags: [],
-    types: [],
-    categoryId: categoryInfo.value.id,
-    meta: {
-      ...videoMetaBase,
-      year: null,
-      lastPlayFile: '',
-      lastPlayTime: 0
-    }
-  }
-}
-
-const handleBatchImportAnimeDirectories = async () => {
-  const targetCategoryId = categoryId.value
-  const currentState = ensureBatchImportState(targetCategoryId)
-
-  if (currentState.analyzeRunning || currentState.importRunning) {
-    patchBatchImportState(targetCategoryId, {
-      analyzeInBackground: false,
-      analyzeToastDismissed: false,
-      showLoading: true
-    })
-    syncBatchImportOngoingCenter(targetCategoryId)
-    return
-  }
-
-  try {
-    const directoryPaths = await window.api.dialog.selectFolders()
-
-    if (!Array.isArray(directoryPaths) || !directoryPaths.length) {
-      return
-    }
-
-    patchBatchImportState(targetCategoryId, {
-      items: [],
-      fetchInfoEnabled: false,
-      analyzeTotal: directoryPaths.length,
-      analyzeCurrent: 0,
-      analyzeMessage: '正在准备导入番剧，请稍候...',
-      analyzeCancelled: false,
-      analyzeInBackground: false,
-      analyzeToastDismissed: false,
-      analyzeRunning: false,
-      importRunning: true,
-      showLoading: true,
-      showPreview: false
-    })
-    syncBatchImportOngoingCenter(targetCategoryId)
-
-    let successCount = 0
-    let skippedCount = 0
-    let failedCount = 0
-
-    for (const [index, rawDirectoryPath] of directoryPaths.entries()) {
-      if (ensureBatchImportState(targetCategoryId).analyzeCancelled) {
-        break
-      }
-
-      const directoryPath = String(rawDirectoryPath ?? '').trim()
-      const directoryName = getResourceNameFromBasePath(directoryPath) || directoryPath || '未知目录'
-      patchBatchImportState(targetCategoryId, {
-        analyzeCurrent: index,
-        analyzeMessage: `正在导入第 ${index + 1} / ${directoryPaths.length} 个番剧\n${directoryName}`
-      })
-      syncBatchImportOngoingCenter(targetCategoryId)
-
-      if (!directoryPath || !validateBasePathExtension(directoryPath)) {
-        skippedCount += 1
-        continue
-      }
-
-      const existsResult = await window.api.service.checkResourceExistsByPath(directoryPath)
-      if (existsResult?.exists) {
-        skippedCount += 1
-        continue
-      }
-
-      if (existsResult?.type === 'error') {
-        failedCount += 1
-        continue
-      }
-
-      const result = await window.api.service.saveResource(buildBatchAnimeResourcePayload(directoryPath))
-      if (result?.type === 'error') {
-        failedCount += 1
-      } else {
-        successCount += 1
-      }
-    }
-
-    patchBatchImportState(targetCategoryId, {
-      analyzeCurrent: directoryPaths.length,
-      analyzeMessage: '番剧批量导入完成'
-    })
-
-    const stopped = ensureBatchImportState(targetCategoryId).analyzeCancelled
-    const notifyType = failedCount > 0 && successCount === 0 ? 'error' : stopped ? 'warning' : 'success'
-    showNotifyByType(
-      notifyType,
-      '批量导入番剧',
-      `${stopped ? '已停止，' : ''}导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}`
-    )
-
-    if (successCount > 0) {
-      await fetchData()
-    }
-  } catch (error) {
-    showNotifyByType('error', '批量导入番剧', error instanceof Error ? error.message : '批量导入番剧失败')
-  } finally {
-    patchBatchImportState(targetCategoryId, {
-      importRunning: false,
-      showLoading: false,
-      analyzeInBackground: false,
-      analyzeToastDismissed: false
-    })
-    clearBatchImportOngoingCenter(targetCategoryId)
-  }
-}
-
-const buildBatchAudioResourcePayload = (filePath: string, analysis: any, coverPath: string, lyricsPath: string): ResourceForm => {
-  const authorNames = normalizeAudioAuthorList([
-    ...(Array.isArray(analysis?.artists) ? analysis.artists : []),
-    String(analysis?.artist ?? '').trim()
-  ])
-  const artistDisplayName = joinAudioAuthorNames(authorNames) || String(analysis?.artist ?? '').trim()
-  const fileStem = getFileNameWithoutExtension(filePath)
-  const audioMetaBase = createEmptyMetaByType('audio_meta') as unknown as ResourceMeta
-
-  return {
-    name: String(analysis?.name ?? '').trim() || fileStem || getFileName(filePath),
-    description: '',
-    coverPath: String(coverPath ?? '').trim(),
-    basePath: String(filePath ?? '').trim(),
-    author: artistDisplayName,
-    authors: authorNames,
-    actors: [],
-    tags: [],
-    types: [],
-    categoryId: categoryInfo.value.id,
-    meta: {
-      ...audioMetaBase,
-      artist: artistDisplayName,
-      album: String(analysis?.album ?? '').trim(),
-      lyricsPath: String(lyricsPath ?? '').trim(),
-      duration: Number.isFinite(Number(analysis?.duration)) ? Math.max(0, Math.floor(Number(analysis.duration))) : 0,
-      bitrate: Number.isFinite(Number(analysis?.bitrate)) ? Number(analysis.bitrate) : null,
-      sampleRate: Number.isFinite(Number(analysis?.sampleRate)) ? Number(analysis.sampleRate) : null
-    }
-  }
-}
-
-const runBatchImportAudioAssetBackfill = async (tasks: Array<{
-  resourceId: string
-  filePath: string
-  analysis: any
-  shouldFetchLyrics: boolean
-  shouldFetchCover: boolean
-}>) => {
-  if (!tasks.length) {
-    return {
-      fetchedLyricsCount: 0,
-      fetchedCoverCount: 0,
-      failedLyricsCount: 0,
-      failedCoverCount: 0
-    }
-  }
-
-  let fetchedLyricsCount = 0
-  let fetchedCoverCount = 0
-  let failedLyricsCount = 0
-  let failedCoverCount = 0
-
-  for (const task of tasks) {
-    const resourceId = String(task?.resourceId ?? '').trim()
-    const filePath = String(task?.filePath ?? '').trim()
-    const analysis = task?.analysis
-
-    if (!resourceId || !filePath) {
-      continue
-    }
-
-    try {
-      const detailResult = await window.api.service.getResourceDetail(resourceId)
-      const detail = detailResult?.data
-      if (!detail) {
-        logger.warn('batch import audio: backfill skipped missing detail', {
-          resourceId,
-          filePath
-        })
-        continue
-      }
-
-      const detailFormData = cloneFormData(mapResourceDetailToFormData(detail))
-      let hasChanges = false
-
-      if (task.shouldFetchLyrics && !String(detailFormData?.meta?.lyricsPath ?? '').trim()) {
-        const lyricsResult = await fetchAudioLyricsSilently(buildAudioFetchPayload(filePath, analysis))
-        logger.info('batch import audio: async fetch lyrics result', {
-          resourceId,
-          filePath,
-          lyricsResult
-        })
-        if (lyricsResult?.type === 'success' && lyricsResult?.data?.lyricsPath) {
-          detailFormData.meta = {
-            ...(detailFormData.meta ?? {}),
-            lyricsPath: String(lyricsResult.data.lyricsPath)
-          }
-          fetchedLyricsCount += 1
-          hasChanges = true
-        } else if (lyricsResult?.type === 'error') {
-          failedLyricsCount += 1
-        }
-      }
-
-      if (task.shouldFetchCover && !String(detailFormData?.coverPath ?? '').trim()) {
-        const coverResult = await fetchAudioAlbumCoverSilently(buildAudioFetchPayload(filePath, analysis))
-        logger.info('batch import audio: async fetch cover result', {
-          resourceId,
-          filePath,
-          coverResult
-        })
-        if (coverResult?.type === 'success' && coverResult?.data?.coverPath) {
-          detailFormData.coverPath = String(coverResult.data.coverPath)
-          fetchedCoverCount += 1
-          hasChanges = true
-        } else if (coverResult?.type === 'error') {
-          failedCoverCount += 1
-        }
-      }
-
-      if (!hasChanges) {
-        continue
-      }
-
-      syncAudioAuthorFields(detailFormData)
-      detailFormData.categoryId = categoryInfo.value.id
-      const updatePayload = cloneFormData(detailFormData)
-      const updateResult = await window.api.service.updateResource(resourceId, updatePayload, {
-        silent: true
-      })
-      logger.info('batch import audio: async update result', {
-        resourceId,
-        filePath,
-        updateResult
-      })
-      if (updateResult?.type === 'error') {
-        if (String(updatePayload?.meta?.lyricsPath ?? '').trim()) {
-          failedLyricsCount += 1
-        }
-        if (String(updatePayload?.coverPath ?? '').trim()) {
-          failedCoverCount += 1
-        }
-      }
-    } catch (error) {
-      logger.error('batch import audio: async asset backfill failed', {
-        resourceId,
-        filePath,
-        error: error instanceof Error ? error.message : error
-      })
-      if (task.shouldFetchLyrics) {
-        failedLyricsCount += 1
-      }
-      if (task.shouldFetchCover) {
-        failedCoverCount += 1
-      }
-    }
-  }
-
-  return {
-    fetchedLyricsCount,
-    fetchedCoverCount,
-    failedLyricsCount,
-    failedCoverCount
-  }
-}
-
-const handleBatchImportAudioFiles = async () => {
-  try {
-    const extensions = [...(categorySettings.value.extensions ?? [])]
-    logger.info('batch import audio: selecting files', {
-      categoryId: categoryId.value,
-      extensions
-    })
-    const filePaths = await window.api.dialog.selectFiles(extensions)
-    if (!Array.isArray(filePaths) || !filePaths.length) {
-      logger.info('batch import audio: selection cancelled')
-      return
-    }
-
-    logger.info('batch import audio: selected files', {
-      count: filePaths.length,
-      filePaths
-    })
-
-    const analyses = await Promise.all(filePaths.map(async (filePath) => ({
-      filePath: String(filePath ?? '').trim(),
-      analysis: await window.api.service.analyzeAudioFilePath(String(filePath ?? '').trim())
-    })))
-
-    const validItems = analyses.filter((item) => item.filePath && item.analysis)
-    const invalidItems = analyses.filter((item) => !item.filePath || !item.analysis).map((item) => item.filePath)
-    logger.info('batch import audio: analyses completed', {
-      selectedCount: filePaths.length,
-      validCount: validItems.length,
-      invalidCount: invalidItems.length,
-      invalidItems
-    })
-    const missingLyricsCount = validItems.filter((item) => !String(item.analysis?.lyricsPath ?? '').trim()).length
-    const missingCoverCount = validItems.filter((item) => !String(item.analysis?.embeddedCoverPath ?? '').trim()).length
-
-    const shouldFetchLyrics = missingLyricsCount > 0
-      ? await confirmDialog('批量获取歌词', `有 ${missingLyricsCount} 首音乐未匹配到同名歌词文件，是否尝试自动获取歌词？`)
-      : false
-    const shouldFetchCover = missingCoverCount > 0
-      ? await confirmDialog('批量获取封面', `有 ${missingCoverCount} 首音乐未检测到文件内嵌封面，是否尝试自动获取专辑封面？`)
-      : false
-
-    logger.info('batch import audio: fetch strategy decided', {
-      missingLyricsCount,
-      missingCoverCount,
-      shouldFetchLyrics,
-      shouldFetchCover
-    })
-
-    let successCount = 0
-    let skippedCount = 0
-    let failedCount = 0
-    const backgroundAssetTasks: Array<{
-      resourceId: string
-      filePath: string
-      analysis: any
-      shouldFetchLyrics: boolean
-      shouldFetchCover: boolean
-    }> = []
-
-    for (const item of validItems) {
-      const filePath = item.filePath
-      const analysis = item.analysis
-      logger.info('batch import audio: processing item start', {
-        filePath,
-        title: String(analysis?.name ?? '').trim(),
-        artist: String(analysis?.artist ?? '').trim(),
-        album: String(analysis?.album ?? '').trim(),
-        lyricsPath: String(analysis?.lyricsPath ?? '').trim(),
-        embeddedCoverPath: String(analysis?.embeddedCoverPath ?? '').trim()
-      })
-      const existsResult = await window.api.service.checkResourceExistsByPath(filePath)
-      logger.info('batch import audio: exists check result', {
-        filePath,
-        existsResult
-      })
-      if (existsResult?.exists) {
-        skippedCount += 1
-        logger.info('batch import audio: skipped existing resource', {
-          filePath
-        })
-        continue
-      }
-
-      if (existsResult?.type === 'error') {
-        failedCount += 1
-        logger.error('batch import audio: exists check failed', {
-          filePath,
-          existsResult
-        })
-        continue
-      }
-
-      let lyricsPath = String(analysis?.lyricsPath ?? '').trim()
-      let coverPath = String(analysis?.embeddedCoverPath ?? '').trim()
-      const payload = buildBatchAudioResourcePayload(filePath, analysis, coverPath, lyricsPath)
-      logger.info('batch import audio: save payload prepared', {
-        filePath,
-        payload: {
-          name: payload.name,
-          basePath: payload.basePath,
-          author: payload.author,
-          authors: payload.authors,
-          coverPath: payload.coverPath,
-          categoryId: payload.categoryId,
-          meta: payload.meta
-        }
-      })
-      const result = await window.api.service.saveResource(payload)
-      logger.info('batch import audio: save result', {
-        filePath,
-        result
-      })
-      if (result?.type === 'error') {
-        failedCount += 1
-        logger.error('batch import audio: save failed', {
-          filePath,
-          result
-        })
-      } else {
-        successCount += 1
-        const savedResourceId = String(result?.data?.resourceId ?? '').trim()
-        const needsLyricsBackfill = !lyricsPath && shouldFetchLyrics
-        const needsCoverBackfill = !coverPath && shouldFetchCover
-        if (savedResourceId && (needsLyricsBackfill || needsCoverBackfill)) {
-          backgroundAssetTasks.push({
-            resourceId: savedResourceId,
-            filePath,
-            analysis,
-            shouldFetchLyrics: needsLyricsBackfill,
-            shouldFetchCover: needsCoverBackfill
-          })
-          logger.info('batch import audio: queued async asset backfill', {
-            resourceId: savedResourceId,
-            filePath,
-            needsLyricsBackfill,
-            needsCoverBackfill
-          })
-        }
-      }
-    }
-
-    logger.info('batch import audio: finished', {
-      successCount,
-      skippedCount,
-      failedCount,
-      queuedBackfillCount: backgroundAssetTasks.length
-    })
-
-    if (successCount > 0) {
-      await fetchData()
-    }
-
-    const notifyType = failedCount > 0 && successCount === 0 ? 'error' : 'success'
-    showNotifyByType(
-      notifyType,
-      '批量导入音乐',
-      backgroundAssetTasks.length
-        ? `导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}。歌词与封面正在后台获取。`
-        : `导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}`
-    )
-
-    if (backgroundAssetTasks.length) {
-      void (async () => {
-        const backfillResult = await runBatchImportAudioAssetBackfill(backgroundAssetTasks)
-        logger.info('batch import audio: async asset backfill finished', backfillResult)
-        if (backfillResult.fetchedLyricsCount > 0 || backfillResult.fetchedCoverCount > 0) {
-          await fetchData()
-        }
-        showNotifyByType(
-          backfillResult.failedLyricsCount > 0 || backfillResult.failedCoverCount > 0 ? 'warning' : 'success',
-          '批量获取音乐资源',
-          `后台处理完成：获取歌词 ${backfillResult.fetchedLyricsCount}，获取封面 ${backfillResult.fetchedCoverCount}${backfillResult.failedLyricsCount > 0 ? `，歌词失败 ${backfillResult.failedLyricsCount}` : ''}${backfillResult.failedCoverCount > 0 ? `，封面失败 ${backfillResult.failedCoverCount}` : ''}`
-        )
-      })()
-    }
-  } catch (error) {
-    logger.error('batch import audio: fatal error', error)
-    showNotifyByType('error', '批量导入音乐', error instanceof Error ? error.message : '批量导入音乐失败')
-  }
-}
-
-const applyMultiImageDirectoryAnalysis = async (basePath: string) => {
-  if (categorySettings.value.extendTable !== 'multi_image_meta') {
-    return
-  }
-
-  try {
-    const result = await window.api.service.analyzeMultiImageDirectory(basePath)
-    const directoryName = String(result?.data?.directoryName ?? '').trim()
-    const coverPath = String(result?.data?.coverPath ?? '').trim()
-
-    if (directoryName) {
-      formData.value.name = directoryName
-    }
-
-    if (coverPath) {
-      formData.value.coverPath = coverPath
-    } else {
-      formData.value.coverPath = ''
-    }
-  } catch {
-    formData.value.coverPath = ''
-  }
-}
-
-const handleBatchImportMaskClick = () => {
-  if (!batchProgressRunning.value) {
-    return
-  }
-
-  handleBatchImportRunInBackground()
-}
-
-const handleBatchImportRunInBackground = () => {
-  if (!batchProgressRunning.value) {
-    return
-  }
-
-  batchAnalyzeInBackground.value = true
-  batchAnalyzeToastDismissed.value = false
-  showBatchImportLoading.value = false
-  syncBatchImportOngoingCenter()
-}
-
-const handleReopenBatchImportProgress = () => {
-  if (!batchProgressRunning.value) {
-    return
-  }
-
-  batchAnalyzeInBackground.value = false
-  batchAnalyzeToastDismissed.value = false
-  showBatchImportLoading.value = true
-  syncBatchImportOngoingCenter()
-}
-
-const handleDismissBatchImportProgressToast = () => {
-  batchAnalyzeToastDismissed.value = true
-}
-
-const handleStopBatchImportAnalysis = () => {
-  if (!batchProgressRunning.value) {
-    return
-  }
-
-  batchAnalyzeCancelled.value = true
-  batchAnalyzeMessage.value = batchProgressStage.value === 'import' ? '正在停止导入，请稍候...' : '正在停止分析，请稍候...'
-}
-
-watch(
-  [batchAnalyzeRunning, batchImportRunning, batchAnalyzeCurrent, batchAnalyzeTotal, batchAnalyzeMessage, batchAnalyzeInBackground],
-  () => {
-    if (batchProgressRunning.value) {
-      syncBatchImportOngoingCenter()
-    } else {
-      clearBatchImportOngoingCenter()
-    }
-  }
-)
-
-const handleCloseBatchImportModal = () => {
-  if (isBatchImportSubmitting.value) {
-    return
-  }
-
-  resetBatchImportState(categoryId.value)
-}
-
-const handleSelectBatchLaunchFile = (index: number) => {
-  void (async () => {
-    const item = batchImportItems.value[index]
-    if (!item?.directoryPath) {
-      return
-    }
-
-    try {
-      const selectedFilePath = await window.api.dialog.selectGameLaunchFile(item.directoryPath)
-      if (!selectedFilePath) {
-        return
-      }
-
-      const analysis = await window.api.service.analyzeGameDirectory(item.directoryPath, selectedFilePath)
-      batchImportItems.value[index] = await enrichBatchImportItem({
-        ...analysis,
-        checked: !analysis?.exists && !analysis?.errorMessage && !!analysis?.launchFilePath
-      })
-    } catch (error) {
-      showNotifyByType('error', '批量导入', error instanceof Error ? error.message : '手动选择启动文件失败')
-    }
-  })()
-}
-
-const handleBatchImportSelectAll = () => {
-  batchImportItems.value = batchImportItems.value.map((item) => ({
-    ...item,
-    checked: !item.exists && !item.errorMessage && isBatchImportItemImportable(item)
-  }))
-}
-
-const handleBatchImportDeselectAll = () => {
-  batchImportItems.value = batchImportItems.value.map((item) => ({
-    ...item,
-    checked: false
-  }))
-}
-
-const handleBatchImportInvert = () => {
-  batchImportItems.value = batchImportItems.value.map((item) => ({
-    ...item,
-    checked: !item.exists && !item.errorMessage && isBatchImportItemImportable(item)
-      ? !item.checked
-      : false
-  }))
-}
-
-const canToggleBatchImportItem = (item: any) =>
-  !item?.exists && !item?.errorMessage && isBatchImportItemImportable(item)
-
-const handleToggleBatchImportItem = (index: number) => {
-  const item = batchImportItems.value[index]
-  if (!canToggleBatchImportItem(item)) {
-    return
-  }
-
-  batchImportItems.value[index].checked = !batchImportItems.value[index].checked
-}
-
-const handleConfirmBatchImport = () => {
-  void (async () => {
-    const targetCategoryId = categoryId.value
-    const selectedItems = batchImportItems.value
-      .filter((item) => item.checked && isBatchImportItemImportable(item))
-      .map((item) => {
-        if (detailIsManga.value) {
-          return {
-            directoryPath: item.directoryPath,
-            fetchInfoEnabled: batchImportFetchInfoEnabled.value
-          }
-        }
-
-        if (detailIsAsmr.value) {
-          return {
-            directoryPath: item.directoryPath,
-            websiteType: item.websiteType,
-            gameId: item.gameId,
-            fetchInfoEnabled: batchImportFetchInfoEnabled.value
-          }
-        }
-
-        return {
-          directoryPath: item.directoryPath,
-          launchFilePath: item.launchFilePath,
-          websiteType: item.websiteType,
-          gameId: item.gameId,
-          fetchInfoEnabled: batchImportFetchInfoEnabled.value
-        }
-      })
-
-    if (!selectedItems.length) {
-      showNotifyByType('warning', '批量导入', '请至少选择一个可导入的目录')
-      return
-    }
-
-    try {
-      isBatchImportSubmitting.value = true
-      patchBatchImportState(targetCategoryId, {
-        importRunning: true,
-        showLoading: true,
-        showPreview: false,
-        analyzeTotal: selectedItems.length,
-        analyzeCurrent: 0,
-        analyzeMessage: '正在准备导入，请稍候...',
-        analyzeInBackground: false,
-        analyzeToastDismissed: false
-      })
-      syncBatchImportOngoingCenter(targetCategoryId)
-
-      const result = detailIsManga.value
-        ? await window.api.service.importBatchMultiImageDirectories(targetCategoryId, selectedItems)
-        : detailIsAsmr.value
-          ? await window.api.service.importBatchAsmrDirectories(targetCategoryId, selectedItems)
-          : await window.api.service.importBatchGameDirectories(targetCategoryId, selectedItems)
-      const resultType = result?.type ?? 'info'
-      const resultMessage = result?.message ?? '批量导入完成'
-      const resultItems = Array.isArray(result?.data) ? result.data : []
-
-      if (resultItems.length) {
-        const resultMap = new Map<string, any>(
-          resultItems.map((item: any) => [
-            detailIsManga.value || detailIsAsmr.value
-              ? String(item?.directoryPath ?? '').trim()
-              : `${String(item?.directoryPath ?? '').trim()}::${String(item?.launchFilePath ?? '').trim()}`,
-            item
-          ])
-        )
-
-        batchImportItems.value = batchImportItems.value.map((item) => {
-          const matchedResult = resultMap.get(
-            detailIsManga.value || detailIsAsmr.value
-              ? String(item?.directoryPath ?? '').trim()
-              : `${String(item?.directoryPath ?? '').trim()}::${String(item?.launchFilePath ?? '').trim()}`
-          )
-
-          if (!matchedResult) {
-            return item
-          }
-
-          return {
-            ...item,
-            checked: false,
-            exists: matchedResult.type === 'info' ? true : item.exists,
-            importResultType: String(matchedResult.type ?? 'info'),
-            importResultMessage: String(matchedResult.message ?? '处理完成')
-          }
-        })
-      }
-
-      showNotifyByType(resultType, '批量导入', resultMessage)
-
-      if (resultType !== 'error') {
-        await fetchData()
-      }
-    } catch (error) {
-      showNotifyByType('error', '批量导入', error instanceof Error ? error.message : '批量导入失败')
-    } finally {
-      isBatchImportSubmitting.value = false
-      patchBatchImportState(targetCategoryId, {
-        importRunning: false,
-        showLoading: false,
-        analyzeInBackground: false,
-        analyzeToastDismissed: false
-      })
-      clearBatchImportOngoingCenter(targetCategoryId)
-    }
-  })()
-}
-
-const handleCloseModal = () => {
-  showModal.value = false
-  editingResourceId.value = ''
-  editInitialFormData.value = null
-  closeVideoSubCoverCandidateModal()
-}
-
-const handleCloseEditDrawer = () => {
-  showEditModal.value = false
-  editingResourceId.value = ''
-  editInitialFormData.value = null
-  closeVideoSubCoverCandidateModal()
-}
-
-const handleResetEditForm = () => {
-  formData.value = createEmptyFormData()
-}
-
-const handleRestoreDefaultEditForm = () => {
-  if (!editInitialFormData.value) {
-    return
-  }
-
-  formData.value = cloneFormData(editInitialFormData.value)
-}
-
-const handleSubmitResource = async () => {
-  try {
-    await formRef.value?.validate()
-  } catch {
-    return
-  }
-
-  if (!validateBasePathExtension(formData.value.basePath)) {
-    return
-  }
-
-  if (String(categorySettings.value.extendTable ?? '').trim() === 'website_meta' && !normalizeWebsiteUrl(formData.value?.meta?.website)) {
-    showNotifyByType('warning', '添加资源', '请填写网站地址')
-    return
-  }
-
-  formData.value['categoryId'] = categoryInfo.value.id
-  syncAudioAuthorFields(formData.value)
-  if (String(categorySettings.value.extendTable ?? '').trim() === 'website_meta') {
-    formData.value.meta.website = normalizeWebsiteUrl(formData.value?.meta?.website)
-  }
-  const payload = cloneFormData(formData.value)
-  const isWebsiteSubmit = String(categorySettings.value.extendTable ?? '').trim() === 'website_meta'
-
-  if (isWebsiteSubmit) {
-    const draft = cloneFormData(formData.value)
-    handleCloseModal()
-    await nextTick()
-
-    void (async () => {
-      const result = await window.api.service.saveResource(payload)
-      const resultType = result?.type ?? 'info'
-      const resultMessage = result?.message ?? '操作完成'
-
-      showNotifyByType(resultType, '添加资源', resultMessage)
-
-      if (resultType !== 'error') {
-        void fetchData()
-        return
-      }
-
-      formData.value = draft
-      showModal.value = true
-      await nextTick()
-    })()
-    return
-  }
-
-  const result = await window.api.service.saveResource(payload)
-  const resultType = result?.type ?? 'info'
-  const resultMessage = result?.message ?? '操作完成'
-
-  showNotifyByType(resultType, '添加资源', resultMessage)
-
-  if (resultType !== 'error') {
-    handleCloseModal()
-    await nextTick()
-    void fetchData()
-  }
+  batchImportItems.value[index].gameId = value
 }
 
 const handleDragOver = (event: DragEvent) => {
@@ -5873,245 +2711,6 @@ const handleDragLeave = (event: DragEvent) => {
   }
 
   isDragOver.value = false
-}
-
-const handleDropResourceFile = (event: DragEvent) => {
-  void (async () => {
-    isDragOver.value = false
-
-    if (categorySettings.value.resourcePathType !== 'file') {
-      return
-    }
-
-    event.preventDefault()
-
-    const droppedFile = Array.from(event.dataTransfer?.files ?? [])[0]
-    const droppedPath = droppedFile
-      ? String(window.electron?.webUtils?.getPathForFile(droppedFile) ?? '').trim()
-      : ''
-
-    if (!droppedPath) {
-      showNotifyByType('warning', '拖拽添加', '未能读取拖入文件的路径，请确认拖入的是本地文件')
-      return
-    }
-
-    if (!validateBasePathExtension(droppedPath)) {
-      showNotifyByType('warning', '拖拽添加', getBasePathValidationMessage())
-      return
-    }
-
-    const existsResult = await window.api.service.checkResourceExistsByPath(droppedPath)
-    if (existsResult?.type === 'error') {
-      showNotifyByType('error', '拖拽添加', existsResult?.message ?? '检查资源是否存在失败')
-      return
-    }
-
-    if (existsResult?.exists) {
-      showNotifyByType('info', '拖拽添加', '该资源已存在，无需重复添加')
-      return
-    }
-
-    editingResourceId.value = ''
-    editInitialFormData.value = null
-    formData.value = createEmptyFormData()
-    formData.value.basePath = droppedPath
-    applyDefaultPathName(droppedPath)
-    await applyAudioPathAnalysis(droppedPath)
-    await applyAudioCoverAnalysis()
-    await applyGamePathAnalysis(droppedPath)
-    await applyNovelFileAnalysis(droppedPath)
-    await applyMultiImageDirectoryAnalysis(droppedPath)
-    showModal.value = true
-    await nextTick()
-    await basePathFormItemRef.value?.validate({ trigger: 'change' })
-  })()
-}
-
-const handleSubmitEditResource = async () => {
-  if (!editingResourceId.value) {
-    return
-  }
-
-  try {
-    await formRef.value?.validate()
-  } catch {
-    return
-  }
-
-  if (!validateBasePathExtension(formData.value.basePath)) {
-    return
-  }
-
-  if (String(categorySettings.value.extendTable ?? '').trim() === 'website_meta' && !normalizeWebsiteUrl(formData.value?.meta?.website)) {
-    showNotifyByType('warning', `修改${categoryName.value}`, '请填写网站地址')
-    return
-  }
-
-  formData.value.categoryId = categoryInfo.value.id
-  syncAudioAuthorFields(formData.value)
-  if (String(categorySettings.value.extendTable ?? '').trim() === 'website_meta') {
-    formData.value.meta.website = normalizeWebsiteUrl(formData.value?.meta?.website)
-  }
-  const payload = cloneFormData(formData.value)
-  const isWebsiteSubmit = String(categorySettings.value.extendTable ?? '').trim() === 'website_meta'
-
-  if (isWebsiteSubmit) {
-    const draft = cloneFormData(formData.value)
-    const currentEditingResourceId = editingResourceId.value
-    const shouldCloseDetailDrawer = showDetailDrawer.value && selectedDetailResource.value?.id === editingResourceId.value
-
-    handleCloseEditDrawer()
-    if (shouldCloseDetailDrawer) {
-      showDetailDrawer.value = false
-      selectedDetailResource.value = null
-    }
-    await nextTick()
-
-    void (async () => {
-      const result = await window.api.service.updateResource(currentEditingResourceId, payload)
-      const resultType = result?.type ?? 'info'
-      const resultMessage = result?.message ?? '操作完成'
-
-      showNotifyByType(resultType, `修改${categoryName.value}`, resultMessage)
-
-      if (resultType !== 'error') {
-        void fetchData()
-        return
-      }
-
-      editingResourceId.value = currentEditingResourceId
-      formData.value = draft
-      showEditModal.value = true
-      await nextTick()
-    })()
-    return
-  }
-
-  const result = await window.api.service.updateResource(editingResourceId.value, payload)
-  const resultType = result?.type ?? 'info'
-  const resultMessage = result?.message ?? '操作完成'
-
-  showNotifyByType(resultType, `修改${categoryName.value}`, resultMessage)
-
-  if (resultType !== 'error') {
-    handleCloseEditDrawer()
-    if (showDetailDrawer.value && selectedDetailResource.value?.id === editingResourceId.value) {
-      showDetailDrawer.value = false
-      selectedDetailResource.value = null
-    }
-    await nextTick()
-    void fetchData()
-  }
-}
-
-const handleUseScreenshotCover = async () => {
-  try {
-    const result = await window.api.service.captureCoverScreenshot(String(formData.value?.basePath ?? '').trim())
-    const resultType = result?.type ?? 'info'
-    const resultMessage = result?.message ?? '截图完成'
-
-    if (resultType === 'error' || resultType === 'warning') {
-      showNotifyByType(resultType, '封面截图', resultMessage)
-      return
-    }
-
-    const screenshotFilePath = String(result?.data?.filePath ?? '').trim()
-    if (!screenshotFilePath) {
-      showNotifyByType('warning', '封面截图', '截图成功，但未返回图片文件')
-      return
-    }
-
-    formData.value.coverPath = screenshotFilePath
-    showNotifyByType('success', '封面截图', resultMessage)
-  } catch (error) {
-    showNotifyByType('error', '封面截图', error instanceof Error ? error.message : '使用截图作为封面失败')
-  }
-}
-
-const handleUseVideoRandomFrameCover = async () => {
-  const basePath = String(formData.value?.basePath ?? '').trim()
-  if (!basePath) {
-    showNotifyByType('warning', '随机帧封面', isVideoFolderCategory.value ? '请先选择番剧目录' : '请先选择视频文件')
-    return
-  }
-
-  videoCoverFrameLoading.value = true
-  try {
-    if (isVideoFolderCategory.value) {
-      const result = await window.api.service.extractVideoSubCoverFrames(basePath)
-      const resultType = result?.type ?? 'info'
-      const resultMessage = result?.message ?? '番剧随机帧生成完成'
-
-      if (resultType === 'error' || resultType === 'warning') {
-        showNotifyByType(resultType, '随机帧封面', resultMessage)
-        return
-      }
-
-      const rawItems = Array.isArray(result?.data?.items) ? result.data.items : []
-      const resolvedItems = await Promise.all(rawItems.map(async (item: any) => {
-        const rawCandidates = Array.isArray(item?.coverCandidates) ? item.coverCandidates : []
-        const resolvedCandidates = await Promise.all(rawCandidates.map(async (candidate: any) => {
-          const coverPath = String(candidate?.coverPath ?? '').trim()
-          return {
-            label: String(candidate?.label ?? '').trim() || '随机帧',
-            coverPath,
-            previewSrc: await resolveCoverPreviewUrl(coverPath),
-            time: Math.max(0, Number(candidate?.time ?? 0))
-          }
-        }))
-
-        return {
-          fileName: String(item?.fileName ?? '').trim(),
-          relativePath: String(item?.relativePath ?? '').trim(),
-          candidates: resolvedCandidates.filter((candidate) => candidate.coverPath && candidate.previewSrc)
-        }
-      }))
-      const availableItems = resolvedItems.filter((item) => item.candidates.length)
-
-      if (!availableItems.length) {
-        showNotifyByType('warning', '随机帧封面', '已生成番剧随机帧，但预览加载失败')
-        return
-      }
-
-      videoSubCoverCandidateItems.value = availableItems
-      showVideoSubCoverCandidateModal.value = true
-      return
-    }
-
-    const result = await window.api.service.extractVideoCoverFrames(basePath)
-    const resultType = result?.type ?? 'info'
-    const resultMessage = result?.message ?? '随机帧生成完成'
-
-    if (resultType === 'error' || resultType === 'warning') {
-      showNotifyByType(resultType, '随机帧封面', resultMessage)
-      return
-    }
-
-    const rawCandidates = Array.isArray(result?.data?.coverCandidates) ? result.data.coverCandidates : []
-    const resolvedCandidates = await Promise.all(rawCandidates.map(async (candidate: any) => {
-      const coverPath = String(candidate?.coverPath ?? '').trim()
-      return {
-        label: String(candidate?.label ?? '').trim() || '随机帧',
-        coverPath,
-        previewSrc: await resolveCoverPreviewUrl(coverPath),
-        time: Math.max(0, Number(candidate?.time ?? 0)),
-        group: String(candidate?.group ?? '') === 'fixed' ? 'fixed' : 'random'
-      }
-    }))
-    const availableCandidates = resolvedCandidates.filter((candidate) => candidate.coverPath && candidate.previewSrc)
-
-    if (!availableCandidates.length) {
-      showNotifyByType('warning', '随机帧封面', '已生成随机帧，但预览加载失败')
-      return
-    }
-
-    videoCoverCandidates.value = availableCandidates
-    showVideoCoverCandidateModal.value = true
-  } catch (error) {
-    showNotifyByType('error', '随机帧封面', error instanceof Error ? error.message : '生成随机帧失败')
-  } finally {
-    videoCoverFrameLoading.value = false
-  }
 }
 
 const resolveEngineIcon = (icon: string) => {
@@ -6137,72 +2736,137 @@ const resolveStoreIcon = (icon: string) => {
 
   return storeIconUrlByName.get(icon) ?? icon
 }
+const listPresentation = useCategoryListPresentation({
+  batchProgressRunning,
+  batchAnalyzeInBackground,
+  selectedResourceIds,
+  selectionModeManuallyEnabled,
+  resourceList,
+  authorList,
+  actorList,
+  albumList,
+  engineList,
+  tagList,
+  typeList,
+  authorSearch,
+  actorSearch,
+  albumSearch,
+  tagSearch,
+  typeSearch,
+  detailIsAsmr,
+  showAuthorFilter,
+  showActorFilter,
+  isAudioCategory,
+  showEngineFilter,
+  totalResources,
+  pageSize,
+  currentPage,
+  jumpPageInput,
+  resolveEngineIcon
+})
+selectedResourceCount = listPresentation.selectedResourceCount
+resourceSelectionMode = listPresentation.resourceSelectionMode
+currentPageResourceIds = listPresentation.currentPageResourceIds
+currentCategoryBatchInBackground = listPresentation.currentCategoryBatchInBackground
+normalizedAuthorList = listPresentation.normalizedAuthorList
+normalizedActorList = listPresentation.normalizedActorList
+normalizedEngineList = listPresentation.normalizedEngineList
+normalizedTagList = listPresentation.normalizedTagList
+normalizedTypeList = listPresentation.normalizedTypeList
+normalizedAlbumList = listPresentation.normalizedAlbumList
+filteredAuthorList = listPresentation.filteredAuthorList
+filteredActorList = listPresentation.filteredActorList
+filteredEngineList = listPresentation.filteredEngineList
+filteredTagList = listPresentation.filteredTagList
+filteredTypeList = listPresentation.filteredTypeList
+filteredAlbumList = listPresentation.filteredAlbumList
+filterSectionsStyle = listPresentation.filterSectionsStyle
+totalPages = listPresentation.totalPages
+handleJumpPage = listPresentation.handleJumpPage
 
-const handleUseFirstCover = () => {
-  formData.value.coverPath = 'auto://first-cover'
-}
-
-const handleChooseCustomCover = async () => {
-  try {
-    const imageExtensions = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp']
-    const coverPath = await window.api.dialog.selectFile(imageExtensions)
-    if (coverPath) {
-      formData.value.coverPath = coverPath
-    }
-  } catch (error) {
-    showNotifyByType('error', '选择失败', error instanceof Error ? error.message : '选择自定义封面失败')
-  }
-}
-
-const handleChooseCoverFromScreenshotFolder = async () => {
-  if (!editingResourceId.value) {
-    showNotifyByType('warning', '选择封面', '当前资源还没有可用的截图目录')
-    return
-  }
-
-  try {
-    const screenshotPath = await window.api.dialog.selectScreenshotImage(editingResourceId.value)
-    if (screenshotPath) {
-      formData.value.coverPath = screenshotPath
-    }
-  } catch (error) {
-    showNotifyByType('error', '选择封面', error instanceof Error ? error.message : '从截图文件夹选择封面失败')
-  }
-}
-
-const handleClearCover = () => {
-  formData.value.coverPath = ''
-}
-
-const handleSelectBasePath = async () => {
-  try {
-    let resourcePath: string
-    if (categorySettings.value.resourcePathType === 'file') {
-      const extensions = [...(categorySettings.value.extensions ?? [])]
-      resourcePath = await window.api.dialog.selectFile(extensions)
-    } else {
-      resourcePath = await window.api.dialog.selectFolder()
-    }
-    if (resourcePath) {
-      if (!validateBasePathExtension(resourcePath)) {
-        formData.value.basePath = resourcePath
-        await basePathFormItemRef.value?.validate({ trigger: 'change' })
-        return
-      }
-
-      formData.value.basePath = resourcePath
-      await basePathFormItemRef.value?.validate({ trigger: 'change' })
-      applyDefaultPathName(resourcePath)
-      await applyAudioPathAnalysis(resourcePath)
-      await applyAudioCoverAnalysis()
-      await applyGamePathAnalysis(resourcePath)
-      await applyNovelFileAnalysis(resourcePath)
-      await applyMultiImageDirectoryAnalysis(resourcePath)
-    }
-  } catch (error) {
-    showNotifyByType('error', '选择失败', error instanceof Error ? error.message : '选择资源路径失败')
-  }
-}
+const pageBootstrap = useCategoryPageBootstrap({
+  route,
+  categoryId,
+  keyword,
+  currentPage,
+  pageSize,
+  sortBy,
+  totalPages,
+  jumpPageInput,
+  loading,
+  suppressAutoFetch,
+  resourceList,
+  totalResources,
+  categoryInfo,
+  languageOptions,
+  websiteTypeOptions,
+  localeEmulatorPath,
+  mtoolPath,
+  authorList,
+  actorList,
+  albumList,
+  engineList,
+  engineOptionList,
+  missingResourceCount,
+  favoriteResourceCount,
+  completedResourceCount,
+  runningResourceCount,
+  tagList,
+  typeList,
+  selectedDetailResource,
+  showCompletedFilter,
+  isWebsiteCategory,
+  showVideoPlayer,
+  detailIsManga,
+  detailIsAsmr,
+  showActorFilter,
+  isAudioCategory,
+  categorySettings,
+  showEngineFilter,
+  normalizedAuthorList,
+  normalizedActorList,
+  normalizedAlbumList,
+  normalizedEngineList,
+  normalizedTagList,
+  normalizedTypeList,
+  selectedAuthorList,
+  selectedActorList,
+  selectedAlbumList,
+  selectedEngineList,
+  selectedTagList,
+  selectedTypeList,
+  missingFile,
+  favoriteOnly,
+  completedOnly,
+  runningOnly,
+  batchImportItems,
+  batchImportFetchInfoEnabled,
+  batchAnalyzeCurrent,
+  batchAnalyzeTotal,
+  batchAnalyzeMessage,
+  batchAnalyzeRunning,
+  batchImportRunning,
+  batchAnalyzeCancelled,
+  batchAnalyzeInBackground,
+  batchAnalyzeToastDismissed,
+  showBatchImportLoading,
+  showBatchImportModal,
+  buildResourceQuery,
+  resetSelected,
+  resetCategoryListState,
+  mergeResourceSummaryIntoDetail,
+  assignSanitizedSelectedFilterValues,
+  showNotifyByType,
+  handleShowResourceDetail: (resource) => handleShowResourceDetail(resource),
+  syncBatchImportRefsFromState,
+  syncBatchImportStateFromRefs,
+  ensureBatchImportState,
+  patchBatchImportState,
+  syncBatchImportOngoingCenter,
+  clearBatchImportOngoingCenter,
+  logger
+})
+fetchData = pageBootstrap.fetchData
 
 const handleTagsChange = (values: string[]) => {
   formData.value.tags = normalizeSelectedValues(values)
@@ -6220,18 +2884,6 @@ const appendInputValues = (field: 'tags' | 'types', input: string) => {
 
   formData.value[field] = normalizeSelectedValues([
     ...(formData.value[field] ?? []),
-    ...items
-  ])
-}
-
-const appendBatchLabelValues = (input: string) => {
-  const items = splitManualValues(input)
-  if (!items.length) {
-    return
-  }
-
-  batchLabelValues.value = normalizeSelectedValues([
-    ...batchLabelValues.value,
     ...items
   ])
 }
@@ -6265,33 +2917,6 @@ const handleSelectInputKeydown = (event: KeyboardEvent, field: 'tags' | 'types')
   handleTypeInputCommit()
 }
 
-const handleBatchLabelInputCommit = () => {
-  appendBatchLabelValues(batchLabelInputValue.value)
-  batchLabelInputValue.value = ''
-}
-
-const handleBatchLabelInputKeydown = (event: KeyboardEvent) => {
-  if (![' ', ',', '，', '、', 'Enter'].includes(event.key)) {
-    return
-  }
-
-  event.preventDefault()
-  const target = event.target as HTMLInputElement | null
-  if (target) {
-    target.value = ''
-  }
-
-  handleBatchLabelInputCommit()
-}
-
-const createSelectOption = (label: string) => {
-  const value = label.trim()
-  return {
-    label: value,
-    value
-  }
-}
-
 const handleTagSearch = (value: string) => {
   tagInputValue.value = value
 }
@@ -6300,463 +2925,58 @@ const handleTypeSearch = (value: string) => {
   typeInputValue.value = value
 }
 
-const handleBatchLabelSearch = (value: string) => {
-  batchLabelInputValue.value = value
-}
-
-const handleFetchGameInfo = async () => {
-  if (fetchResourceInfoLoading.value) {
-    return
-  }
-
-  fetchResourceInfoLoading.value = true
-
-  try {
-    const extendTable = String(categorySettings.value.extendTable ?? '').trim()
-    let websiteId = String(formData.value?.meta?.websiteType ?? '').trim()
-
-    if (extendTable === 'single_image_meta') {
-      const imageSiteOptions = await window.api.db.getSelectDictData(DictType.IMAGE_SITE_TYPE)
-      websiteId = String(
-        imageSiteOptions.find((item: any) => String(item?.label ?? '').trim().toLowerCase() === 'pixiv')?.value ?? ''
-      ).trim()
-    } else if (extendTable === 'novel_meta') {
-      const novelSiteOptions = await window.api.db.getSelectDictData(DictType.NOVEL_SITE_TYPE)
-      websiteId = String(
-        novelSiteOptions.find((item: any) => String(item?.label ?? '').trim() === '国家图书馆')?.value ?? ''
-      ).trim()
-      if (!websiteId) {
-        websiteId = 'nlc-isbn'
-      }
-    }
-
-    const gameId = extendTable === 'single_image_meta'
-      ? String(formData.value?.meta?.pixivId ?? '').trim()
-      : extendTable === 'novel_meta'
-        ? String(formData.value?.meta?.isbn ?? '').trim()
-        : String(formData.value?.meta?.gameId ?? '').trim()
-
-    const result = await window.api.service.fetchResourceInfo(websiteId, gameId)
-    const resultType = result?.type ?? 'info'
-    const resultMessage = result?.message ?? '获取资源信息完成'
-
-    if (resultType === 'error' || resultType === 'warning') {
-      showNotifyByType(resultType, '获取资源信息', resultMessage)
-      return
-    }
-
-    const data = result?.data ?? {}
-    if (data.name) {
-      formData.value.name = data.name
-      if (categorySettings.value.extendTable === 'game_meta' && !formData.value.meta.nameJp) {
-        formData.value.meta.nameJp = data.name
-      }
-    }
-
-    if (data.author) {
-      formData.value.author = data.author
-    }
-
-    if (data.description) {
-      formData.value.description = data.description
-    }
-
-    if (extendTable === 'asmr_meta' && data.cv) {
-      formData.value.actors = normalizeSelectedValues([
-        ...(formData.value.actors ?? []),
-        ...String(data.cv).split(/[\/,、，]/)
-      ])
-    }
-
-    if (extendTable === 'asmr_meta' && data.scenario) {
-      formData.value.meta.scenario = String(data.scenario)
-    }
-
-    if (extendTable === 'asmr_meta' && data.illust) {
-      formData.value.meta.illust = String(data.illust)
-    }
-
-    if (extendTable === 'multi_image_meta' && data.translator) {
-      formData.value.meta.translator = data.translator
-    }
-
-    if (extendTable === 'novel_meta') {
-      if (data.translator) {
-        formData.value.meta.translator = data.translator
-      }
-
-      if (data.isbn) {
-        formData.value.meta.isbn = data.isbn
-      }
-
-      if (data.publisher) {
-        formData.value.meta.publisher = data.publisher
-      }
-
-      if (Number.isFinite(Number(data.year))) {
-        formData.value.meta.year = Number(data.year)
-      }
-    }
-
-    if (data.cover && extendTable !== 'multi_image_meta') {
-      formData.value.coverPath = data.cover
-    }
-
-    if (data.website) {
-      formData.value.meta.website = data.website
-    }
-
-    if (extendTable === 'single_image_meta' && !String(formData.value?.meta?.source ?? '').trim()) {
-      formData.value.meta.source = 'Pixiv'
-    }
-
-    if (Array.isArray(data.tag) && data.tag.length) {
-      formData.value.tags = normalizeSelectedValues([
-        ...(formData.value.tags ?? []),
-        ...data.tag
-      ])
-    }
-
-    if (Array.isArray(data.type) && data.type.length) {
-      formData.value.types = normalizeSelectedValues([
-        ...(formData.value.types ?? []),
-        ...data.type
-      ])
-    }
-
-    showNotifyByType('success', '获取资源信息', resultMessage)
-  } finally {
-    fetchResourceInfoLoading.value = false
-  }
-}
-
-const handleFetchWebsiteInfo = async () => {
-  if (fetchResourceInfoLoading.value) {
-    return
-  }
-
-  const normalizedUrl = normalizeWebsiteUrl(formData.value?.meta?.website)
-  if (!normalizedUrl) {
-    showNotifyByType('warning', '获取网站信息', '请先输入合法的网站地址')
-    return
-  }
-
-  fetchResourceInfoLoading.value = true
-
-  try {
-    const result = await window.api.service.fetchWebsiteInfo(normalizedUrl)
-    const resultType = result?.type ?? 'info'
-    const resultMessage = result?.message ?? '获取网站信息完成'
-    const data = result?.data ?? {}
-
-    if (resultType !== 'error') {
-      formData.value.meta.website = String(data.website ?? normalizedUrl).trim() || normalizedUrl
-
-      if (String(data.name ?? '').trim()) {
-        formData.value.name = String(data.name).trim()
-      }
-
-      formData.value.meta.favicon = String(data.favicon ?? '').trim()
-    }
-
-    if (resultType === 'error' || resultType === 'warning') {
-      showNotifyByType(resultType, '获取网站信息', resultMessage)
-      return
-    }
-
-    showNotifyByType('success', '获取网站信息', resultMessage)
-  } finally {
-    fetchResourceInfoLoading.value = false
-  }
-}
-
-const handleCheckGameEngine = async () => {
-  const basePath = String(formData.value?.basePath ?? '').trim()
-
-  if (!basePath) {
-    showNotifyByType('warning', '检测游戏引擎', '请先选择游戏路径')
-    return
-  }
-
-  const result = await window.api.service.detectGameEngine(basePath)
-  const resultType = result?.type ?? 'info'
-  const resultMessage = result?.message ?? '检测完成'
-
-  if (resultType === 'error' || resultType === 'warning') {
-    showNotifyByType(resultType, '检测游戏引擎', resultMessage)
-    return
-  }
-
-  const engineId = String(result?.data?.engineId ?? '').trim()
-  if (engineId) {
-    formData.value.meta.engine = engineId
-  }
-
-  showNotifyByType('success', '检测游戏引擎', resultMessage)
-}
-
-const handleLaunchResource = async (resource: any) => {
-  if (isSingleImageCategory.value) {
-    await handlePreviewSingleImageResource(resource)
-    return
-  }
-
-  if (detailIsManga.value) {
-    await openComicReader(resource)
-    return
-  }
-
-  if (detailIsAsmr.value) {
-    await openAsmrPlaybackFromLaunch(resource)
-    return
-  }
-
-  if (detailIsAudio.value) {
-    await openAudioPlaybackFromLaunch(resource)
-    return
-  }
-
-  if (detailIsVideo.value) {
-    await openVideoPlaybackFromLaunch(resource)
-    return
-  }
-
-  if (detailIsNovel.value) {
-    await openNovelReader(resource)
-    return
-  }
-
-  if (detailIsWebsite.value) {
-    await handleOpenWebsiteResource(resource)
-    return
-  }
-
-  try {
-    const result = await window.api.service.launchResource(
-      String(resource?.id ?? ''),
-      String(resource?.basePath ?? ''),
-      String(resource?.fileName ?? resource?.filename ?? '') || undefined
-    )
-
-    if (result?.type === 'error') {
-      showNotifyByType('error', '启动失败', result?.message ?? '启动资源失败')
-      return
-    }
-
-    showNotifyByType('success', '启动资源', result?.message ?? `已启动${resource?.title ?? categoryName.value}`)
-    await fetchData()
-  } catch (error) {
-    showNotifyByType('error', '启动失败', error instanceof Error ? error.message : '启动资源失败')
-  }
-}
-
-const handlePreviewSingleImageResource = async (resource: any) => {
-  const resourceId = String(resource?.id ?? '').trim()
-  const fallbackPath = getResourceFilePath(resource)
-
-  if (!resourceId && !fallbackPath) {
-    showNotifyByType('warning', '查看图片', '当前图片路径无效')
-    return
-  }
-
-  try {
-    if (showPictureViewer.value && currentPictureViewerResourceId.value && currentPictureViewerResourceId.value !== resourceId) {
-      showPictureViewer.value = false
-      await nextTick()
-    }
-
-    const pageSize = Math.max(totalResources.value, resourceList.value.length, 1)
-    const result = await window.api.db.getResourceByCategoryId(categoryId.value, {
-      page: 1,
-      pageSize,
-      sortBy: sortBy.value,
-    })
-    const allResources = Array.isArray(result?.items) && result.items.length ? result.items : resourceList.value
-    const imageResources = allResources.filter((item: any) => !item?.missingStatus && getResourceFilePath(item))
-    const imagePaths = imageResources.map((item: any) => getResourceFilePath(item))
-
-    if (!imagePaths.length) {
-      showNotifyByType('warning', '查看图片', '当前分类下没有可预览的图片')
-      return
-    }
-
-    let initialIndex = imageResources.findIndex((item: any) => String(item?.id ?? '').trim() === resourceId)
-    if (initialIndex < 0 && fallbackPath) {
-      initialIndex = imagePaths.findIndex((filePath) => filePath === fallbackPath)
-    }
-
-    pictureViewerImagePaths.value = imagePaths
-    pictureViewerResourceIds.value = imageResources.map((item: any) => String(item?.id ?? '').trim())
-    pictureViewerInitialIndex.value = Math.max(0, initialIndex)
-    pictureViewerAllowDelete.value = false
-    const startResult = await window.api.service.startReadingResource(resourceId)
-    const startResultType = startResult?.type ?? 'info'
-    if (startResultType === 'error' || startResultType === 'warning') {
-      showNotifyByType(startResultType, '查看图片', startResult?.message ?? '打开图片预览失败')
-      return
-    }
-
-    currentPictureViewerResourceId.value = resourceId
-    await loadPictureViewerScrollMode()
-    showPictureViewer.value = true
-    await fetchData()
-  } catch (error) {
-    showNotifyByType('error', '查看图片', error instanceof Error ? error.message : '打开图片预览失败')
-  }
-}
-
-const handleStopResource = async (resource: any) => {
-  try {
-    if (['asmr_meta', 'audio_meta'].includes(String(categorySettings.value.extendTable ?? '').trim())) {
-      const stopControl = audioPlayerStore.controls.value.stop
-      if (stopControl) {
-        await Promise.resolve(stopControl())
-      } else {
-        await window.api.service.stopAsmrPlayback(String(resource?.id ?? ''))
-      }
-      setAudioPlayerVisible(false)
-      showNotifyByType('success', '停止资源', `已停止${resource?.title ?? categoryName.value}`)
-      await fetchData()
-      return
-    }
-
-    const result = await window.api.service.stopResource(String(resource?.id ?? ''))
-    const resultType = result?.type ?? 'info'
-    const resultMessage = result?.message ?? `已停止${resource?.title ?? categoryName.value}`
-
-    showNotifyByType(resultType, '停止资源', resultMessage)
-
-    if (resultType !== 'error') {
-      if (String(resource?.id ?? '') === String(currentPictureViewerResourceId.value ?? '')) {
-        currentPictureViewerResourceId.value = ''
-        showPictureViewer.value = false
-      }
-      if (String(resource?.id ?? '') === String(currentComicReaderResourceId.value ?? '')) {
-        currentComicReaderResourceId.value = ''
-        showComicReader.value = false
-      }
-      if (String(resource?.id ?? '') === String(currentTextReaderResourceId.value ?? '')) {
-        currentTextReaderResourceId.value = ''
-        showTextReader.value = false
-      }
-      if (String(resource?.id ?? '') === String(currentPdfReaderResourceId.value ?? '')) {
-        currentPdfReaderResourceId.value = ''
-        showPdfReader.value = false
-      }
-      if (String(resource?.id ?? '') === String(currentEpubReaderResourceId.value ?? '')) {
-        currentEpubReaderResourceId.value = ''
-        showEpubReader.value = false
-      }
-      if (String(resource?.id ?? '') === String(currentEbookReaderResourceId.value ?? '')) {
-        currentEbookReaderResourceId.value = ''
-        showEbookReader.value = false
-      }
-      await fetchData()
-    }
-  } catch (error) {
-    showNotifyByType('error', '停止失败', error instanceof Error ? error.message : '停止资源失败')
-  }
-}
-
-const handleZoneLaunchResource = (resource: any) => {
-  void (async () => {
-    if (!canZoneLaunch.value) {
-      showNotifyByType('warning', '转区启动', '请先在设置中配置 LE 转区工具路径')
-      return
-    }
-
-    try {
-      const result = await window.api.service.launchResourceWithLocaleEmulator(
-        String(resource?.id ?? ''),
-        String(resource?.basePath ?? ''),
-        String(resource?.fileName ?? resource?.filename ?? '') || undefined
-      )
-      const resultType = result?.type ?? 'info'
-      const resultMessage = result?.message ?? `已通过 LE 转区启动“${resource?.title ?? categoryName.value}”`
-
-      showNotifyByType(resultType, '转区启动', resultMessage)
-
-      if (resultType !== 'error') {
-        await fetchData()
-      }
-    } catch (error) {
-      showNotifyByType('error', '转区启动', error instanceof Error ? error.message : 'LE 转区启动失败')
-    }
-  })()
-}
-
-const handleMtoolLaunchResource = async (resource: any) => {
-  if (!canMtoolLaunch.value) {
-    showNotifyByType('warning', 'MTool 启动', '请先在设置中配置 MTool 路径')
-    return
-  }
-
-  try {
-    const result = await window.api.service.launchResourceWithMtool(
-      String(resource?.id ?? ''),
-      String(resource?.basePath ?? ''),
-      String(resource?.fileName ?? resource?.filename ?? '') || undefined
-    )
-    const resultType = result?.type ?? 'info'
-    const resultMessage = result?.message ?? `已通过 MTool 启动“${resource?.title ?? categoryName.value}”`
-
-    showNotifyByType(resultType, 'MTool 启动', resultMessage)
-
-    if (resultType !== 'error') {
-      await fetchData()
-    }
-  } catch (error) {
-    showNotifyByType('error', 'MTool 启动', error instanceof Error ? error.message : '通过 MTool 启动失败')
-  }
-}
-
-function handleShowResourceDetail(resource: any) {
-  void (async () => {
-    try {
-      const detail = await window.api.service.getResourceDetail(String(resource?.id ?? ''))
-      selectedDetailResource.value = detail?.data ?? resource
-    } catch {
-      selectedDetailResource.value = resource
-    }
-    showDetailDrawer.value = true
-    closeDetailAudioContextMenu()
-    showPictureViewer.value = false
-    showComicReader.value = false
-    showTextReader.value = false
-    showPdfReader.value = false
-    showEpubReader.value = false
-    showEbookReader.value = false
-    visibleLogCount.value = 5
-    currentScreenshotIndex.value = 0
-
-    if (detailIsAudio.value) {
-      const detailResourceId = String(selectedDetailResource.value?.id ?? '')
-      const detailBasePath = getResourceFilePath(selectedDetailResource.value)
-      if (detailResourceId && detailBasePath) {
-        try {
-          const analysis = await window.api.service.analyzeAudioFilePath(detailBasePath)
-          if (analysis && detailResourceId === String(selectedDetailResource.value?.id ?? '')) {
-            selectedDetailResource.value = {
-              ...selectedDetailResource.value,
-              audioMeta: {
-                ...(selectedDetailResource.value?.audioMeta ?? {}),
-                duration: analysis.duration ?? selectedDetailResource.value?.audioMeta?.duration,
-                bitrate: analysis.bitrate ?? selectedDetailResource.value?.audioMeta?.bitrate ?? null,
-                sampleRate: analysis.sampleRate ?? selectedDetailResource.value?.audioMeta?.sampleRate ?? null
-              }
-            }
-          }
-        } catch {
-          // ignore detail audio analysis errors
-        }
-      }
-    }
-
-    await refreshVideoSubCoverPreviewUrls(selectedDetailResource.value)
-    await refreshDetailScreenshots(0)
-    await refreshDetailAudioTree()
-  })()
-}
+const editorAssistActions = useCategoryEditorAssistActions({
+  formData,
+  editingResourceId,
+  fetchResourceInfoLoading,
+  videoCoverFrameLoading,
+  showAudioCoverCandidateModal,
+  showVideoCoverCandidateModal,
+  showVideoSubCoverCandidateModal,
+  audioCoverCandidates,
+  videoCoverCandidates,
+  videoSubCoverCandidateItems,
+  basePathFormItemRef,
+  showSoftwareScriptModal,
+  softwareScriptDraft,
+  softwareScriptRuntimePath,
+  categoryName,
+  categorySettings,
+  isSoftwareCategory,
+  isVideoFolderCategory,
+  detailIsAsmr,
+  websiteTypeOptions,
+  normalizedLanguageList,
+  showNotifyByType,
+  validateBasePathExtension,
+  getBasePathValidationMessage,
+  applyDefaultPathName,
+  applyAudioPathAnalysis,
+  applyAudioCoverAnalysis,
+  applyGamePathAnalysis,
+  applyNovelFileAnalysis,
+  applyMultiImageDirectoryAnalysis,
+  normalizeSelectedValues,
+  normalizeWebsiteUrl,
+  resolveCoverPreviewUrl,
+  formatAudioCoverCandidateQuery,
+  ensureSoftwareScriptRuntimes,
+  resolveSoftwareScriptShell,
+  denormalizeSoftwareScript
+})
+const handleOpenSoftwareScriptModal = editorAssistActions.handleOpenSoftwareScriptModal
+const handleFetchAlbumCover = editorAssistActions.handleFetchAlbumCover
+const handleUseScreenshotCover = editorAssistActions.handleUseScreenshotCover
+const handleUseVideoRandomFrameCover = editorAssistActions.handleUseVideoRandomFrameCover
+const handleUseFirstCover = editorAssistActions.handleUseFirstCover
+const handleChooseCustomCover = editorAssistActions.handleChooseCustomCover
+const handleFetchWebsiteCover = editorAssistActions.handleFetchWebsiteCover
+const handleChooseCoverFromScreenshotFolder = editorAssistActions.handleChooseCoverFromScreenshotFolder
+const handleClearCover = editorAssistActions.handleClearCover
+const handleSelectBasePath = editorAssistActions.handleSelectBasePath
+const handleFetchGameInfo = editorAssistActions.handleFetchGameInfo
+const handleFetchWebsiteInfo = editorAssistActions.handleFetchWebsiteInfo
+const handleCheckGameEngine = editorAssistActions.handleCheckGameEngine
 
 const loadPictureViewerScrollMode = async () => {
   try {
@@ -6767,28 +2987,48 @@ const loadPictureViewerScrollMode = async () => {
   }
 }
 
-const handleOpenPictureViewer = async (index: number = currentScreenshotIndex.value) => {
-  if (!detailScreenshotPaths.value.length) {
-    return
-  }
+let readerPlayerActions!: ReturnType<typeof useCategoryReaderPlayerActions>
 
-  currentScreenshotIndex.value = Math.min(
-    Math.max(0, index),
-    Math.max(0, detailScreenshotPaths.value.length - 1)
-  )
+const capabilityActions = useCategoryCapabilityActions({
+  categoryName,
+  categorySettingsExtendTable: computed(() => String(categorySettings.value.extendTable ?? '').trim()),
+  canZoneLaunch,
+  canMtoolLaunch,
+  selectedDetailResource,
+  currentPictureViewerResourceId,
+  currentComicReaderResourceId,
+  currentTextReaderResourceId,
+  currentPdfReaderResourceId,
+  currentEpubReaderResourceId,
+  currentEbookReaderResourceId,
+  showPictureViewer,
+  showComicReader,
+  showTextReader,
+  showPdfReader,
+  showEpubReader,
+  showEbookReader,
+  showNotifyByType,
+  fetchData,
+  getResourceFilePath,
+  getWebsiteResourceUrl,
+  recordResourceAccessIfPossible,
+  hideAudioPlayer: () => setAudioPlayerVisible(false),
+  stopAudioPlayback: async (resource) => {
+    const stopControl = audioPlayerStore.controls.value.stop
+    if (stopControl) {
+      await Promise.resolve(stopControl())
+      return
+    }
 
-  if (detailIsManga.value) {
-    await openComicReader(selectedDetailResource.value, currentScreenshotIndex.value)
-    return
-  }
+    await window.api.service.stopAsmrPlayback(String(resource?.id ?? ''))
+  },
+  onLaunchSpecialResource: async (resource) => await readerPlayerActions.onLaunchSpecialResource(resource)
+})
 
-  pictureViewerImagePaths.value = [...detailScreenshotPaths.value]
-  pictureViewerResourceIds.value = []
-  pictureViewerInitialIndex.value = currentScreenshotIndex.value
-  pictureViewerAllowDelete.value = !detailIsManga.value
-  await loadPictureViewerScrollMode()
-  showPictureViewer.value = true
-}
+const handleLaunchResource = capabilityActions.handleLaunchResource
+const handleStopResource = capabilityActions.handleStopResource
+const handleZoneLaunchResource = capabilityActions.handleZoneLaunchResource
+const handleMtoolLaunchResource = capabilityActions.handleMtoolLaunchResource
 
 const handleLoadMoreLogs = () => {
   if (!hasMoreDetailLogs.value) {
@@ -6831,144 +3071,53 @@ const handleRatingUpdate = (value: number) => {
   detailRatingDraft.value = Number.isFinite(Number(value)) ? Number(value) : 0
 }
 
-const handleEditResource = (resource: any) => {
-  void (async () => {
+const handleOpenResourceFolder = capabilityActions.handleOpenResourceFolder
+const handleDefaultAppPlayResource = capabilityActions.handleDefaultAppPlayResource
+const handleOpenScreenshotFolder = capabilityActions.handleOpenScreenshotFolder
+const handleOpenDetailResourcePath = capabilityActions.handleOpenDetailResourcePath
+const handleOpenStoreWebsite = capabilityActions.handleOpenStoreWebsite
+const handleDetailLaunchAction = capabilityActions.handleDetailLaunchAction
+let handledAutoLaunchRouteKey = ''
+
+const getRouteQueryText = (value: unknown) => {
+  const rawValue = Array.isArray(value) ? value[0] : value
+  return String(rawValue ?? '').trim()
+}
+
+watch(
+  () => [
+    getRouteQueryText(route.query.autoLaunch),
+    getRouteQueryText(route.query.openDetail),
+    getRouteQueryText(route.query.resourceId),
+    String(selectedDetailResource.value?.id ?? '').trim(),
+    showDetailDrawer.value
+  ] as const,
+  async ([autoLaunch, openDetail, routeResourceId, selectedResourceId, drawerVisible]) => {
+    if (autoLaunch !== '1' || openDetail !== '1' || !drawerVisible || !routeResourceId || routeResourceId !== selectedResourceId) {
+      return
+    }
+
+    const autoLaunchKey = `${String(categoryId.value ?? '').trim()}:${routeResourceId}:${autoLaunch}`
+    if (!autoLaunchKey || autoLaunchKey === handledAutoLaunchRouteKey) {
+      return
+    }
+
+    handledAutoLaunchRouteKey = autoLaunchKey
+
     try {
-      const result = await window.api.service.getResourceDetail(String(resource?.id ?? ''))
-      const resultType = result?.type ?? 'info'
-
-      if (resultType === 'error' || resultType === 'warning') {
-        showNotifyByType(resultType, '修改信息', result?.message ?? '获取资源详情失败')
-        return
-      }
-
-      const detail = result?.data
-      if (!detail) {
-        showNotifyByType('warning', '修改信息', '未获取到可编辑的资源详情')
-        return
-      }
-
-      const nextFormData = mapResourceDetailToFormData(detail)
-      editingResourceId.value = String(detail.id ?? '')
-      formData.value = cloneFormData(nextFormData)
-      editInitialFormData.value = cloneFormData(nextFormData)
-      showDetailDrawer.value = false
-      showEditModal.value = true
-    } catch (error) {
-      showNotifyByType('error', '修改信息', error instanceof Error ? error.message : '打开编辑抽屉失败')
+      await nextTick()
+      await handleDetailLaunchAction()
+    } finally {
+      const nextQuery = { ...route.query }
+      delete nextQuery.autoLaunch
+      void router.replace({
+        name: 'category',
+        params: { id: categoryId.value },
+        query: nextQuery
+      })
     }
-  })()
-}
-
-const handleOpenResourceFolder = async (resource: any) => {
-  try {
-    const message = await window.api.dialog.openPath(String(resource?.basePath ?? ''))
-    if (message) {
-      showNotifyByType('error', '打开文件夹', message)
-      return
-    }
-
-    showNotifyByType('success', '打开文件夹', `已打开“${resource?.title ?? categoryName.value}”所在目录`)
-  } catch (error) {
-    showNotifyByType('error', '打开文件夹', error instanceof Error ? error.message : '打开文件夹失败')
   }
-}
-
-const handleDefaultAppPlayResource = async (resource: any) => {
-  const targetPath = getResourceFilePath(resource)
-  const normalizedPath = String(targetPath ?? '').trim()
-  if (!normalizedPath) {
-    showNotifyByType('warning', '使用默认应用打开', '当前文件路径无效')
-    return
-  }
-
-  try {
-    const message = await window.api.dialog.openPath(normalizedPath)
-    if (message) {
-      showNotifyByType('error', '使用默认应用打开', message)
-      return
-    }
-
-    await recordResourceAccessIfPossible(resource, '使用默认应用打开')
-    showNotifyByType('success', '使用默认应用打开', '已使用默认应用打开文件')
-  } catch (error) {
-    showNotifyByType('error', '使用默认应用打开', error instanceof Error ? error.message : '打开文件失败')
-  }
-}
-
-const handleOpenScreenshotFolder = async (resource: any) => {
-  const resourceId = String(resource?.id ?? '').trim()
-
-  try {
-    const message = await window.api.dialog.openScreenshotFolder(resourceId)
-    if (message) {
-      showNotifyByType('error', '打开截图文件夹', message)
-      return
-    }
-
-    showNotifyByType('success', '打开截图文件夹', `已打开“${resource?.title ?? categoryName.value}”截图目录`)
-  } catch (error) {
-    showNotifyByType('error', '打开截图文件夹', error instanceof Error ? error.message : '打开截图文件夹失败')
-  }
-}
-
-const handleOpenDetailResourcePath = async () => {
-  if (!selectedDetailResource.value) {
-    return
-  }
-
-  if (detailIsWebsite.value) {
-    await handleOpenWebsiteResource(selectedDetailResource.value)
-    return
-  }
-
-  await handleOpenResourceFolder(selectedDetailResource.value)
-}
-
-const handleOpenStoreWebsite = async (url: string) => {
-  try {
-    const message = await window.api.dialog.openExternalUrl(url)
-    if (message) {
-      showNotifyByType('error', '打开贩售网站', message)
-    }
-  } catch (error) {
-    showNotifyByType('error', '打开贩售网站', error instanceof Error ? error.message : '打开贩售网站失败')
-  }
-}
-
-const handleOpenWebsiteResource = async (resource: any) => {
-  const url = getWebsiteResourceUrl(resource)
-  if (!url) {
-    showNotifyByType('warning', '打开网站', '当前资源未填写网站地址')
-    return
-  }
-
-  try {
-    const message = await window.api.dialog.openExternalUrl(url)
-    if (message) {
-      showNotifyByType('error', '打开网站', message)
-      return
-    }
-
-    await recordResourceAccessIfPossible(resource, '打开网站')
-    showNotifyByType('success', '打开网站', `已打开“${resource?.title ?? categoryName.value}”`)
-  } catch (error) {
-    showNotifyByType('error', '打开网站', error instanceof Error ? error.message : '打开网站失败')
-  }
-}
-
-const handleDetailLaunchAction = async () => {
-  if (!selectedDetailResource.value) {
-    return
-  }
-
-  if (selectedDetailResource.value.isRunning) {
-    await handleStopResource(selectedDetailResource.value)
-    return
-  }
-
-  await handleLaunchResource(selectedDetailResource.value)
-}
+)
 
 const handleOpenDetailScreenshotFolder = async () => {
   if (!selectedDetailResource.value) {
@@ -7033,39 +3182,6 @@ const handleDeleteResource = (resource: any) => {
   })()
 }
 
-const handleToggleSelectResource = (resource: any) => {
-  const resourceId = String(resource?.id ?? '').trim()
-  if (!resourceId) {
-    return
-  }
-
-  selectionModeManuallyEnabled.value = true
-
-  if (selectedResourceIds.value.includes(resourceId)) {
-    selectedResourceIds.value = selectedResourceIds.value.filter((id) => id !== resourceId)
-    return
-  }
-
-  selectedResourceIds.value = [...selectedResourceIds.value, resourceId]
-}
-
-const handleBatchSelectionAction = () => {
-  if (resourceSelectionMode.value) {
-    if (!selectedResourceCount.value) {
-      handleExitSelectionMode()
-      return
-    }
-
-    handleDeleteSelectedResources()
-    return
-  }
-
-  if (!selectedResourceCount.value) {
-    selectionModeManuallyEnabled.value = true
-    return
-  }
-}
-
 const handleDeleteResourceFiles = (resource: any) => {
   void (async () => {
     const resourceTitle = resource?.title ?? categoryName.value
@@ -7114,137 +3230,6 @@ const handleAdminLaunchResource = async (resource: any) => {
   }
 }
 
-const handleToggleSelectionMode = () => {
-  if (resourceSelectionMode.value) {
-    handleExitSelectionMode()
-    return
-  }
-
-  selectionModeManuallyEnabled.value = true
-}
-
-const BATCH_ANALYZE_CONCURRENCY = Math.max(2, Math.min(6, (navigator.hardwareConcurrency || 4) - 2 || 2))
-
-function syncBatchImportRefsFromState(targetCategoryId: string) {
-  const state = ensureBatchImportState(targetCategoryId)
-  batchImportItems.value = Array.isArray(state.items) ? state.items : []
-  batchImportFetchInfoEnabled.value = state.fetchInfoEnabled !== false
-  batchAnalyzeCurrent.value = state.analyzeCurrent
-  batchAnalyzeTotal.value = state.analyzeTotal
-  batchAnalyzeMessage.value = state.analyzeMessage
-  batchAnalyzeRunning.value = state.analyzeRunning
-  batchImportRunning.value = state.importRunning
-  batchAnalyzeCancelled.value = state.analyzeCancelled
-  batchAnalyzeInBackground.value = state.analyzeInBackground
-  batchAnalyzeToastDismissed.value = state.analyzeToastDismissed
-  showBatchImportLoading.value = state.showLoading
-  showBatchImportModal.value = state.showPreview
-}
-
-function syncBatchImportStateFromRefs(targetCategoryId: string) {
-  if (!targetCategoryId) {
-    return
-  }
-
-  batchImportStateStore[targetCategoryId] = {
-    items: batchImportItems.value,
-    fetchInfoEnabled: batchImportFetchInfoEnabled.value,
-    analyzeCurrent: batchAnalyzeCurrent.value,
-    analyzeTotal: batchAnalyzeTotal.value,
-    analyzeMessage: batchAnalyzeMessage.value,
-    analyzeRunning: batchAnalyzeRunning.value,
-    importRunning: batchImportRunning.value,
-    analyzeCancelled: batchAnalyzeCancelled.value,
-    analyzeInBackground: batchAnalyzeInBackground.value,
-    analyzeToastDismissed: batchAnalyzeToastDismissed.value,
-    showLoading: showBatchImportLoading.value,
-    showPreview: showBatchImportModal.value
-  }
-}
-
-function patchBatchImportState(targetCategoryId: string, patch: Partial<BatchImportState>) {
-  const currentState = ensureBatchImportState(targetCategoryId)
-  batchImportStateStore[targetCategoryId] = {
-    ...currentState,
-    ...patch
-  }
-
-  if (targetCategoryId === categoryId.value) {
-    syncBatchImportRefsFromState(targetCategoryId)
-  }
-}
-
-function resetBatchImportState(targetCategoryId: string) {
-  batchImportStateStore[targetCategoryId] = createBatchImportState()
-
-  if (targetCategoryId === categoryId.value) {
-    syncBatchImportRefsFromState(targetCategoryId)
-  }
-}
-
-const analyzeBatchImportDirectories = async (targetCategoryId: string, directoryPaths: string[]) => {
-  const items: any[] = new Array(directoryPaths.length)
-  let nextIndex = 0
-  let completedCount = 0
-
-  const updateAnalyzeProgress = (directoryPath?: string, index?: number) => {
-    const currentDirectoryName = getResourceNameFromBasePath(directoryPath || '') || directoryPath || '正在准备分析目录'
-    const currentIndex = typeof index === 'number'
-      ? Math.min(directoryPaths.length, index + 1)
-      : Math.min(directoryPaths.length, completedCount + 1)
-
-    patchBatchImportState(targetCategoryId, {
-      analyzeCurrent: completedCount,
-      analyzeMessage: `正在分析第 ${currentIndex} / ${directoryPaths.length} 个目录\n${currentDirectoryName}`
-    })
-    syncBatchImportOngoingCenter()
-  }
-
-  const worker = async () => {
-    while (!ensureBatchImportState(targetCategoryId).analyzeCancelled) {
-      const currentIndex = nextIndex
-      nextIndex += 1
-
-      if (currentIndex >= directoryPaths.length) {
-        return
-      }
-
-      const directoryPath = directoryPaths[currentIndex]
-      const directoryName = getResourceNameFromBasePath(directoryPath)
-      updateAnalyzeProgress(directoryName || directoryPath, currentIndex)
-
-      try {
-        const analysis = await window.api.service.analyzeGameDirectory(directoryPath)
-        items[currentIndex] = await enrichBatchImportItem({
-          ...analysis,
-          checked: !analysis?.exists && !analysis?.errorMessage && !!analysis?.launchFilePath
-        })
-      } catch (error) {
-        items[currentIndex] = {
-          directoryPath,
-          directoryName,
-          launchFilePath: '',
-          launchFileName: '',
-          exists: false,
-          checked: false,
-          errorMessage: error instanceof Error ? error.message : '分析失败'
-        }
-      } finally {
-        completedCount += 1
-        patchBatchImportState(targetCategoryId, {
-          analyzeCurrent: completedCount
-        })
-        syncBatchImportOngoingCenter()
-      }
-    }
-  }
-
-  const workerCount = Math.min(directoryPaths.length, BATCH_ANALYZE_CONCURRENCY)
-  await Promise.all(Array.from({ length: workerCount }, () => worker()))
-
-  return items.filter(Boolean)
-}
-
 const getBatchProgressDirectoryName = () => {
   const [, secondLine] = String(batchAnalyzeMessage.value ?? '').split('\n')
   return getResourceNameFromBasePath(secondLine || batchAnalyzeMessage.value || '')
@@ -7252,443 +3237,78 @@ const getBatchProgressDirectoryName = () => {
     || batchAnalyzeMessage.value
     || '正在准备分析目录'
 }
-
-const handleExitSelectionMode = () => {
-  selectionModeManuallyEnabled.value = false
-  selectedResourceIds.value = []
-}
-
-const resetBatchLabelDialog = () => {
-  batchLabelValues.value = []
-  batchLabelSingleValue.value = ''
-  batchLabelInputValue.value = ''
-  isBatchLabelSubmitting.value = false
-}
-
-const openBatchLabelDialog = (field: 'tags' | 'types' | 'authors' | 'album', mode: 'add' | 'remove') => {
-  if (!selectedResourceCount.value) {
-    showNotifyByType('warning', '批量编辑', `请先选择需要批量修改的${categoryName.value}`)
-    return
-  }
-
-  batchLabelField.value = field
-  batchLabelMode.value = mode
-  resetBatchLabelDialog()
-  showBatchLabelModal.value = true
-}
-
-const closeBatchLabelDialog = () => {
-  showBatchLabelModal.value = false
-  resetBatchLabelDialog()
-}
-
-const handleBatchLabelValuesChange = (values: string[]) => {
-  batchLabelValues.value = normalizeSelectedValues(values)
-}
-
-const handleBatchLabelSingleValueChange = (value: string | null) => {
-  batchLabelSingleValue.value = String(value ?? '').trim()
-}
-
-const handleSubmitBatchLabelAction = async () => {
-  if (!selectedResourceIds.value.length) {
-    showNotifyByType('warning', batchLabelTitle.value, `请先选择需要批量修改的${categoryName.value}`)
-    return
-  }
-
-  const selectedBatchValues = batchLabelIsSingleValue.value
-    ? (batchLabelSingleValue.value ? [batchLabelSingleValue.value] : [])
-    : batchLabelValues.value
-
-  if (!selectedBatchValues.length) {
-    const message = batchLabelField.value === 'tags'
-      ? '请先选择或输入标签'
-      : batchLabelField.value === 'types'
-        ? '请先选择或输入分类'
-        : batchLabelField.value === 'authors'
-          ? '请先选择或输入歌手'
-          : '请先选择或输入专辑'
-    showNotifyByType('warning', batchLabelTitle.value, message)
-    return
-  }
-
-  try {
-    isBatchLabelSubmitting.value = true
-
-    if (batchLabelField.value === 'tags' || batchLabelField.value === 'types') {
-      const result = await window.api.service.batchUpdateResourceLabels(
-        [...selectedResourceIds.value],
-        batchLabelField.value,
-        batchLabelMode.value,
-        [...selectedBatchValues]
-      )
-      const resultType = result?.type ?? 'info'
-      const affectedCount = Number(result?.data?.affectedIds?.length ?? 0)
-      const valueNames = selectedBatchValues.join('、')
-      const resultMessage = typeof result?.message === 'string' && result.message
-        ? buildBatchLabelResultMessage({
-            field: batchLabelField.value,
-            mode: batchLabelMode.value,
-            categoryName: categoryName.value,
-            affectedCount,
-            valueNames,
-            fallbackMessage: result.message
-          })
-        : `${batchLabelTitle.value}完成`
-
-      showNotifyByType(resultType, batchLabelTitle.value, resultMessage)
-
-      if (resultType !== 'error') {
-        closeBatchLabelDialog()
-        await fetchData()
-      }
-      return
-    }
-
-    let successCount = 0
-    let skippedCount = 0
-    let failedCount = 0
-    const selectedIds = [...selectedResourceIds.value].map((id) => String(id ?? '').trim()).filter(Boolean)
-    const selectedValueSet = new Set(selectedBatchValues.map((value) => String(value ?? '').trim()).filter(Boolean))
-
-    for (const resourceId of selectedIds) {
-      try {
-        const detailResult = await window.api.service.getResourceDetail(resourceId)
-        const detail = detailResult?.data
-        if (!detail) {
-          skippedCount += 1
-          continue
-        }
-
-        const detailFormData = cloneFormData(mapResourceDetailToFormData(detail))
-        let changed = false
-
-        if (batchLabelField.value === 'authors') {
-          const currentAuthors = normalizeAudioAuthorList(Array.isArray(detailFormData?.authors) ? detailFormData.authors : [])
-          const nextAuthors = batchLabelMode.value === 'add'
-            ? normalizeAudioAuthorList([...currentAuthors, ...selectedBatchValues])
-            : currentAuthors.filter((name) => !selectedValueSet.has(String(name ?? '').trim()))
-
-          if (nextAuthors.join('\u0000') === currentAuthors.join('\u0000')) {
-            skippedCount += 1
-            continue
-          }
-
-          syncAudioAuthorFields(detailFormData, nextAuthors)
-          changed = true
-        } else if (batchLabelField.value === 'album') {
-          const currentAlbum = String(detailFormData?.meta?.album ?? '').trim()
-          const nextAlbum = batchLabelMode.value === 'add'
-            ? String(selectedBatchValues[0] ?? '').trim()
-            : (selectedValueSet.has(currentAlbum) ? '' : currentAlbum)
-
-          if (nextAlbum === currentAlbum) {
-            skippedCount += 1
-            continue
-          }
-
-          detailFormData.meta = {
-            ...(detailFormData.meta ?? {}),
-            album: nextAlbum
-          }
-          changed = true
-        }
-
-        if (!changed) {
-          skippedCount += 1
-          continue
-        }
-
-        detailFormData.categoryId = categoryInfo.value.id
-        const updatePayload = cloneFormData(detailFormData)
-        const updateResult = await window.api.service.updateResource(resourceId, updatePayload)
-        if (updateResult?.type === 'error') {
-          failedCount += 1
-          continue
-        }
-
-        successCount += 1
-      } catch {
-        failedCount += 1
-      }
-    }
-
-    const title = batchLabelTitle.value
-    const message = buildBatchMetadataResultMessage({
-      field: batchLabelField.value,
-      mode: batchLabelMode.value,
-      categoryName: categoryName.value,
-      successCount,
-      skippedCount,
-      failedCount,
-      valueNames: selectedBatchValues.join('、')
-    })
-
-    showNotifyByType(failedCount > 0 ? 'warning' : 'success', title, message)
-
-    if (successCount > 0) {
-      closeBatchLabelDialog()
-      await fetchData()
-    }
-  } catch (error) {
-    showNotifyByType('error', batchLabelTitle.value, error instanceof Error ? error.message : `${batchLabelTitle.value}失败`)
-  } finally {
-    isBatchLabelSubmitting.value = false
-  }
-}
-
-const buildBatchLabelResultMessage = (params: {
-  field: 'tags' | 'types'
-  mode: 'add' | 'remove'
-  categoryName: string
-  affectedCount: number
-  valueNames: string
-  fallbackMessage: string
-}) => {
-  const { field, mode, categoryName, affectedCount, valueNames, fallbackMessage } = params
-  const normalizedCategoryName = String(categoryName ?? '').trim() || '资源'
-  const normalizedValueNames = String(valueNames ?? '').trim()
-
-  if (!normalizedValueNames) {
-    return fallbackMessage
-  }
-
-  if (field === 'tags') {
-    return `已批量${mode === 'add' ? '添加' : '移除'}${affectedCount}个${normalizedCategoryName}的${normalizedValueNames}标签`
-  }
-
-  return `已批量${mode === 'add' ? '添加' : '移除'}${affectedCount}个${normalizedCategoryName}的${normalizedValueNames}分类`
-}
-
-const buildBatchMetadataResultMessage = (params: {
-  field: 'authors' | 'album'
-  mode: 'add' | 'remove'
-  categoryName: string
-  successCount: number
-  skippedCount: number
-  failedCount: number
-  valueNames: string
-}) => {
-  const { field, mode, categoryName, successCount, skippedCount, failedCount, valueNames } = params
-  const normalizedCategoryName = String(categoryName ?? '').trim() || '资源'
-  const fieldLabel = field === 'authors' ? '歌手' : '专辑'
-  const valueLabel = String(valueNames ?? '').trim()
-  const actionLabel = mode === 'add' ? '添加' : '移除'
-  const suffix = valueLabel ? `：${valueLabel}` : ''
-
-  return `批量${actionLabel}${fieldLabel}完成，成功 ${successCount} 个，跳过 ${skippedCount} 个，失败 ${failedCount} 个${suffix}。涉及 ${normalizedCategoryName}。`
-}
-
-const handleSelectAllResources = () => {
-  const selectedSet = new Set(selectedResourceIds.value)
-  for (const resourceId of currentPageResourceIds.value) {
-    selectedSet.add(resourceId)
-  }
-  selectedResourceIds.value = [...selectedSet]
-}
-
-const handleDeselectAllResources = () => {
-  selectedResourceIds.value = []
-}
-
-const handleInvertSelectedResources = () => {
-  const selectedSet = new Set(selectedResourceIds.value)
-  for (const resourceId of currentPageResourceIds.value) {
-    if (selectedSet.has(resourceId)) {
-      selectedSet.delete(resourceId)
+watch(
+  [batchAnalyzeRunning, batchImportRunning, batchAnalyzeInBackground],
+  () => {
+    if (batchProgressRunning.value) {
+      syncBatchImportOngoingCenter()
     } else {
-      selectedSet.add(resourceId)
+      clearBatchImportOngoingCenter()
     }
   }
-  selectedResourceIds.value = [...selectedSet]
-}
+)
 
-const handleBatchFetchAlbumCover = async () => {
-  if (!isAudioCategory.value) {
-    return
-  }
-
-  if (!selectedResourceIds.value.length) {
-    showNotifyByType('warning', '批量获取封面', `请先选择需要获取封面的${categoryName.value}`)
-    return
-  }
-
-  const selectedIds = [...selectedResourceIds.value].map((id) => String(id ?? '').trim()).filter(Boolean)
-
-  if (!selectedIds.length) {
-    showNotifyByType('warning', '批量获取封面', `未找到已选中的${categoryName.value}`)
-    return
-  }
-
-  try {
-    isBatchFetchingAlbumCover.value = true
-    logger.info('batch fetch album cover: start', {
-      categoryId: categoryId.value,
-      resourceIds: selectedIds,
-      count: selectedIds.length
-    })
-
-    let successCount = 0
-    let skippedCount = 0
-    let failedCount = 0
-
-    for (const resourceId of selectedIds) {
-      let resourceName = ''
-      try {
-        const detailResult = await window.api.service.getResourceDetail(resourceId)
-        const detail = detailResult?.data
-        resourceName = String(detail?.title ?? '').trim()
-
-        if (!detail) {
-          skippedCount += 1
-          logger.warn('batch fetch album cover: missing detail', {
-            resourceId,
-            resourceName
-          })
-          continue
-        }
-
-        const basePath = getResourceFilePath(detail)
-        if (!basePath) {
-          skippedCount += 1
-          logger.warn('batch fetch album cover: skip invalid resource', {
-            resourceId,
-            resourceName,
-            basePath
-          })
-          continue
-        }
-
-        const detailFormData = cloneFormData(mapResourceDetailToFormData(detail))
-        const payload = {
-          basePath,
-          title: String(detail?.title ?? resourceName),
-          album: String(detail?.audioMeta?.album ?? '').trim(),
-          artist: joinAudioAuthorNames(
-            Array.isArray(detailFormData?.authors) ? detailFormData.authors : []
-          ) || String(detailFormData?.author ?? '').trim(),
-          artists: normalizeAudioAuthorList([
-            ...(Array.isArray(detailFormData?.authors) ? detailFormData.authors : []),
-            String(detailFormData?.author ?? '').trim()
-          ])
-        }
-
-        logger.info('batch fetch album cover: request', {
-          resourceId,
-          resourceName,
-          payload
-        })
-
-        const coverResult = await fetchAudioAlbumCoverSilently(payload)
-        if (coverResult?.type !== 'success' || !coverResult?.data?.coverPath) {
-          skippedCount += 1
-          logger.warn('batch fetch album cover: no cover result', {
-            resourceId,
-            resourceName,
-            result: coverResult
-          })
-          continue
-        }
-
-        detailFormData.coverPath = String(coverResult.data.coverPath)
-        syncAudioAuthorFields(detailFormData)
-        detailFormData.categoryId = categoryInfo.value.id
-
-        const updatePayload = cloneFormData(detailFormData)
-        const updateResult = await window.api.service.updateResource(resourceId, updatePayload)
-        if (updateResult?.type === 'error') {
-          failedCount += 1
-          logger.error('batch fetch album cover: update failed', {
-            resourceId,
-            resourceName,
-            result: updateResult
-          })
-          continue
-        }
-
-        successCount += 1
-        logger.info('batch fetch album cover: success', {
-          resourceId,
-          resourceName,
-          coverPath: detailFormData.coverPath
-        })
-      } catch (error) {
-        failedCount += 1
-        logger.error('batch fetch album cover: unexpected failure', {
-          resourceId,
-          resourceName,
-          error: error instanceof Error ? error.message : error
-        })
-      }
-    }
-
-    logger.info('batch fetch album cover: completed', {
-      successCount,
-      skippedCount,
-      failedCount
-    })
-
-    if (successCount > 0) {
-      await fetchData()
-    }
-
-    if (successCount > 0 && failedCount === 0 && skippedCount === 0) {
-      showNotifyByType('success', '批量获取封面', `已为 ${successCount} 个${categoryName.value}获取专辑封面`)
-      return
-    }
-
-    showNotifyByType(
-      failedCount > 0 ? 'warning' : 'info',
-      '批量获取封面',
-      `批量获取封面完成：成功 ${successCount} 个，跳过 ${skippedCount} 个，失败 ${failedCount} 个`
-    )
-  } catch (error) {
-    logger.error('batch fetch album cover: fatal error', error)
-    showNotifyByType('error', '批量获取封面', error instanceof Error ? error.message : '批量获取封面失败')
-  } finally {
-    isBatchFetchingAlbumCover.value = false
-  }
-}
-
-const handleDeleteSelectedResources = () => {
-  void (async () => {
-    if (!selectedResourceIds.value.length) {
-      return
-    }
-
-    const selectedResources = resourceList.value.filter((item) =>
-      selectedResourceIds.value.includes(String(item?.id ?? ''))
-    )
-    const runningCount = selectedResources.filter((item) => item?.isRunning).length
-
-    const confirmed = await confirmDialog(
-      `批量删除${categoryName.value}`,
-      runningCount > 0
-        ? `确认删除选中的 ${selectedResourceIds.value.length} 个${categoryName.value}吗？其中 ${runningCount} 个正在运行，将在真正删除时自动跳过。`
-        : `确认删除选中的 ${selectedResourceIds.value.length} 个${categoryName.value}吗？`
-    )
-
-    if (!confirmed) {
-      return
-    }
-
-    try {
-      isBatchDeleting.value = true
-      const result = await window.api.service.deleteResources([...selectedResourceIds.value])
-      const resultType = result?.type ?? 'info'
-      const resultMessage = result?.message ?? '批量删除完成'
-
-      showNotifyByType(resultType, `批量删除${categoryName.value}`, resultMessage)
-      await fetchData()
-      selectedResourceIds.value = []
-      selectionModeManuallyEnabled.value = false
-    } catch (error) {
-      showNotifyByType('error', `批量删除${categoryName.value}`, error instanceof Error ? error.message : '批量删除失败')
-    } finally {
-      isBatchDeleting.value = false
-    }
-  })()
-}
+const batchActions = useCategoryBatchActions({
+  categoryId,
+  categoryName,
+  categoryInfo,
+  resourceList,
+  selectedResourceIds,
+  selectionModeManuallyEnabled,
+  currentPageResourceIds,
+  selectedResourceCount,
+  resourceSelectionMode,
+  isAudioCategory,
+  isVideoCategory,
+  showBatchLabelModal,
+  isBatchDeleting,
+  isBatchFetchingAlbumCover,
+  isBatchLabelSubmitting,
+  batchLabelField,
+  batchLabelMode,
+  batchLabelValues,
+  batchLabelSingleValue,
+  batchLabelInputValue,
+  tagSelectOptions,
+  typeSelectOptions,
+  authorSelectOptions,
+  actorSelectOptions,
+  albumSelectOptions,
+  actorLabel: actorFilterLabel,
+  showNotifyByType,
+  confirmDialog,
+  fetchData,
+  cloneFormData,
+  mapResourceDetailToFormData,
+  syncAudioAuthorFields,
+  normalizeAudioAuthorList,
+  normalizeSelectedValues,
+  joinAudioAuthorNames,
+  getResourceFilePath,
+  fetchAudioAlbumCoverSilently,
+  logger
+})
+const batchLabelIsSingleValue = batchActions.batchLabelIsSingleValue
+const batchLabelOptions = batchActions.batchLabelOptions
+const batchLabelTitle = batchActions.batchLabelTitle
+const batchLabelPlaceholder = batchActions.batchLabelPlaceholder
+const handleToggleSelectResource = batchActions.handleToggleSelectResource
+const handleToggleSelectionMode = batchActions.handleToggleSelectionMode
+const resetBatchLabelDialog = batchActions.resetBatchLabelDialog
+const openBatchLabelDialog = batchActions.openBatchLabelDialog
+const closeBatchLabelDialog = batchActions.closeBatchLabelDialog
+const handleBatchLabelValuesChange = batchActions.handleBatchLabelValuesChange
+const handleBatchLabelSingleValueChange = batchActions.handleBatchLabelSingleValueChange
+const handleBatchLabelInputCommit = batchActions.handleBatchLabelInputCommit
+const handleBatchLabelInputKeydown = batchActions.handleBatchLabelInputKeydown
+const createSelectOption = batchActions.createSelectOption
+const handleBatchLabelSearch = batchActions.handleBatchLabelSearch
+const handleSubmitBatchLabelAction = batchActions.handleSubmitBatchLabelAction
+const handleSelectAllResources = batchActions.handleSelectAllResources
+const handleDeselectAllResources = batchActions.handleDeselectAllResources
+const handleInvertSelectedResources = batchActions.handleInvertSelectedResources
+const handleBatchFetchAlbumCover = batchActions.handleBatchFetchAlbumCover
+const handleBatchSelectionAction = batchActions.handleBatchSelectionAction
 
 const handleToggleFavorite = async (resource: any) => {
   try {
@@ -7710,19 +3330,27 @@ const handleToggleFavorite = async (resource: any) => {
 
 const refreshDetailScreenshots = async (
   nextIndex: number = currentScreenshotIndex.value,
-  targetResource: any = selectedDetailResource.value
+  targetResource: any = selectedDetailResource.value,
+  shouldApply: () => boolean = () => true
 ) => {
+  let nextScreenshotPaths: string[] = []
   try {
     if (detailIsManga.value) {
-      detailScreenshotPaths.value = await window.api.dialog.getDirectoryImages(String(targetResource?.basePath ?? ''))
+      nextScreenshotPaths = await window.api.dialog.getDirectoryImages(String(targetResource?.basePath ?? ''))
     } else {
-      detailScreenshotPaths.value = await window.api.dialog.getScreenshotImages(String(targetResource?.id ?? ''))
+      nextScreenshotPaths = await window.api.dialog.getScreenshotImages(String(targetResource?.id ?? ''))
     }
   } catch {
-    detailScreenshotPaths.value = []
+    nextScreenshotPaths = []
   }
 
-  if (!detailScreenshotPaths.value.length) {
+  if (!shouldApply()) {
+    return
+  }
+
+  detailScreenshotPaths.value = nextScreenshotPaths
+
+  if (!nextScreenshotPaths.length) {
     currentScreenshotIndex.value = 0
     showPictureViewer.value = false
     showComicReader.value = false
@@ -7731,186 +3359,252 @@ const refreshDetailScreenshots = async (
 
   currentScreenshotIndex.value = Math.min(
     Math.max(0, nextIndex),
-    Math.max(0, detailScreenshotPaths.value.length - 1)
+    Math.max(0, nextScreenshotPaths.length - 1)
   )
 }
 
-const refreshDetailAudioTree = async (targetResource: any = selectedDetailResource.value) => {
+const refreshDetailAudioTree = async (
+  targetResource: any = selectedDetailResource.value,
+  shouldApply: () => boolean = () => true
+) => {
   if (!detailIsAsmr.value && !isVideoFolderCategory.value) {
+    detailAudioTreeLoading.value = false
     detailAudioTree.value = []
     return
   }
 
+  detailAudioTreeLoading.value = true
+  let nextAudioTree: any[] = []
   try {
-    const directoryTree = await window.api.dialog.getDirectoryAudioTree(String(targetResource?.basePath ?? ''))
-    detailAudioTree.value = reorderVideoTreeBySubItems(directoryTree, targetResource)
+    const directoryTree = await window.api.dialog.getDirectoryAudioTree(
+      String(targetResource?.basePath ?? ''),
+      {includeMetadata: false}
+    )
+    nextAudioTree = reorderVideoTreeBySubItems(
+      applyStoredDetailAudioTreeMetadata(directoryTree, targetResource),
+      targetResource
+    )
   } catch {
-    detailAudioTree.value = []
-  }
-}
-
-const resetVideoOrderDialog = () => {
-  videoOrderResource.value = null
-  videoOrderItems.value = []
-  videoOrderInitialItems.value = []
-  isVideoOrderSubmitting.value = false
-  videoOrderDragIndex.value = null
-  videoOrderDragOverIndex.value = null
-}
-
-const handleResetVideoOrderItems = () => {
-  videoOrderItems.value = [...videoOrderItems.value].sort((left, right) => {
-    const fileNameCompare = compareByFileName(left.fileName, right.fileName)
-    if (fileNameCompare !== 0) {
-      return fileNameCompare
-    }
-
-    return compareByFileName(left.relativePath, right.relativePath)
-  }).map((item, index) => ({
-    ...item,
-    sortOrder: index
-  }))
-}
-
-const normalizeVideoOrderItems = (items: Array<{ id: string; fileName: string; relativePath: string; sortOrder: number; isVisible: boolean }>) =>
-  items.map((item, itemIndex) => ({
-    ...item,
-    sortOrder: itemIndex
-  }))
-
-const isVideoOrderItemChanged = (item: { relativePath: string; isVisible: boolean }, index: number) => {
-  const initialItem = videoOrderInitialItems.value.find((entry) => entry.relativePath === item.relativePath)
-  if (!initialItem) {
-    return true
+    nextAudioTree = []
   }
 
-  return initialItem.sortOrder !== index || initialItem.isVisible !== item.isVisible
-}
-
-const moveVideoOrderItem = (fromIndex: number, toIndex: number) => {
-  if (fromIndex < 0 || toIndex < 0 || fromIndex >= videoOrderItems.value.length || toIndex >= videoOrderItems.value.length) {
+  if (!shouldApply()) {
     return
   }
 
-  const nextItems = [...videoOrderItems.value]
-  const [targetItem] = nextItems.splice(fromIndex, 1)
-  if (!targetItem) {
-    return
+  detailAudioTree.value = nextAudioTree
+  detailAudioTreeLoading.value = false
+}
+
+readerPlayerActions = useCategoryReaderPlayerActions({
+  categoryId,
+  categoryName,
+  selectedDetailResource,
+  resourceList,
+  totalResources,
+  sortBy,
+  detailScreenshotPaths,
+  detailAudioPlaylist,
+  detailAudioVideoPlaylist,
+  detailAudioImagePaths,
+  pictureViewerImagePaths,
+  pictureViewerResourceIds,
+  pictureViewerInitialIndex,
+  pictureViewerAllowDelete,
+  comicReaderImagePaths,
+  comicReaderInitialIndex,
+  currentScreenshotIndex,
+  currentPictureViewerResourceId,
+  currentComicReaderResourceId,
+  currentTextReaderResourceId,
+  currentPdfReaderResourceId,
+  currentEpubReaderResourceId,
+  currentEbookReaderResourceId,
+  textReaderInitialProgress,
+  pdfReaderInitialProgress,
+  epubReaderInitialProgress,
+  ebookReaderInitialProgress,
+  textReaderFilePath,
+  pdfReaderFilePath,
+  epubReaderFilePath,
+  ebookReaderFilePath,
+  textReaderTitle,
+  pdfReaderTitle,
+  epubReaderTitle,
+  ebookReaderTitle,
+  showPictureViewer,
+  showComicReader,
+  showTextReader,
+  showPdfReader,
+  showEpubReader,
+  showEbookReader,
+  showVideoPlayer,
+  videoPlayerPlaylist,
+  videoPlayerInitialPath,
+  videoPlayerInitialTime,
+  videoPlayerTitle,
+  isSingleImageCategory,
+  detailIsManga,
+  detailIsAsmr,
+  detailIsAudio,
+  detailIsVideo,
+  detailIsNovel,
+  isVideoFolderCategory,
+  showNotifyByType,
+  getResourceFilePath,
+  getFileNameWithoutExtension,
+  getAudioDirectoryPath,
+  normalizeAudioPath,
+  loadPictureViewerScrollMode,
+  fetchData,
+  applyAudioPlayerSession,
+  loadPlaybackResumeRestartThresholds,
+  loadAllCategoryResources,
+  buildMusicPlaylistTrack,
+  buildVideoPlaylistTrack,
+  resolveResourceAudioTree,
+  collectAudioTreeTracks,
+  collectAudioTreeVideoTracks,
+  sortVideoTracksBySubItems,
+  refreshVideoSubCoverPreviewUrls,
+  readComicProgress,
+  writeComicProgress,
+  refreshDetailScreenshots,
+  startComicReadingSession,
+  stopComicReadingSession,
+  readNovelProgress,
+  startNovelReaderSession,
+  stopTextReadingSession,
+  stopPdfReadingSession,
+  stopEpubReadingSession,
+  stopEbookReadingSession
+})
+const handleOpenAudioTreeImage = readerPlayerActions.handleOpenAudioTreeImage
+const handleAudioTreePlay = readerPlayerActions.handleAudioTreePlay
+const {
+  closeDetailAudioContextMenu,
+  handleOpenAudioTreeContextMenu,
+  detailAudioContextMenuOptions,
+  detailAudioContextMenuPosition,
+  handleSelectDetailAudioContextMenu
+} = useCategoryDetailAudioContextMenu({
+  detailAudioContextMenuVisible,
+  detailAudioContextMenuX,
+  detailAudioContextMenuY,
+  detailAudioContextMenuTarget,
+  formatAsmrDuration,
+  formatAudioBitrate,
+  formatAudioSampleRate,
+  formatFrameRate,
+  formatImageResolution,
+  handleOpenAudioTreeImage,
+  handleAudioTreePlay,
+  showNotifyByType
+})
+const handleOpenPictureViewer = readerPlayerActions.handleOpenPictureViewer
+const handleDetailDrawerOpenPictureViewer = async (target?: number | string) => {
+  if (typeof target === 'number' || target === undefined) {
+    await handleOpenPictureViewer(target)
   }
-
-  nextItems.splice(toIndex, 0, targetItem)
-  videoOrderItems.value = normalizeVideoOrderItems(nextItems)
 }
 
-const handleVideoOrderDragStart = (index: number, event: DragEvent) => {
-  videoOrderDragIndex.value = index
-  videoOrderDragOverIndex.value = index
-  if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = 'move'
-    event.dataTransfer.setData('text/plain', String(index))
-  }
-}
-
-const handleVideoOrderDragEnter = (index: number) => {
-  if (videoOrderDragIndex.value == null || videoOrderDragIndex.value === index) {
-    return
-  }
-
-  videoOrderDragOverIndex.value = index
-}
-
-const handleVideoOrderDrop = (index: number) => {
-  const fromIndex = videoOrderDragIndex.value
-  videoOrderDragIndex.value = null
-  videoOrderDragOverIndex.value = null
-  if (fromIndex == null || fromIndex === index) {
-    return
-  }
-
-  moveVideoOrderItem(fromIndex, index)
-}
-
-const handleVideoOrderDragEnd = () => {
-  videoOrderDragIndex.value = null
-  videoOrderDragOverIndex.value = null
-}
-
-const handleOpenVideoOrderDialog = (resource: any) => {
-  void (async () => {
-    const resourceId = String(resource?.id ?? '').trim()
-    if (!resourceId) {
-      showNotifyByType('warning', '修改顺序', '资源ID无效')
-      return
-    }
-
-    try {
-      const result = await window.api.service.getResourceDetail(resourceId)
-      const resultType = result?.type ?? 'warning'
-      const detail = result?.data ?? null
-      if (resultType === 'error' || !detail) {
-        showNotifyByType(resultType, '修改顺序', result?.message ?? '获取番剧详情失败')
-        return
-      }
-
-      const videoSubs = getDetailVideoSubItems(detail)
-      if (!videoSubs.length) {
-        showNotifyByType('warning', '修改顺序', '当前番剧目录中没有可排序的视频文件')
-        return
-      }
-
-      videoOrderResource.value = detail
-      videoOrderItems.value = videoSubs
-      videoOrderInitialItems.value = videoSubs.map((item, index) => ({
-        ...item,
-        sortOrder: index
-      }))
-      await refreshVideoSubCoverPreviewUrls(detail)
-      showVideoOrderModal.value = true
-    } catch (error) {
-      showNotifyByType('error', '修改顺序', error instanceof Error ? error.message : '打开顺序编辑失败')
-    }
-  })()
-}
-
-const handleSubmitVideoOrder = async () => {
-  const resourceId = String(videoOrderResource.value?.id ?? '').trim()
-  if (!resourceId) {
-    showNotifyByType('warning', '修改顺序', '资源ID无效')
-    return
-  }
-
-  isVideoOrderSubmitting.value = true
+const handleToggleTop = async (resource: any) => {
   try {
-    const result = await window.api.service.updateVideoSubItems(resourceId, videoOrderItems.value.map((item, index) => ({
-      relativePath: item.relativePath,
-      isVisible: item.isVisible,
-      sortOrder: index
-    })))
+    const nextValue = !Boolean(resource?.ifTop)
+    const result = await window.api.service.updateResourceTop(String(resource?.id ?? ''), nextValue)
     const resultType = result?.type ?? 'info'
     const resultMessage = result?.message ?? '操作完成'
-    showNotifyByType(resultType, '修改顺序', resultMessage)
 
-    if (resultType === 'error') {
-      return
+    showNotifyByType(resultType, nextValue ? '置顶资源' : '取消置顶', resultMessage)
+
+    if (resultType !== 'error') {
+      resource.ifTop = nextValue
+      await fetchData()
     }
-
-    if (showDetailDrawer.value && String(selectedDetailResource.value?.id ?? '') === resourceId) {
-      selectedDetailResource.value = {
-        ...selectedDetailResource.value,
-        videoSubs: Array.isArray(result?.data) ? result.data : selectedDetailResource.value?.videoSubs ?? []
-      }
-      await refreshVideoSubCoverPreviewUrls(selectedDetailResource.value)
-      await refreshDetailAudioTree(selectedDetailResource.value)
-    }
-
-    showVideoOrderModal.value = false
-    await fetchData()
   } catch (error) {
-    showNotifyByType('error', '修改顺序', error instanceof Error ? error.message : '保存番剧顺序失败')
-  } finally {
-    isVideoOrderSubmitting.value = false
+    showNotifyByType('error', '置顶资源', error instanceof Error ? error.message : '更新置顶状态失败')
   }
 }
+
+const handleToggleHomePin = async (resource: any) => {
+  try {
+    const nextValue = !Boolean(resource?.homePinnedAt)
+    const result = await window.api.service.updateResourceHomePin(String(resource?.id ?? ''), nextValue)
+    const resultType = result?.type ?? 'info'
+    const resultMessage = result?.message ?? '操作完成'
+
+    showNotifyByType(resultType, nextValue ? '固定到首页' : '取消首页固定', resultMessage)
+
+    if (resultType !== 'error') {
+      resource.homePinnedAt = nextValue ? Date.now() : null
+      await fetchData()
+    }
+  } catch (error) {
+    showNotifyByType('error', '固定到首页', error instanceof Error ? error.message : '更新首页固定状态失败')
+  }
+}
+
+const clearDetailDerivedState = () => {
+  detailScreenshotPaths.value = []
+  detailAudioTree.value = []
+  detailAudioTreeLoading.value = detailIsAsmr.value || isVideoFolderCategory.value
+}
+
+const detailRuntime = useCategoryDetailRuntime({
+  selectedDetailResource,
+  showDetailDrawer,
+  showPictureViewer,
+  showComicReader,
+  showTextReader,
+  showPdfReader,
+  showEpubReader,
+  showEbookReader,
+  visibleLogCount,
+  currentScreenshotIndex,
+  detailIsAudio,
+  getResourceFilePath,
+  closeDetailAudioContextMenu,
+  clearDetailDerivedState,
+  refreshVideoSubCoverPreviewUrls,
+  applyDetailAudioTreePresentation,
+  refreshDetailScreenshots,
+  refreshDetailAudioTree
+})
+
+handleShowResourceDetail = detailRuntime.handleShowResourceDetail
+
+const videoOrderDialog = useCategoryVideoOrderDialog({
+  showVideoOrderModal,
+  showDetailDrawer,
+  selectedDetailResource,
+  fetchData: async () => {
+    await fetchData()
+  },
+  getDetailVideoSubItems,
+  scheduleVideoSubCoverPreviewRefresh,
+  refreshVideoSubCoverPreviewUrls,
+  refreshDetailAudioTree,
+  showNotifyByType,
+  compareByFileName
+})
+
+const {
+  videoOrderResource,
+  videoOrderItems,
+  isVideoOrderSubmitting,
+  videoOrderDragIndex,
+  videoOrderDragOverIndex,
+  resetVideoOrderDialog,
+  handleResetVideoOrderItems,
+  isVideoOrderItemChanged,
+  moveVideoOrderItem,
+  handleVideoOrderDragStart,
+  handleVideoOrderDragEnter,
+  handleVideoOrderDrop,
+  handleVideoOrderDragEnd,
+  handleOpenVideoOrderDialog,
+  handleSubmitVideoOrder
+} = videoOrderDialog
 
 const deleteScreenshotFile = async (filePath: string, nextIndex: number = currentScreenshotIndex.value) => {
   const message = await window.api.dialog.deleteImage(filePath)
@@ -7964,6 +3658,7 @@ const handleToggleCompleted = async (resource: any) => {
     )
   }
 }
+
 </script>
 
 <template>
@@ -7975,139 +3670,61 @@ const handleToggleCompleted = async (resource: any) => {
     @drop="handleDropResourceFile"
   >
     <n-layout has-sider embedded position="absolute" class="layout-root">
-      <n-layout-sider
-        bordered
-        :width="240"
-        showTrigger
-        :native-scrollbar="false"
-        content-class="filter-sider-content"
-        content-style="height: 100%; overflow: hidden;"
-        class="filter-sider">
-        <div class="filter-panel">
-          <div class="filter-top">
-            <n-h3 class="filter-title">
-              <n-icon :component="FunnelOutline" depth="3" /> 筛选条件
-            </n-h3>
-            <div class="filter-top-options">
-              <n-checkbox v-if="showMissingFilter" v-model:checked="missingFile" class="filter-top-option">
-                <span class="filter-top-option__label">资源失效</span>
-                <n-tag type="error" :bordered="false" round size="small">{{ missingResourceCount }}</n-tag>
-              </n-checkbox>
-              <n-checkbox v-model:checked="favoriteOnly" class="filter-top-option">
-                <span class="filter-top-option__label">已收藏</span>
-                <n-tag type="success" :bordered="false" round size="small">{{ favoriteResourceCount }}</n-tag>
-              </n-checkbox>
-              <n-checkbox v-if="showCompletedFilter" v-model:checked="completedOnly" class="filter-top-option">
-                <span class="filter-top-option__label">{{ completedStateLabel }}</span>
-                <n-tag type="info" :bordered="false" round size="small">{{ completedResourceCount }}</n-tag>
-              </n-checkbox>
-              <n-checkbox v-if="showRunningFilter" v-model:checked="runningOnly" class="filter-top-option">
-                <span class="filter-top-option__label">运行中</span>
-                <n-tag type="success" :bordered="false" round size="small">{{ runningResourceCount }}</n-tag>
-              </n-checkbox>
-            </div>
-          </div>
-
-          <div class="filter-sections" :style="filterSectionsStyle">
-            <div v-if="showAuthorFilter" class="filter-section">
-              <n-divider title-placement="left" style="margin-bottom: 5px;">
-                {{ categorySettings.authorText || '作者筛选' }}
-              </n-divider>
-              <n-input
-                v-model:value="authorSearch"
-                :placeholder="`请输入${categorySettings.authorText || '作者'}名称`"
-                class="author-search"
-                clearable
-              />
-              <n-checkbox-group v-model:value="selectedAuthorList" class="filter-group">
-                <n-flex vertical class="filter-list">
-                  <n-checkbox v-for="author in filteredAuthorList" :key="author.id" :value="author.id">
-                    {{ author.name }}
-                    <n-tag type="primary" :bordered="false" round size="small">{{ author.count }}</n-tag>
-                  </n-checkbox>
-                </n-flex>
-              </n-checkbox-group>
-            </div>
-            <div v-if="isVideoCategory" class="filter-section">
-              <n-divider title-placement="left" style="margin-bottom: 5px;">{{ videoActorLabel }}筛选</n-divider>
-              <n-input
-                v-model:value="actorSearch"
-                :placeholder="`请输入${videoActorLabel}名称`"
-                class="actor-search"
-                clearable
-              />
-              <n-checkbox-group v-model:value="selectedActorList" class="filter-group">
-                <n-flex vertical class="filter-list">
-                  <n-checkbox v-for="actor in filteredActorList" :key="actor.id" :value="actor.id">
-                    {{ actor.name }}
-                    <n-tag type="success" :bordered="false" round size="small">{{ actor.count }}</n-tag>
-                  </n-checkbox>
-                </n-flex>
-              </n-checkbox-group>
-            </div>
-            <div v-if="isAudioCategory" class="filter-section">
-              <n-divider title-placement="left" style="margin-bottom: 5px;">专辑筛选</n-divider>
-              <n-input
-                v-model:value="albumSearch"
-                placeholder="请输入专辑名称"
-                class="album-search"
-                clearable
-              />
-              <n-checkbox-group v-model:value="selectedAlbumList" class="filter-group">
-                <n-flex vertical class="filter-list">
-                  <n-checkbox v-for="album in filteredAlbumList" :key="album.name" :value="album.name">
-                    {{ album.name }}
-                    <n-tag type="success" :bordered="false" round size="small">{{ album.count }}</n-tag>
-                  </n-checkbox>
-                </n-flex>
-              </n-checkbox-group>
-            </div>
-            <div class="filter-section">
-              <n-divider title-placement="left" style="margin-bottom: 5px;">标签筛选</n-divider>
-              <n-input v-model:value="tagSearch" placeholder="请输入标签名称" class="tag-search" clearable/>
-              <n-checkbox-group v-model:value="selectedTagList" class="filter-group">
-                <n-flex vertical class="filter-list">
-                  <n-checkbox v-for="tag in filteredTagList" :key="tag.id" :value="tag.id">{{tag.name}}
-                    <n-tag type="info" :bordered="false" round size="small">{{tag.count}}</n-tag>
-                  </n-checkbox>
-                </n-flex>
-              </n-checkbox-group>
-            </div>
-            <div v-if="!detailIsAsmr" class="filter-section">
-              <n-divider title-placement="left" style="margin-bottom: 5px;">分类筛选</n-divider>
-              <n-input v-model:value="typeSearch" placeholder="请输入分类名称" class="type-search" clearable/>
-              <n-checkbox-group v-model:value="selectedTypeList" class="filter-group">
-                <n-flex vertical class="filter-list">
-                  <n-checkbox v-for="type in filteredTypeList" :key="type.id" :value="type.id">{{type.name}}
-                    <n-tag type="warning" :bordered="false" round size="small">{{type.count}}</n-tag>
-                  </n-checkbox>
-                </n-flex>
-              </n-checkbox-group>
-            </div>
-            <div v-if="showEngineFilter" class="filter-section">
-              <n-divider title-placement="left" style="margin-bottom: 5px;">引擎筛选</n-divider>
-              <n-checkbox-group v-model:value="selectedEngineList" class="filter-group">
-                <n-flex vertical class="filter-list">
-                  <n-checkbox v-for="engine in filteredEngineList" :key="engine.id" :value="engine.id">
-                    <span v-if="engine.icon" class="filter-engine-option">
-                      <img :src="engine.icon" :alt="engine.name" class="filter-engine-option__icon" />
-                      <span>{{ engine.name }} </span>
-                    </span>
-                    <span v-else>{{ engine.name }} </span>
-                    <n-tag type="success" :bordered="false" round size="small">{{ engine.count }}</n-tag>
-                  </n-checkbox>
-                </n-flex>
-              </n-checkbox-group>
-            </div>
-          </div>
-
-          <div class="filter-bottom">
-            <n-button quaternary size="small" type="warning" class="reset-btn" @click="resetSelected">
-              重置筛选
-            </n-button>
-          </div>
-        </div>
-      </n-layout-sider>
+      <CategoryFilterPanel
+        :show-missing-filter="showMissingFilter"
+        :missing-file="missingFile"
+        :missing-resource-count="missingResourceCount"
+        :favorite-only="favoriteOnly"
+        :favorite-resource-count="favoriteResourceCount"
+        :show-completed-filter="showCompletedFilter"
+        :completed-only="completedOnly"
+        :completed-state-label="completedStateLabel"
+        :completed-resource-count="completedResourceCount"
+        :show-running-filter="showRunningFilter"
+        :running-only="runningOnly"
+        :running-resource-count="runningResourceCount"
+        :filter-sections-style="filterSectionsStyle"
+        :show-author-filter="showAuthorFilter"
+        :category-settings="categorySettings"
+        :author-search="authorSearch"
+        :filtered-author-list="filteredAuthorList"
+        :selected-author-list="selectedAuthorList"
+        :show-actor-filter="showActorFilter"
+        :actor-filter-label="actorFilterLabel"
+        :actor-search="actorSearch"
+        :filtered-actor-list="filteredActorList"
+        :selected-actor-list="selectedActorList"
+        :is-audio-category="isAudioCategory"
+        :album-search="albumSearch"
+        :filtered-album-list="filteredAlbumList"
+        :selected-album-list="selectedAlbumList"
+        :tag-search="tagSearch"
+        :filtered-tag-list="filteredTagList"
+        :selected-tag-list="selectedTagList"
+        :detail-is-asmr="detailIsAsmr"
+        :type-search="typeSearch"
+        :filtered-type-list="filteredTypeList"
+        :selected-type-list="selectedTypeList"
+        :show-engine-filter="showEngineFilter"
+        :filtered-engine-list="filteredEngineList"
+        :selected-engine-list="selectedEngineList"
+        @update:missing-file="missingFile = $event"
+        @update:favorite-only="favoriteOnly = $event"
+        @update:completed-only="completedOnly = $event"
+        @update:running-only="runningOnly = $event"
+        @update:author-search="authorSearch = $event"
+        @update:selected-author-list="selectedAuthorList = $event"
+        @update:actor-search="actorSearch = $event"
+        @update:selected-actor-list="selectedActorList = $event"
+        @update:album-search="albumSearch = $event"
+        @update:selected-album-list="selectedAlbumList = $event"
+        @update:tag-search="tagSearch = $event"
+        @update:selected-tag-list="selectedTagList = $event"
+        @update:type-search="typeSearch = $event"
+        @update:selected-type-list="selectedTypeList = $event"
+        @update:selected-engine-list="selectedEngineList = $event"
+        @reset-selected="resetSelected"
+      />
 
       <div class="detail-main" :style="pageStyle">
         <div class="detail-header" :style="headerStyle">
@@ -8122,7 +3739,7 @@ const handleToggleCompleted = async (resource: any) => {
               placeholder="按名称搜索"
             >
               <template #prefix>
-                <n-icon :component="SearchOutline" />
+                <n-icon :component="SearchOutline"/>
               </template>
             </n-input>
           </div>
@@ -8180,6 +3797,12 @@ const handleToggleCompleted = async (resource: any) => {
             <n-button v-if="isAudioCategory" @click="openBatchLabelDialog('authors', 'remove')">
               删除歌手
             </n-button>
+            <n-button v-if="isVideoCategory" @click="openBatchLabelDialog('actors', 'add')">
+              添加{{ actorFilterLabel }}
+            </n-button>
+            <n-button v-if="isVideoCategory" @click="openBatchLabelDialog('actors', 'remove')">
+              删除{{ actorFilterLabel }}
+            </n-button>
             <n-button v-if="isAudioCategory" @click="openBatchLabelDialog('album', 'add')">
               添加专辑
             </n-button>
@@ -8206,58 +3829,60 @@ const handleToggleCompleted = async (resource: any) => {
         <div class="detail-content">
           <n-scrollbar class="detail-scrollbar">
             <div class="detail-content__inner">
-            <n-empty v-if="resourceList.length === 0" :description="`暂无${categoryName || ''}资源，点击按钮添加吧！`">
-              <template #extra>
-                <n-button type="primary" :disabled="currentCategoryBatchInBackground" @click="handleAddResource">
-                  添加第一{{categorySettings.addFirst}}{{ categoryName ?? '资源' }}
-                </n-button>
-              </template>
-            </n-empty>
+              <n-empty v-if="resourceList.length === 0" :description="`暂无${categoryName || ''}资源，点击按钮添加吧！`">
+                <template #extra>
+                  <n-button type="primary" :disabled="currentCategoryBatchInBackground" @click="handleAddResource">
+                    添加第一{{ categorySettings.addFirst }}{{ categoryName ?? '资源' }}
+                  </n-button>
+                </template>
+              </n-empty>
 
-            <div v-else class="resource-grid">
-              <ResourceCard
-                v-for="resource in resourceList"
-                :key="`${resource.id}-${resource.coverPath ?? ''}`"
-                :resource="resource"
-                :category-name="categoryName"
-                :hide-type-line="detailIsAsmr"
-                :author-label="categorySettings.authorText || '作者'"
-                :start-text="startText"
-                :show-mtool-launch="showMtoolLaunch"
-                :can-mtool-launch="canMtoolLaunch"
-                :show-zone-launch="showZoneLaunch"
-                :can-zone-launch="canZoneLaunch"
-                :show-admin-launch="showAdminLaunch"
-                :show-cover="showCardCover"
-                :show-screenshot-folder="showScreenshotFolder"
-                :show-completed-toggle="showCompletedToggle"
-                :show-delete-files="showDeleteFiles"
-                :show-modify-order="isVideoFolderCategory"
-                :stop-needs-confirm="categorySettings.extendTable === 'game_meta'"
-                :selected="selectedResourceIds.includes(String(resource?.id ?? ''))"
-                :selection-mode="resourceSelectionMode"
-                :show-default-app-play="showCardDefaultAppOpen"
-                default-app-action-text="使用默认应用打开"
-                :show-add-to-playlist="isAudioCategory"
-                @launch="handleLaunchResource"
-                @admin-launch="handleAdminLaunchResource"
-                @mtool-launch="handleMtoolLaunchResource"
-                @stop="handleStopResource"
-                @zone-launch="handleZoneLaunchResource"
-                @show-detail="handleShowResourceDetail"
-                @edit="handleEditResource"
-                @open-folder="handleOpenResourceFolder"
-                @default-app-play="handleDefaultAppPlayResource"
-                @add-to-playlist="handleAddMusicToPlaylist"
-                @open-screenshot-folder="handleOpenScreenshotFolder"
-                @toggle-favorite="handleToggleFavorite"
-                @toggle-completed="handleToggleCompleted"
-                @toggle-select="handleToggleSelectResource"
-                @delete="handleDeleteResource"
-                @delete-files="handleDeleteResourceFiles"
-                @modify-order="handleOpenVideoOrderDialog"
-              />
-            </div>
+              <div v-else class="resource-grid">
+                <ResourceCard
+                  v-for="resource in resourceList"
+                  :key="`${resource.id}-${resource.coverPath ?? ''}`"
+                  :resource="resource"
+                  :category-name="categoryName"
+                  :hide-type-line="detailIsAsmr"
+                  :author-label="categorySettings.authorText || '作者'"
+                  :start-text="startText"
+                  :show-mtool-launch="showMtoolLaunch"
+                  :can-mtool-launch="canMtoolLaunch"
+                  :show-zone-launch="showZoneLaunch"
+                  :can-zone-launch="canZoneLaunch"
+                  :show-admin-launch="showAdminLaunch"
+                  :show-cover="showCardCover"
+                  :show-screenshot-folder="showScreenshotFolder"
+                  :show-completed-toggle="showCompletedToggle"
+                  :show-delete-files="showDeleteFiles"
+                  :show-modify-order="isVideoFolderCategory"
+                  :stop-needs-confirm="categorySettings.extendTable === 'game_meta'"
+                  :selected="selectedResourceIds.includes(String(resource?.id ?? ''))"
+                  :selection-mode="resourceSelectionMode"
+                  :show-default-app-play="showCardDefaultAppOpen"
+                  default-app-action-text="使用默认应用打开"
+                  :show-add-to-playlist="isAudioCategory"
+                  @launch="handleLaunchResource"
+                  @admin-launch="handleAdminLaunchResource"
+                  @mtool-launch="handleMtoolLaunchResource"
+                  @stop="handleStopResource"
+                  @zone-launch="handleZoneLaunchResource"
+                  @show-detail="handleShowResourceDetail"
+                  @edit="handleEditResource"
+                  @open-folder="handleOpenResourceFolder"
+                  @default-app-play="handleDefaultAppPlayResource"
+                  @add-to-playlist="handleAddMusicToPlaylist"
+                  @open-screenshot-folder="handleOpenScreenshotFolder"
+                  @toggle-favorite="handleToggleFavorite"
+                  @toggle-completed="handleToggleCompleted"
+                  @toggle-top="handleToggleTop"
+                  @toggle-home-pin="handleToggleHomePin"
+                  @toggle-select="handleToggleSelectResource"
+                  @delete="handleDeleteResource"
+                  @delete-files="handleDeleteResourceFiles"
+                  @modify-order="handleOpenVideoOrderDialog"
+                />
+              </div>
             </div>
           </n-scrollbar>
         </div>
@@ -8299,692 +3924,145 @@ const handleToggleCompleted = async (resource: any) => {
       </div>
     </n-layout>
 
-    <n-drawer v-model:show="showDetailDrawer" placement="right" :width="detailDrawerWidth">
-      <n-drawer-content closable>
-        <template #header>
-          <div class="detail-drawer__header-title">
-            <img
-              v-if="detailIsWebsite && detailWebsiteFaviconSrc"
-              :src="detailWebsiteFaviconSrc"
-              :alt="selectedDetailResource?.title || `${categoryName}详情`"
-              class="detail-drawer__header-icon"
-            />
-            <span v-else-if="detailIsWebsite" class="detail-drawer__header-icon detail-drawer__header-icon--emoji">
-              {{ detailWebsitePlaceholderEmoji }}
-            </span>
-            <span>{{ selectedDetailResource?.title || `${categoryName}详情` }}</span>
-          </div>
-        </template>
-        <div class="detail-drawer__resize-handle" @mousedown.prevent="handleDetailDrawerResizeStart" />
-        <n-scrollbar style="max-height: 100%;">
-            <div v-if="selectedDetailResource" class="detail-drawer" :class="{ 'detail-drawer--software': detailIsSoftware }">
-            <div v-if="!detailIsSoftware" class="detail-drawer__cover">
-              <img
-                v-if="detailCoverPreviewSrc"
-                :src="detailCoverPreviewSrc"
-                :alt="selectedDetailResource.title"
-                class="detail-drawer__cover-image"
-              />
-              <div
-                v-else
-                class="detail-drawer__cover-placeholder"
-                :class="{ 'detail-drawer__cover-placeholder--website': detailIsWebsite }"
-              >
-                <template v-if="detailIsWebsite">
-                  <div class="detail-drawer__website-cover">
-                    <div class="detail-drawer__website-cover-glow" />
-                    <div class="detail-drawer__website-cover-badge">
-                      <img
-                        v-if="detailWebsiteFaviconSrc"
-                        :src="detailWebsiteFaviconSrc"
-                        :alt="selectedDetailResource.title"
-                        class="detail-drawer__website-cover-icon"
-                      />
-                      <span v-else class="detail-drawer__website-cover-emoji">{{ detailWebsitePlaceholderEmoji }}</span>
-                    </div>
-                    <span class="detail-drawer__website-cover-text">{{ detailWebsiteCoverPlaceholderText }}</span>
-                  </div>
-                </template>
-                <template v-else>
-                  暂无封面
-                </template>
-              </div>
-            </div>
-
-            <div class="detail-drawer__section">
-              <div class="detail-drawer__section-title">基本信息</div>
-              <div class="detail-drawer__grid">
-                <div class="detail-drawer__item">
-                  <span class="detail-drawer__label">标题</span>
-                  <span class="detail-drawer__value">{{ selectedDetailResource.title || '暂无' }}</span>
-                </div>
-                <div v-if="!detailIsWebsite" class="detail-drawer__item">
-                  <span class="detail-drawer__label">文件名</span>
-                  <span class="detail-drawer__value">{{ selectedDetailResource.fileName || '暂无' }}</span>
-                </div>
-                <div v-if="!detailIsWebsite" class="detail-drawer__item">
-                  <span class="detail-drawer__label">{{ categorySettings.authorText || '作者' }}</span>
-                  <span class="detail-drawer__value">{{ (selectedDetailResource.authors ?? []).map((item: any) => item.name).join('、') || '暂无' }}</span>
-                </div>
-                <div v-if="detailIsManga" class="detail-drawer__item">
-                  <span class="detail-drawer__label">汉化者</span>
-                  <span class="detail-drawer__value">{{ selectedDetailResource.multiImageMeta?.translator || '暂无' }}</span>
-                </div>
-                <div class="detail-drawer__item">
-                  <span class="detail-drawer__label">评分</span>
-                  <div class="detail-drawer__rating">
-                    <div class="detail-drawer__rating-main">
-                      <n-rate
-                        v-model:value="detailRatingDraft"
-                        allow-half
-                        clearable
-                        @update:value="handleRatingUpdate"
-                      />
-                      <n-button
-                        v-if="hasPendingRatingChange"
-                        type="primary"
-                        ghost
-                        circle
-                        size="tiny"
-                        class="detail-drawer__rating-submit"
-                        @click="handleUpdateResourceRating"
-                      >
-                        <template #icon>
-                          <n-icon :component="CheckmarkOutline" />
-                        </template>
-                      </n-button>
-                    </div>
-                    <span v-if="ratingComment" class="detail-drawer__rating-text">
-                      {{ ratingComment }} {{ getRatingEmoji(detailRatingDraft) }}
-                    </span>
-                    <span v-else-if="Number(detailRatingDraft) === 0" class="detail-drawer__rating-text">
-                      区 {{ getRatingEmoji(detailRatingDraft) }}
-                    </span>
-                  </div>
-                </div>
-                <div v-if="!detailIsAsmr" class="detail-drawer__item">
-                  <span class="detail-drawer__label">分类</span>
-                  <div v-if="(selectedDetailResource.types ?? []).length" class="detail-drawer__tag-list">
-                    <n-tag
-                      v-for="typeItem in selectedDetailResource.types"
-                      :key="`${selectedDetailResource.id}-detail-type-${typeItem.id}`"
-                      bordered
-                      :round="false"
-                      type="warning"
-                      size="small"
-                    >
-                      {{ typeItem.name }}
-                    </n-tag>
-                  </div>
-                  <span v-else class="detail-drawer__value">暂无</span>
-                </div>
-                  <div class="detail-drawer__item" :class="{ 'detail-drawer__item--full': detailIsAsmr }">
-                    <span class="detail-drawer__label">标签</span>
-                    <div v-if="(selectedDetailResource.tags ?? []).length" class="detail-drawer__tag-list">
-                      <n-tag
-                        v-for="tagItem in selectedDetailResource.tags"
-                      :key="`${selectedDetailResource.id}-detail-tag-${tagItem.id}`"
-                      bordered
-                      :round="false"
-                      type="info"
-                      size="small"
-                    >
-                      {{ tagItem.name }}
-                    </n-tag>
-                    </div>
-                    <span v-else class="detail-drawer__value">暂无</span>
-                  </div>
-                <div v-if="!detailIsWebsite" class="detail-drawer__item detail-drawer__item--full">
-                  <span class="detail-drawer__label">路径</span>
-                    <div class="detail-drawer__path-row">
-                    <span class="detail-drawer__value detail-drawer__value--path">{{ detailDisplayPath || '暂无' }}</span>
-                    <n-button type="primary" ghost class="detail-drawer__path-button" @click="handleOpenDetailResourcePath">
-                      <template #icon>
-                        <n-icon :component="FolderOpenOutline" />
-                      </template>
-                    </n-button>
-                  </div>
-                </div>
-                <div v-if="!detailIsWebsite && !detailIsSoftware && !detailIsManga && detailStores.length" class="detail-drawer__item detail-drawer__item--full">
-                  <span class="detail-drawer__label">贩售网站</span>
-                  <div class="detail-drawer__store-list">
-                    <button
-                      v-for="storeItem in detailStores"
-                      :key="`${selectedDetailResource.id}-detail-store-${storeItem.id}`"
-                      type="button"
-                      class="detail-drawer__store-button"
-                      :disabled="!storeItem.url"
-                      @click="handleOpenStoreWebsite(storeItem.url)"
-                    >
-                      <img
-                        v-if="storeItem.icon"
-                        :src="storeItem.icon"
-                        :alt="storeItem.name"
-                        class="detail-drawer__store-icon"
-                      />
-                      <span v-else class="detail-drawer__store-fallback">{{ storeItem.name.slice(0, 1) }}</span>
-                      <span class="detail-drawer__store-name">{{ storeItem.name }}</span>
-                    </button>
-                  </div>
-                </div>
-                <div
-                  v-for="metaItem in detailMetaItems"
-                  :key="`${selectedDetailResource.id}-meta-${metaItem.label}`"
-                  class="detail-drawer__item"
-                  :class="{ 'detail-drawer__item--full': detailIsSoftware || metaItem.full }"
-                >
-                  <span class="detail-drawer__label">{{ metaItem.label }}</span>
-                  <div
-                    v-if="metaItem.copyValue"
-                    class="detail-drawer__path-row"
-                  >
-                    <span
-                      class="detail-drawer__value detail-drawer__value--path"
-                      :class="{ 'detail-drawer__value--clamp-3': metaItem.clampLines === 3 }"
-                    >
-                      {{ metaItem.value }}
-                    </span>
-                    <n-button
-                      type="primary"
-                      ghost
-                      class="detail-drawer__path-button"
-                      @click="handleCopyText(metaItem.copyValue, metaItem.label)"
-                    >
-                      <template #icon>
-                        <n-icon :component="CopyOutline" />
-                      </template>
-                    </n-button>
-                  </div>
-                  <span
-                    v-else-if="metaItem.icon"
-                    class="detail-drawer__value detail-drawer__meta-with-icon"
-                    :class="{ 'detail-drawer__value--multiline': detailIsSoftware }"
-                  >
-                    <img :src="metaItem.icon" :alt="metaItem.value" class="detail-drawer__meta-icon" />
-                    <span v-if="!(detailIsWebsite && metaItem.label === '站点图标')">{{ metaItem.value }}</span>
-                  </span>
-                  <span
-                    v-else
-                    class="detail-drawer__value"
-                    :class="{ 'detail-drawer__value--multiline': detailIsSoftware }"
-                  >
-                    {{ metaItem.value }}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div v-if="hasDetailDescription" class="detail-drawer__section">
-              <div class="detail-drawer__section-title">描述</div>
-              <div class="detail-drawer__item detail-drawer__item--full">
-                <div class="detail-drawer__description-box" :style="detailDescriptionBoxStyle">
-                  <n-scrollbar class="detail-drawer__description-scrollbar">
-                    <div
-                      ref="detailDescriptionContentRef"
-                      class="detail-drawer__value detail-drawer__value--description detail-drawer__value--rich"
-                      v-html="selectedDetailResource.description"
-                    />
-                  </n-scrollbar>
-                </div>
-              </div>
-            </div>
-
-            <div class="detail-drawer__section">
-              <div class="detail-drawer__section-title">统计信息</div>
-              <div class="detail-drawer__grid">
-                <div class="detail-drawer__item">
-                  <span class="detail-drawer__label">{{ detailStatsText.firstAccess }}</span>
-                  <span class="detail-drawer__value">{{ formatDateTime(detailStats?.firstAccessTime) }}</span>
-                </div>
-                <div class="detail-drawer__item">
-                  <span class="detail-drawer__label">{{ detailStatsText.lastAccess }}</span>
-                  <span class="detail-drawer__value">{{ formatDateTime(detailStats?.lastAccessTime) }}</span>
-                </div>
-                <div class="detail-drawer__item">
-                  <span class="detail-drawer__label">{{ detailStatsText.accessCount }}</span>
-                  <span class="detail-drawer__value">{{ Number(detailStats?.accessCount ?? 0) }}</span>
-                </div>
-                <div v-if="detailShowTotalRuntime" class="detail-drawer__item">
-                  <span class="detail-drawer__label">{{ detailStatsText.totalRuntime }}</span>
-                  <span class="detail-drawer__value">{{ formatDuration(detailStats?.totalRuntime) }}</span>
-                </div>
-                <div class="detail-drawer__item">
-                  <span class="detail-drawer__label">添加日期</span>
-                  <span class="detail-drawer__value">{{ formatDateTime(selectedDetailResource.createTime) }}</span>
-                </div>
-                  <div v-if="detailIsManga || detailIsNovel" class="detail-drawer__item">
-                    <span class="detail-drawer__label">阅读进度</span>
-                    <span class="detail-drawer__value">{{ detailReadingProgressText }}</span>
-                  </div>
-                <div v-if="detailIsAsmr || detailIsAudio || isVideoCategory" class="detail-drawer__item">
-                    <span class="detail-drawer__label">播放进度</span>
-                    <span class="detail-drawer__value">{{ detailPlaybackProgressText }}</span>
-                  </div>
-                </div>
-              </div>
-
-            <div v-if="!detailIsSoftware && !detailIsManga && detailScreenshotPaths.length" class="detail-drawer__section">
-              <div class="detail-drawer__section-title">{{ detailPreviewSectionTitle }}</div>
-              <div class="detail-drawer__screenshot" @click="handleOpenPictureViewer()">
-                <img
-                  v-if="detailScreenshotPreviewSrc"
-                  :src="detailScreenshotPreviewSrc"
-                  :alt="selectedDetailResource.title"
-                  class="detail-drawer__screenshot-image"
-                />
-                <div class="detail-drawer__screenshot-mask">
-                  <n-icon :component="EyeOutline" size="28" />
-                </div>
-              </div>
-              <div class="detail-drawer__screenshot-actions">
-                <n-button quaternary @click="handlePreviousScreenshot">
-                  <template #icon>
-                    <n-icon :component="ChevronBackOutline" />
-                  </template>
-                </n-button>
-                <div class="detail-drawer__screenshot-index">
-                  {{ currentScreenshotIndex + 1 }} / {{ detailScreenshotPaths.length }}
-                </div>
-                <n-button quaternary @click="handleNextScreenshot">
-                  <template #icon>
-                    <n-icon :component="ChevronForwardOutline" />
-                  </template>
-                </n-button>
-                <n-popconfirm
-                  v-if="!detailIsManga"
-                  v-model:show="showDeleteScreenshotConfirm"
-                  @positive-click="handleDeleteCurrentScreenshot"
-                  positive-text="删除！"
-                  negative-text="手滑了"
-                  :positive-button-props="{type: 'error'}"
-                >
-                  <template #trigger>
-                    <n-button quaternary type="error">
-                      <template #icon>
-                        <n-icon :component="TrashOutline" />
-                      </template>
-                      删除截图
-                    </n-button>
-                  </template>
-                  确认删除当前截图吗？
-                </n-popconfirm>
-                <n-button quaternary @click="handleOpenDetailScreenshotFolder">
-                  <template #icon>
-                    <n-icon :component="FolderOpenOutline" />
-                  </template>
-                  {{ detailIsManga ? '打开漫画文件夹' : '打开截图文件夹' }}
-                </n-button>
-              </div>
-            </div>
-
-              <div v-if="detailIsManga && detailGalleryItems.length" class="detail-drawer__section">
-                <div class="detail-drawer__section-title">{{ detailGallerySectionTitle }}</div>
-                <div class="detail-drawer__gallery">
-                  <button
-                    v-for="galleryItem in detailGalleryItems"
-                    :key="`${selectedDetailResource.id}-gallery-${galleryItem.index}`"
-                    type="button"
-                    class="detail-drawer__gallery-item"
-                    @click="handleOpenPictureViewer(galleryItem.index)"
-                  >
-                    <img
-                      v-if="galleryItem.url"
-                      :src="galleryItem.url"
-                      :alt="`${selectedDetailResource.title}-${galleryItem.index + 1}`"
-                      class="detail-drawer__gallery-image"
-                      loading="lazy"
-                    />
-                    <div v-else class="detail-drawer__gallery-placeholder">加载中</div>
-                    <div class="detail-drawer__gallery-index">{{ galleryItem.index + 1 }}</div>
-                  </button>
-                </div>
-              </div>
-
-              <div v-else-if="detailIsAsmr" class="detail-drawer__section">
-                <div class="detail-drawer__section-title">{{ detailDirectorySectionTitle }}</div>
-                <n-empty v-if="!detailAudioTree.length" :description="detailDirectoryEmptyText" />
-                <template v-else>
-                  <n-tree
-                    block-line
-                    expand-on-click
-                    :data="detailAudioTree"
-                    :render-label="renderAudioTreeLabel"
-                    :render-suffix="renderAudioTreeSuffix"
-                    class="detail-audio-tree"
-                  />
-                  <n-dropdown
-                    trigger="manual"
-                    :show="detailAudioContextMenuVisible"
-                    :x="detailAudioContextMenuPosition.x"
-                    :y="detailAudioContextMenuPosition.y"
-                    placement="bottom-start"
-                    :options="detailAudioContextMenuOptions"
-                    :on-clickoutside="closeDetailAudioContextMenu"
-                    @select="handleSelectDetailAudioContextMenu"
-                  />
-                </template>
-              </div>
-
-              <div v-else-if="isVideoFolderCategory" class="detail-drawer__section">
-                <div class="detail-drawer__section-title">{{ detailDirectorySectionTitle }}</div>
-                <n-empty v-if="!detailAudioTree.length" :description="detailDirectoryEmptyText" />
-                <template v-else>
-                  <BangumiDirectory
-                    :nodes="detailAudioTree"
-                    @play="handleAudioTreePlay"
-                    @item-contextmenu="handleOpenAudioTreeContextMenu"
-                  />
-                  <n-dropdown
-                    trigger="manual"
-                    :show="detailAudioContextMenuVisible"
-                    :x="detailAudioContextMenuPosition.x"
-                    :y="detailAudioContextMenuPosition.y"
-                    placement="bottom-start"
-                    :options="detailAudioContextMenuOptions"
-                    :on-clickoutside="closeDetailAudioContextMenu"
-                    @select="handleSelectDetailAudioContextMenu"
-                  />
-                </template>
-              </div>
-
-              <div v-else-if="detailShowLogs" class="detail-drawer__section">
-                <div class="detail-drawer__section-title">{{ detailGallerySectionTitle }}</div>
-                <n-empty v-if="!detailLogs.length" :description="detailEmptyLogDescription" />
-                <n-infinite-scroll
-                  v-else
-                  class="detail-drawer__logs-scroll"
-                  :distance="8"
-                  @load="handleLoadMoreLogs"
-                >
-                  <div class="detail-drawer__logs">
-                    <div v-for="(logItem, index) in visibleDetailLogs" :key="`${selectedDetailResource.id}-${index}-${logItem.startTime}`" class="detail-drawer__log">
-                      <div class="detail-drawer__log-row">
-                        <span class="detail-drawer__log-label">{{ detailLogModeLabel }}</span>
-                        <span class="detail-drawer__log-value">{{ formatLaunchMode(logItem.launchMode, isVideoCategory) }}</span>
-                      </div>
-                      <div class="detail-drawer__log-row">
-                        <span class="detail-drawer__log-label">开始时间</span>
-                        <span class="detail-drawer__log-value">{{ formatDateTime(logItem.startTime) }}</span>
-                      </div>
-                      <div class="detail-drawer__log-row">
-                        <span class="detail-drawer__log-label">结束时间</span>
-                        <span class="detail-drawer__log-value">{{ formatLogEndTime(logItem.endTime) }}</span>
-                      </div>
-                      <div class="detail-drawer__log-row">
-                        <span class="detail-drawer__log-label">{{ detailLogDurationLabel }}</span>
-                        <span class="detail-drawer__log-value">{{ formatLogDuration(logItem) }}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div v-if="hasMoreDetailLogs" class="detail-drawer__logs-more">
-                    <n-button quaternary size="small" @click="handleLoadMoreLogs">展示更多</n-button>
-                  </div>
-                  <div v-if="noMore">
-                    <div class="detail-drawer__logs-finish">没有更多了 🤪</div>
-                  </div>
-                </n-infinite-scroll>
-              </div>
-
-              <n-float-button
-                :type="selectedDetailResource?.isRunning ? 'error' : 'primary'"
-                class="detail-drawer__launch"
-                :description="selectedDetailResource?.isRunning ? '停止' : startText"
-                :disabled="!detailCanLaunch && !detailCanStop"
-                @click="handleDetailLaunchAction"
-              >
-                <n-icon>
-                  <component :is="selectedDetailResource?.isRunning ? Stop : Play" />
-                </n-icon>
-              </n-float-button>
-            </div>
-          </n-scrollbar>
-        <template #footer>
-          <div class="detail-drawer__footer">
-            <n-space justify="start">
-              <n-button :disabled="!selectedDetailResource" @click="handleEditResource(selectedDetailResource)">
-                编辑信息
-              </n-button>
-              <n-button
-                v-if="isVideoFolderCategory"
-                :disabled="!selectedDetailResource"
-                @click="handleOpenVideoOrderDialog(selectedDetailResource)"
-              >
-                修改顺序
-              </n-button>
-              <n-button :disabled="!selectedDetailResource" @click="handleOpenDetailResourcePath">
-                {{ detailOpenFolderText }}
-              </n-button>
-            </n-space>
-          </div>
-        </template>
-      </n-drawer-content>
-    </n-drawer>
-
-    <n-modal
-      v-model:show="showBatchImportLoading"
-      preset="card"
-      title="批量导入"
-      :mask-closable="batchProgressRunning"
-      :closable="false"
-      :auto-focus="false"
-      @mask-click="handleBatchImportMaskClick"
-      :style="{ width: '520px' }"
+    <ResourceDetailDrawer
+      :show="showDetailDrawer"
+      :width="detailDrawerWidth"
+      :selected-detail-resource="selectedDetailResource"
+      :category-name="categoryName"
+      :category-settings="categorySettings"
+      :detail-is-website="detailIsWebsite"
+      :detail-is-software="detailIsSoftware"
+      :detail-is-manga="detailIsManga"
+      :detail-is-asmr="detailIsAsmr"
+      :detail-is-audio="detailIsAudio"
+      :detail-is-novel="detailIsNovel"
+      :is-video-category="isVideoCategory"
+      :is-video-folder-category="isVideoFolderCategory"
+      :detail-website-favicon-src="detailWebsiteFaviconSrc"
+      :detail-website-placeholder-emoji="detailWebsitePlaceholderEmoji"
+      :detail-website-cover-placeholder-text="detailWebsiteCoverPlaceholderText"
+      :detail-cover-preview-src="detailCoverPreviewSrc"
+      :detail-rating-draft="detailRatingDraft"
+      :has-pending-rating-change="hasPendingRatingChange"
+      :rating-comment="ratingComment"
+      :get-rating-emoji="getRatingEmoji"
+      :detail-stores="detailStores"
+      :detail-meta-items="detailMetaItems"
+      :detail-display-path="detailDisplayPath"
+      :has-detail-description="hasDetailDescription"
+      :detail-description-box-style="detailDescriptionBoxStyle"
+      :detail-stats="detailStats"
+      :detail-stats-text="detailStatsText"
+      :detail-show-total-runtime="detailShowTotalRuntime"
+      :detail-reading-progress-text="detailReadingProgressText"
+      :detail-playback-progress-text="detailPlaybackProgressText"
+      :detail-preview-section-title="detailPreviewSectionTitle"
+      :detail-screenshot-paths="detailScreenshotPaths"
+      :detail-screenshot-preview-src="detailScreenshotPreviewSrc"
+      :current-screenshot-index="currentScreenshotIndex"
+      :show-delete-screenshot-confirm="showDeleteScreenshotConfirm"
+      :detail-gallery-items="detailGalleryItems"
+      :detail-gallery-section-title="detailGallerySectionTitle"
+      :detail-directory-section-title="detailDirectorySectionTitle"
+      :detail-audio-tree-loading="detailAudioTreeLoading"
+      :detail-audio-tree="detailAudioTree"
+      :detail-directory-empty-text="detailDirectoryEmptyText"
+      :detail-audio-context-menu-visible="detailAudioContextMenuVisible"
+      :detail-audio-context-menu-position="detailAudioContextMenuPosition"
+      :detail-audio-context-menu-options="detailAudioContextMenuOptions"
+      :detail-show-logs="detailShowLogs"
+      :detail-logs="detailLogs"
+      :detail-empty-log-description="detailEmptyLogDescription"
+      :visible-detail-logs="visibleDetailLogs"
+      :has-more-detail-logs="hasMoreDetailLogs"
+      :no-more="noMore"
+      :detail-log-mode-label="detailLogModeLabel"
+      :detail-log-duration-label="detailLogDurationLabel"
+      :start-text="startText"
+      :detail-can-launch="detailCanLaunch"
+      :detail-can-stop="detailCanStop"
+      :detail-open-folder-text="detailOpenFolderText"
+      :handle-detail-drawer-resize-start="handleDetailDrawerResizeStart"
+      :handle-rating-update="handleRatingUpdate"
+      :handle-submit-rating="handleUpdateResourceRating"
+      :handle-copy-text="handleCopyText"
+      :handle-open-detail-resource-path="handleOpenDetailResourcePath"
+      :handle-open-store-website="handleOpenStoreWebsite"
+      :handle-open-picture-viewer="handleDetailDrawerOpenPictureViewer"
+      :handle-previous-screenshot="handlePreviousScreenshot"
+      :handle-next-screenshot="handleNextScreenshot"
+      :handle-delete-current-screenshot="handleDeleteCurrentScreenshot"
+      :handle-open-detail-screenshot-folder="handleOpenDetailScreenshotFolder"
+      :render-audio-tree-label="renderAudioTreeLabel"
+      :render-audio-tree-suffix="renderAudioTreeSuffix"
+      :close-detail-audio-context-menu="closeDetailAudioContextMenu"
+      :handle-select-detail-audio-context-menu="handleSelectDetailAudioContextMenu"
+      :handle-audio-tree-play="handleAudioTreePlay"
+      :handle-open-audio-tree-context-menu="handleOpenAudioTreeContextMenu"
+      :handle-load-more-logs="handleLoadMoreLogs"
+      :format-date-time="formatDateTime"
+      :format-duration="formatDuration"
+      :format-launch-mode="formatLaunchMode"
+      :format-log-end-time="formatLogEndTime"
+      :format-log-duration="formatLogDuration"
+      :handle-detail-launch-action="handleDetailLaunchAction"
+      :handle-edit-resource="handleEditResource"
+      :handle-open-video-order-dialog="handleOpenVideoOrderDialog"
+      @update:show="showDetailDrawer = $event"
+      @update:show-delete-screenshot-confirm="showDeleteScreenshotConfirm = $event"
     >
-      <div class="batch-import-loading">
-        <div class="batch-import-loading__progress">
-          <n-progress
-            type="circle"
-            status="info"
-            :stroke-width="10"
-            :percentage="batchAnalyzePercent"
-            :show-indicator="false"
-            class="batch-import-loading__inner-progress"
-          />
-          <div class="batch-import-loading__progress-center">
-            <div class="batch-import-loading__progress-text">{{ batchAnalyzePercent }}%</div>
-          </div>
-        </div>
-        <div class="batch-import-loading__title">
-          <template v-if="batchProgressRunning && batchAnalyzeTotal > 0">
-            <span class="batch-import-loading__title-text">
-              {{ batchProgressStage === 'import'
-                ? `正在导入第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${batchImportResourceLabel}`
-                : `正在分析第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个目录` }}
-            </span>
-            <span class="batch-import-loading__title-directory" :title="getBatchProgressDirectoryName()">
-              {{ getBatchProgressDirectoryName() }}
-            </span>
-          </template>
-          <template v-else>
-            {{ batchAnalyzeMessage || '正在准备批量导入，请稍候...' }}
-          </template>
-        </div>
-      </div>
-      <template #footer>
-        <div class="modal-footer">
-          <n-space justify="end">
-            <n-button type="warning" @click="batchProgressStage === 'import' ? handleBatchImportRunInBackground() : handleStopBatchImportAnalysis()">
-              {{ batchProgressStage === 'import' ? '后台运行' : '停止分析' }}
-            </n-button>
-          </n-space>
-        </div>
-      </template>
-    </n-modal>
-
-    <div
-      v-if="showBatchImportProgressToast"
-      class="batch-import-toast"
-      @click="handleReopenBatchImportProgress"
-    >
-      <n-button
-        quaternary
-        circle
-        size="tiny"
-        class="batch-import-toast__close"
-        @click.stop="handleDismissBatchImportProgressToast"
-      >
-        <template #icon>
-          <n-icon>
-            <CloseOutline />
-          </n-icon>
-        </template>
-      </n-button>
-      <div class="batch-import-toast__progress">
-        <n-progress
-          type="circle"
-          status="info"
-          :stroke-width="8"
-          :percentage="batchAnalyzePercent"
-          :show-indicator="false"
+      <template #description-content>
+        <div
+          ref="detailDescriptionContentRef"
+          class="detail-drawer__value detail-drawer__value--description detail-drawer__value--rich"
+          v-html="selectedDetailResource?.description"
         />
-        <div class="batch-import-toast__progress-text">{{ batchAnalyzePercent }}%</div>
-      </div>
-      <div class="batch-import-toast__content">
-        <div class="batch-import-toast__title">{{ batchProgressStage === 'import' ? `正在后台导入${batchImportResourceLabel}` : `正在后台分析${batchImportResourceLabel}目录` }}</div>
-        <div class="batch-import-toast__subtitle">
-          {{ batchProgressStage === 'import'
-            ? `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${batchImportResourceLabel}`
-            : `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个目录` }}
-        </div>
-        <div class="batch-import-toast__subtitle" :title="getBatchProgressDirectoryName()">
-          {{ getBatchProgressDirectoryName() }}
-        </div>
-      </div>
-    </div>
+      </template>
+    </ResourceDetailDrawer>
 
-    <n-modal
-      v-model:show="showBatchImportModal"
-      preset="card"
-      title="批量导入预览"
-      closable
-      :mask-closable="false"
-      content-scrollable
-      :style="{ width: '860px', height: '80vh' }"
-    >
-      <template #default>
-        <div class="batch-import-modal">
-          <div class="batch-import-modal__toolbar">
-            <n-space>
-              <n-button size="small" @click="handleBatchImportSelectAll">全选</n-button>
-              <n-button size="small" @click="handleBatchImportDeselectAll">取消全选</n-button>
-              <n-button size="small" @click="handleBatchImportInvert">反选</n-button>
-            </n-space>
-            <div class="batch-import-modal__summary">
-              已选择 {{ selectedBatchImportCount }} / {{ selectableBatchImportItems.length }} 个可导入目录
-            </div>
-          </div>
-          <n-scrollbar class="batch-import-modal__scrollbar">
-            <div class="batch-import-modal__list">
-              <div
-                v-for="(item, index) in batchImportItems"
-                :key="item.directoryPath"
-                class="batch-import-item"
-                :class="{
-                  'batch-import-item--clickable': canToggleBatchImportItem(item),
-                  'batch-import-item--checked': item.checked
-                }"
-                @click="handleToggleBatchImportItem(index)"
-              >
-                <div class="batch-import-item__row">
-                  <n-checkbox
-                    :checked="item.checked"
-                    :disabled="item.exists || !!item.errorMessage || !isBatchImportItemImportable(item)"
-                    @click.stop
-                    @update:checked="(value: boolean) => { batchImportItems[index].checked = value }"
-                  />
-                  <div class="batch-import-item__main">
-                    <div class="batch-import-item__title">{{ item.directoryName || item.directoryPath }}</div>
-                    <div class="batch-import-item__path">{{ item.directoryPath }}</div>
-                  </div>
-                  <n-space align="center" size="small">
-                    <n-tag v-if="item.exists" type="warning" size="small">已存在</n-tag>
-                    <n-tag v-else-if="item.errorMessage" type="error" size="small">分析失败</n-tag>
-                    <n-tag
-                      v-if="item.importResultType && item.importResultMessage"
-                      :type="item.importResultType === 'success' ? 'success' : item.importResultType === 'error' ? 'error' : 'warning'"
-                      size="small"
-                    >
-                      {{ item.importResultType === 'success' ? '已导入' : item.importResultType === 'error' ? '导入失败' : '已跳过' }}
-                    </n-tag>
-                    <n-button v-if="!detailIsManga && !detailIsAsmr" size="small" @click.stop="handleSelectBatchLaunchFile(index)">
-                      手动选择
-                    </n-button>
-                  </n-space>
-                </div>
-                <div class="batch-import-item__detail">
-                  <div class="batch-import-item__label">{{ detailIsManga ? '漫画图片' : (detailIsAsmr ? '音频文件' : '启动文件') }}</div>
-                  <div v-if="detailIsManga" class="batch-import-item__value">
-                    {{ item.imageCount ? `共 ${item.imageCount} 张图片` : '目录中未找到可用图片' }}
-                  </div>
-                  <div v-else-if="detailIsAsmr" class="batch-import-item__value">
-                    {{ item.audioCount ? `共 ${item.audioCount} 个音频文件` : '目录中未找到可用音频文件' }}
-                  </div>
-                  <div v-else-if="item.launchFilePath" class="batch-import-item__value">
-                    <img
-                      v-if="item.launchFileIcon"
-                      :src="item.launchFileIcon"
-                      alt="启动文件图标"
-                      class="batch-import-item__file-icon"
-                    />
-                    {{ item.launchFilePath }}
-                  </div>
-                  <div v-else class="batch-import-item__value batch-import-item__value--error">
-                    {{ item.errorMessage || (detailIsAsmr ? '目录中未找到可用音频文件' : '未分析出可用启动文件，请手动选择') }}
-                  </div>
-                  <div v-if="showBatchImportButton && !detailIsManga" class="batch-import-item__fields">
-                    <div class="batch-import-item__field">
-                      <div class="batch-import-item__label">贩售网站</div>
-                      <n-select
-                        :value="item.websiteType"
-                        :options="websiteTypeSelectOptions"
-                        clearable
-                        placeholder="请选择贩售网站"
-                        @click.stop
-                        @update:value="(value) => { batchImportItems[index].websiteType = String(value ?? '') }"
-                      />
-                    </div>
-                    <div class="batch-import-item__field">
-                      <div class="batch-import-item__label">作品 ID</div>
-                      <n-input
-                        :value="item.gameId"
-                        placeholder="请输入作品ID"
-                        @click.stop
-                        @update:value="(value) => { batchImportItems[index].gameId = value }"
-                      />
-                    </div>
-                  </div>
-                  <div
-                    v-if="item.importResultMessage"
-                    class="batch-import-item__result"
-                    :class="{
-                      'batch-import-item__result--success': item.importResultType === 'success',
-                      'batch-import-item__result--error': item.importResultType === 'error'
-                    }"
-                  >
-                    {{ item.importResultMessage }}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </n-scrollbar>
-        </div>
-      </template>
-      <template #footer>
-        <div class="modal-footer">
-          <div class="modal-footer__split">
-            <n-checkbox v-model:checked="batchImportFetchInfoEnabled">
-              通过插件获取作品信息
-            </n-checkbox>
-            <n-space justify="end">
-              <n-button @click="handleCloseBatchImportModal">退出</n-button>
-              <n-button type="primary" :loading="isBatchImportSubmitting" @click="handleConfirmBatchImport">
-                确认导入
-              </n-button>
-            </n-space>
-          </div>
-        </div>
-      </template>
-    </n-modal>
+    <CategoryBatchImportPanel
+      :show-loading="showBatchImportLoading"
+      :show-progress-toast="showBatchImportProgressToast"
+      :show-preview="showBatchImportModal"
+      :batch-progress-running="batchProgressRunning"
+      :batch-progress-stage="batchProgressStage"
+      :batch-analyze-percent="batchAnalyzePercent"
+      :batch-analyze-total="batchAnalyzeTotal"
+      :batch-analyze-display-index="batchAnalyzeDisplayIndex"
+      :batch-import-resource-label="batchImportResourceLabel"
+      :batch-analyze-message="batchAnalyzeMessage"
+      :current-directory-name="getBatchProgressDirectoryName()"
+      :selected-batch-import-count="selectedBatchImportCount"
+      :selectable-batch-import-count="selectableBatchImportItems.length"
+      :batch-import-items="batchImportItems"
+      :is-batch-import-submitting="isBatchImportSubmitting"
+      :batch-import-fetch-info-enabled="batchImportFetchInfoEnabled"
+      :detail-is-manga="detailIsManga"
+      :detail-is-asmr="detailIsAsmr"
+      :show-batch-import-button="showBatchImportButton"
+      :website-type-select-options="websiteTypeSelectOptions"
+      :can-toggle-batch-import-item="canToggleBatchImportItem"
+      :is-batch-import-item-importable="isBatchImportItemImportable"
+      :on-update-show-loading="handleBatchImportLoadingShowUpdate"
+      :on-update-show-preview="handleBatchImportPreviewShowUpdate"
+      :on-after-leave-preview="handleCloseBatchImportModal"
+      :on-mask-click="handleBatchImportMaskClick"
+      :on-run-in-background="handleBatchImportRunInBackground"
+      :on-stop-analysis="handleStopBatchImportAnalysis"
+      :on-reopen-progress="handleReopenBatchImportProgress"
+      :on-dismiss-progress-toast="handleDismissBatchImportProgressToast"
+      :on-select-all="handleBatchImportSelectAll"
+      :on-deselect-all="handleBatchImportDeselectAll"
+      :on-invert="handleBatchImportInvert"
+      :on-toggle-item="handleToggleBatchImportItem"
+      :on-set-item-checked="handleBatchImportItemCheckedChange"
+      :on-set-item-website-type="handleBatchImportItemWebsiteTypeChange"
+      :on-set-item-game-id="handleBatchImportItemGameIdChange"
+      :on-select-launch-file="handleSelectBatchLaunchFile"
+      :on-confirm-import="handleConfirmBatchImport"
+      :on-close-preview="handleCloseBatchImportModal"
+      :on-update-fetch-info-enabled="handleBatchImportFetchInfoEnabledUpdate"
+    />
 
     <n-modal
       v-model:show="showBatchLabelModal"
@@ -9004,6 +4082,8 @@ const handleToggleCompleted = async (resource: any) => {
               ? `${categoryName}分类`
               : batchLabelField === 'authors'
                 ? `${categoryName}歌手`
+                : batchLabelField === 'actors'
+                  ? `${categoryName}${actorFilterLabel}`
                 : `${categoryName}专辑`"
         >
           <n-select
@@ -9049,161 +4129,36 @@ const handleToggleCompleted = async (resource: any) => {
       </n-space>
     </n-modal>
 
-    <n-modal
-      v-model:show="showAudioCoverCandidateModal"
-      preset="card"
-      title="选择专辑封面"
-      :style="{ width: '820px' }"
+    <AudioCoverCandidateModal
+      :show="showAudioCoverCandidateModal"
+      :candidates="audioCoverCandidates"
+      @update:show="showAudioCoverCandidateModal = $event"
+      @select="handleUseAudioCoverCandidate"
       @after-leave="closeAudioCoverCandidateModal"
-    >
-      <n-space vertical :size="16">
-        <n-alert type="info" :show-icon="false">
-          已按“歌名 + 歌手 / 歌名 + 专辑 / 歌手 + 专辑”查找到可用封面，请选择要使用的那一张。
-        </n-alert>
-        <div class="audio-cover-candidate-list">
-          <button
-            v-for="candidate in audioCoverCandidates"
-            :key="`${candidate.label}-${candidate.coverPath}`"
-            type="button"
-            class="audio-cover-candidate"
-            @click="handleUseAudioCoverCandidate(candidate.coverPath)"
-          >
-            <div class="audio-cover-candidate__preview">
-              <img :src="candidate.previewSrc" :alt="candidate.label" class="audio-cover-candidate__image" />
-            </div>
-            <div class="audio-cover-candidate__body">
-              <div class="audio-cover-candidate__title">{{ candidate.label }}</div>
-              <div class="audio-cover-candidate__query">{{ candidate.queryText }}</div>
-            </div>
-          </button>
-        </div>
-        <div class="batch-label-modal__footer">
-          <n-space justify="end">
-            <n-button @click="closeAudioCoverCandidateModal">
-              取消
-            </n-button>
-          </n-space>
-        </div>
-      </n-space>
-    </n-modal>
+    />
 
-      <n-modal
-        v-model:show="showVideoCoverCandidateModal"
-        preset="card"
-        title="选择随机帧封面"
-        :style="{ width: '920px' }"
+    <VideoCoverCandidateModal
+      :show="showVideoCoverCandidateModal"
+      :fixed-candidates="fixedVideoCoverCandidates"
+      :random-candidates="randomVideoCoverCandidates"
+      :format-time="formatVideoFrameTime"
+      @update:show="showVideoCoverCandidateModal = $event"
+      @select="handleUseVideoCoverCandidate"
       @after-leave="closeVideoCoverCandidateModal"
-    >
-      <n-space vertical :size="16">
-        <n-alert type="info" :show-icon="false">
-          已从视频中生成固定时间和随机时间的封面候选，请选择要使用的那一张。
-        </n-alert>
-        <div class="video-cover-candidate-section">
-          <div class="video-cover-candidate-section__title">固定时间</div>
-          <div v-if="fixedVideoCoverCandidates.length" class="audio-cover-candidate-list video-cover-candidate-list">
-            <button
-              v-for="candidate in fixedVideoCoverCandidates"
-              :key="`${candidate.label}-${candidate.coverPath}`"
-              type="button"
-              class="audio-cover-candidate"
-              @click="handleUseVideoCoverCandidate(candidate.coverPath)"
-            >
-              <div class="audio-cover-candidate__preview video-cover-candidate__preview">
-                <img :src="candidate.previewSrc" :alt="candidate.label" class="audio-cover-candidate__image" />
-              </div>
-              <div class="audio-cover-candidate__body">
-                <div class="audio-cover-candidate__title">{{ candidate.label }}</div>
-                <div class="audio-cover-candidate__query">时间点：{{ formatVideoFrameTime(candidate.time) }}</div>
-              </div>
-            </button>
-          </div>
-          <div v-else class="video-cover-candidate-section__empty">视频长度不足，暂无固定时间候选</div>
-        </div>
-        <div class="video-cover-candidate-section">
-          <div class="video-cover-candidate-section__title">随机时间</div>
-          <div class="audio-cover-candidate-list video-cover-candidate-list">
-            <button
-              v-for="candidate in randomVideoCoverCandidates"
-              :key="`${candidate.label}-${candidate.coverPath}`"
-              type="button"
-              class="audio-cover-candidate"
-              @click="handleUseVideoCoverCandidate(candidate.coverPath)"
-            >
-              <div class="audio-cover-candidate__preview video-cover-candidate__preview">
-                <img :src="candidate.previewSrc" :alt="candidate.label" class="audio-cover-candidate__image" />
-              </div>
-              <div class="audio-cover-candidate__body">
-                <div class="audio-cover-candidate__title">{{ candidate.label }}</div>
-                <div class="audio-cover-candidate__query">时间点：{{ formatVideoFrameTime(candidate.time) }}</div>
-              </div>
-            </button>
-          </div>
-        </div>
-        <div class="batch-label-modal__footer">
-          <n-space justify="end">
-            <n-button @click="closeVideoCoverCandidateModal">
-              取消
-            </n-button>
-          </n-space>
-          </div>
-        </n-space>
-      </n-modal>
+    />
 
-      <n-modal
-        v-model:show="showVideoSubCoverCandidateModal"
-        preset="card"
-        title="选择番剧随机帧封面"
-        :style="{ width: '1080px', maxWidth: '94vw' }"
-        @after-leave="closeVideoSubCoverCandidateModal"
-      >
-        <n-space vertical :size="16">
-          <n-alert type="info" :show-icon="false">
-            已为番剧目录中的每个视频生成 3 张随机帧候选。点击任意一张后，将只更新当前番剧主封面，用于卡片和详情展示。
-          </n-alert>
-          <n-scrollbar style="max-height: 70vh;">
-            <div class="video-sub-cover-candidate-list">
-              <div
-                v-for="item in videoSubCoverCandidateItems"
-                :key="item.relativePath"
-                class="video-sub-cover-candidate-group"
-              >
-                <div class="video-sub-cover-candidate-group__header">
-                  <div class="video-sub-cover-candidate-group__title">{{ item.fileName }}</div>
-                  <div class="video-sub-cover-candidate-group__meta">{{ item.relativePath }}</div>
-                </div>
-                <div class="video-sub-cover-candidate-group__grid">
-                  <button
-                    v-for="candidate in item.candidates"
-                    :key="`${item.relativePath}-${candidate.coverPath}`"
-                    type="button"
-                    class="audio-cover-candidate"
-                    @click="handleUseVideoSubCoverCandidate(candidate.coverPath)"
-                  >
-                    <div class="audio-cover-candidate__preview video-cover-candidate__preview">
-                      <img :src="candidate.previewSrc" :alt="candidate.label" class="audio-cover-candidate__image" />
-                    </div>
-                    <div class="audio-cover-candidate__body">
-                      <div class="audio-cover-candidate__title">{{ candidate.label }}</div>
-                      <div class="audio-cover-candidate__query">时间点：{{ formatVideoFrameTime(candidate.time) }}</div>
-                    </div>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </n-scrollbar>
-          <div class="batch-label-modal__footer">
-            <n-space justify="end">
-              <n-button @click="closeVideoSubCoverCandidateModal">
-                取消
-              </n-button>
-            </n-space>
-          </div>
-        </n-space>
-      </n-modal>
+    <VideoSubCoverCandidateModal
+      :show="showVideoSubCoverCandidateModal"
+      :items="videoSubCoverCandidateItems"
+      :format-time="formatVideoFrameTime"
+      @update:show="showVideoSubCoverCandidateModal = $event"
+      @select="handleUseVideoSubCoverCandidate"
+      @after-leave="closeVideoSubCoverCandidateModal"
+    />
 
-      <n-modal
-        v-model:show="showVideoOrderModal"
-        preset="card"
+    <n-modal
+      v-model:show="showVideoOrderModal"
+      preset="card"
       title="修改番剧顺序"
       :style="{ width: '760px', maxWidth: '92vw' }"
       @after-leave="resetVideoOrderDialog"
@@ -9238,7 +4193,8 @@ const handleToggleCompleted = async (resource: any) => {
               @drop.prevent="handleVideoOrderDrop(index)"
               @dragend="handleVideoOrderDragEnd"
             >
-              <div class="video-order-item__change-marker" :class="{ 'video-order-item__change-marker--active': isVideoOrderItemChanged(item, index) }" />
+              <div class="video-order-item__change-marker"
+                   :class="{ 'video-order-item__change-marker--active': isVideoOrderItemChanged(item, index) }"/>
               <div class="video-order-item__index" :title="'拖动调整顺序'">{{ index + 1 }}</div>
               <img
                 v-if="getVideoSubCoverPreviewSrc(videoOrderResource, item.relativePath)"
@@ -9258,9 +4214,10 @@ const handleToggleCompleted = async (resource: any) => {
                 显示
               </n-checkbox>
               <div class="video-order-item__actions">
-                <n-button quaternary circle size="small" :disabled="index === 0" @click="moveVideoOrderItem(index, index - 1)">
+                <n-button quaternary circle size="small" :disabled="index === 0"
+                          @click="moveVideoOrderItem(index, index - 1)">
                   <template #icon>
-                    <n-icon :component="ChevronUpOutline" />
+                    <n-icon :component="ChevronUpOutline"/>
                   </template>
                 </n-button>
                 <n-button
@@ -9271,7 +4228,7 @@ const handleToggleCompleted = async (resource: any) => {
                   @click="moveVideoOrderItem(index, index + 1)"
                 >
                   <template #icon>
-                    <n-icon :component="ChevronDownOutline" />
+                    <n-icon :component="ChevronDownOutline"/>
                   </template>
                 </n-button>
                 <span class="video-order-item__drag-hint">拖动排序</span>
@@ -9290,184 +4247,64 @@ const handleToggleCompleted = async (resource: any) => {
       </n-space>
     </n-modal>
 
-    <n-modal
-      v-model:show="showEditModal"
-      preset="card"
-      :title="`修改${categoryName}`"
-      content-scrollable
-      :style="{ width: '680px', height: '80vh' }"
-    >
-      <template #default>
-        <n-scrollbar style="max-height: 100%;">
-          <div class="edit-drawer">
-            <n-form ref="formRef" :model="formData" label-placement="left" label-width="100" :rules="addResourceRule">
-              <n-form-item :label="`${categoryName}名`" path="name">
-                <n-input v-model:value="formData.name" :placeholder="`请输入${categoryName}名`" />
-              </n-form-item>
-              <n-form-item
-                v-if="categorySettings.resourcePathType"
-                ref="basePathFormItemRef"
-                :label="`${categoryName}路径`"
-                path="basePath"
-              >
-                <div class="path-field">
-                  <n-input
-                    disabled
-                    v-model:value="formData.basePath"
-                    :placeholder="`请选择${categoryName}路径`"
-                  />
-                  <div class="path-field__actions">
-                    <n-button v-if="isSoftwareCategory" @click="handleOpenSoftwareScriptModal">脚本</n-button>
-                    <n-button @click="handleSelectBasePath">选择{{categorySettings.resourcePathType === 'file' ? '文件' : '目录'}}</n-button>
-                  </div>
-                </div>
-              </n-form-item>
-              <n-form-item
-                v-if="categorySettings.authorText && isNovelCategory"
-                :label="categorySettings.authorText"
-                path="author"
-              >
-                <n-input v-model:value="formData.author" :placeholder="authorInputPlaceholder"/>
-              </n-form-item>
-              <component
-                :is="modelComponent"
-                v-if="modelComponent"
-                :key="`${modelComponentKey}-edit`"
-                v-model:metaData="formData.meta"
-                :actors="formData.actors"
-                :base-path="formData.basePath"
-                :title="formData.name"
-                :fetch-info-loading="fetchResourceInfoLoading"
-                :actor-label="videoActorLabel"
-                @update:actors="(value: string[]) => { formData.actors = value }"
-                @check-engine="handleCheckGameEngine"
-                @fetch-game-info="handleFetchGameInfo"
-                @fetch-website-info="handleFetchWebsiteInfo"
-              />
-              <n-form-item v-if="categorySettings.authorText && !isNovelCategory" :label="categorySettings.authorText" path="author">
-                <n-select
-                  v-if="isAudioCategory"
-                  :value="formData.authors"
-                  multiple
-                  filterable
-                  tag
-                  clearable
-                  :options="authorSelectOptions"
-                  :placeholder="authorInputPlaceholder"
-                  :on-create="createSelectOption"
-                  @update:value="handleAudioAuthorsChange"
-                />
-                <n-input v-else v-model:value="formData.author" :placeholder="authorInputPlaceholder"/>
-              </n-form-item>
-              <n-form-item :label="descriptionLabel" path="description">
-                <RichTextEditor v-model="formData.description" :placeholder="descriptionPlaceholder" />
-              </n-form-item>
-              <n-form-item :label="`${categoryName}标签`" path="tags">
-                <n-select
-                  :value="formData.tags"
-                  multiple
-                  filterable
-                  tag
-                  clearable
-                  :options="tagSelectOptions"
-                  :input-props="{
-                    onKeydown: (event: KeyboardEvent) => handleSelectInputKeydown(event, 'tags'),
-                    onBlur: handleTagInputCommit
-                  }"
-                  placeholder="可选择已有标签，也可输入新标签，按空格、顿号、英文逗号或回车批量添加"
-                  :on-search="handleTagSearch"
-                  :on-create="createSelectOption"
-                  @update:value="handleTagsChange"
-                />
-              </n-form-item>
-              <n-form-item v-if="!detailIsAsmr" :label="`${categoryName}分类`" path="types">
-                <n-select
-                  :value="formData.types"
-                  multiple
-                  filterable
-                  tag
-                  clearable
-                  :options="typeSelectOptions"
-                  :input-props="{
-                    onKeydown: (event: KeyboardEvent) => handleSelectInputKeydown(event, 'types'),
-                    onBlur: handleTypeInputCommit
-                  }"
-                  placeholder="可选择已有分类，也可输入新分类，按空格、顿号、英文逗号或回车批量添加"
-                  :on-search="handleTypeSearch"
-                  :on-create="createSelectOption"
-                  @update:value="handleTypesChange"
-                />
-              </n-form-item>
-              <n-form-item
-                v-if="!['software_meta', 'single_image_meta', 'website_meta'].includes(categorySettings.extendTable)"
-                label="封面图"
-                path="cover"
-              >
-                <div class="cover-field">
-                  <div class="cover-preview">
-                    <img v-if="coverPreviewSrc" :src="coverPreviewSrc" alt="封面预览" class="cover-preview__image" />
-                    <span v-else class="cover-preview__label">{{ coverPreviewLabel }}</span>
-                  </div>
-                  <n-space size="small" wrap>
-                    <n-button size="small" @click="handleChooseCustomCover">选择自定义封面</n-button>
-                    <n-button
-                      v-if="categorySettings.extendTable === 'audio_meta'"
-                      size="small"
-                      @click="handleFetchAlbumCover"
-                    >
-                      获取专辑封面
-                    </n-button>
-                    <n-button
-                      v-if="categorySettings.extendTable === 'video_meta'"
-                      size="small"
-                      :loading="videoCoverFrameLoading"
-                      :disabled="!hasBasePath || videoCoverFrameLoading"
-                      @click="handleUseVideoRandomFrameCover"
-                    >
-                      使用随机帧
-                    </n-button>
-                    <n-button
-                      v-if="!['multi_image_meta', 'asmr_meta', 'audio_meta', 'novel_meta', 'video_meta'].includes(categorySettings.extendTable)"
-                      size="small"
-                      :disabled="!hasBasePath"
-                      @click="handleUseScreenshotCover"
-                    >
-                      使用截图作为封面
-                    </n-button>
-                    <n-button
-                      v-if="categorySettings.extendTable !== 'audio_meta'"
-                      size="small"
-                      :disabled="!editingResourceId"
-                      @click="handleChooseCoverFromScreenshotFolder"
-                    >
-                      从截图文件夹选择
-                    </n-button>
-                    <n-button
-                      v-if="categorySettings.extendTable === 'multi_image_meta'"
-                      size="small"
-                      :disabled="!hasBasePath"
-                      @click="handleUseFirstCover"
-                    >
-                      选择第一张封面
-                    </n-button>
-                    <n-button size="small" type="error" quaternary :disabled="!hasCoverPath" @click="handleClearCover">清除封面</n-button>
-                  </n-space>
-                </div>
-              </n-form-item>
-            </n-form>
-          </div>
-        </n-scrollbar>
-      </template>
-      <template #footer>
-        <div class="modal-footer">
-          <n-space justify="end">
-            <n-button @click="handleResetEditForm">重置</n-button>
-            <n-button @click="handleRestoreDefaultEditForm">恢复默认</n-button>
-            <n-button type="primary" @click="handleSubmitEditResource">确认</n-button>
-          </n-space>
-        </div>
-      </template>
-    </n-modal>
+    <ResourceEditorDrawer
+      :show="showEditModal"
+      mode="edit"
+      :category-name="categoryName"
+      :category-settings="categorySettings"
+      :form-data="formData"
+      :form-rules="addResourceRule"
+      :set-form-ref="assignResourceEditorFormRef"
+      :set-base-path-form-item-ref="assignResourceEditorBasePathFormItemRef"
+      :is-novel-category="isNovelCategory"
+      :is-audio-category="isAudioCategory"
+      :is-software-category="isSoftwareCategory"
+      :detail-is-asmr="detailIsAsmr"
+      :actor-filter-label="actorFilterLabel"
+      :author-input-placeholder="authorInputPlaceholder"
+      :description-label="descriptionLabel"
+      :description-placeholder="descriptionPlaceholder"
+      :model-component="modelComponent"
+      :model-component-key="modelComponentKey"
+      :fetch-resource-info-loading="fetchResourceInfoLoading"
+      :author-select-options="authorSelectOptions"
+      :tag-select-options="tagSelectOptions"
+      :type-select-options="typeSelectOptions"
+      :create-select-option="createSelectOption"
+      :cover-preview-src="coverPreviewSrc"
+      :cover-preview-label="coverPreviewLabel"
+      :video-cover-frame-loading="videoCoverFrameLoading"
+      :has-base-path="hasBasePath"
+      :has-cover-path="hasCoverPath"
+      :editing-resource-id="editingResourceId"
+      @update:show="showEditModal = $event"
+      @open-software-script="handleOpenSoftwareScriptModal"
+      @select-base-path="handleSelectBasePath"
+      @update:actors="(value: string[]) => { formData.actors = value }"
+      @check-engine="handleCheckGameEngine"
+      @fetch-game-info="handleFetchGameInfo"
+      @fetch-website-info="handleFetchWebsiteInfo"
+      @update:audio-authors="handleAudioAuthorsChange"
+      @tags-change="handleTagsChange"
+      @tag-search="handleTagSearch"
+      @tag-input-keydown="(event: KeyboardEvent) => handleSelectInputKeydown(event, 'tags')"
+      @tag-input-blur="handleTagInputCommit"
+      @types-change="handleTypesChange"
+      @type-search="handleTypeSearch"
+      @type-input-keydown="(event: KeyboardEvent) => handleSelectInputKeydown(event, 'types')"
+      @type-input-blur="handleTypeInputCommit"
+      @choose-custom-cover="handleChooseCustomCover"
+      @fetch-website-cover="handleFetchWebsiteCover"
+      @fetch-album-cover="handleFetchAlbumCover"
+      @use-video-random-frame-cover="handleUseVideoRandomFrameCover"
+      @use-screenshot-cover="handleUseScreenshotCover"
+      @choose-cover-from-screenshot-folder="handleChooseCoverFromScreenshotFolder"
+      @use-first-cover="handleUseFirstCover"
+      @clear-cover="handleClearCover"
+      @reset-edit="handleResetEditForm"
+      @restore-default-edit="handleRestoreDefaultEditForm"
+      @submit-edit="handleSubmitEditResource"
+    />
 
     <n-modal
       v-model:show="showSoftwareScriptModal"
@@ -9548,189 +4385,84 @@ const handleToggleCompleted = async (resource: any) => {
       @update:show="handleEbookReaderShowUpdate"
       @progress-change="handleEbookReaderProgressChange"
     />
-      <VideoPlayer
-        v-model:show="showVideoPlayer"
-        :playlist="videoPlayerPlaylist"
-        :initial-path="videoPlayerInitialPath"
-        :initial-time="videoPlayerInitialTime"
-        :resume-restart-threshold="videoPlaybackResumeRestartThreshold"
-        :title="videoPlayerTitle"
-        @update:playlist="handleVideoPlayerPlaylistUpdate"
-        @progress-persisted="handleVideoPlaybackProgressPersisted"
-      />
+    <VideoPlayer
+      v-model:show="showVideoPlayer"
+      :playlist="videoPlayerPlaylist"
+      :initial-path="videoPlayerInitialPath"
+      :initial-time="videoPlayerInitialTime"
+      :resume-restart-threshold="videoPlaybackResumeRestartThreshold"
+      :title="videoPlayerTitle"
+      @update:playlist="handleVideoPlayerPlaylistUpdate"
+      @progress-persisted="handleVideoPlaybackProgressPersisted"
+    />
     <div v-if="isDragOver && categorySettings.resourcePathType === 'file'" class="drag-overlay">
       <div class="drag-overlay__panel">
         <div class="drag-overlay__title">拖拽文件到这里添加{{ categoryName }}</div>
         <div class="drag-overlay__subtitle">
-          仅支持 {{ normalizedAllowedExtensions.length ? normalizedAllowedExtensions.join(', ') : '当前分类允许的文件类型' }}
+          仅支持 {{
+            normalizedAllowedExtensions.length ? normalizedAllowedExtensions.join(', ') : '当前分类允许的文件类型'
+          }}
         </div>
       </div>
     </div>
 
-    <n-modal
-      v-model:show="showModal"
-      preset="card"
-      :title="`添加${categoryName || ''}`"
-      content-scrollable
-      :style="{ width: '600px', height: '80vh' }"
-    >
-      <template #default>
-        <n-form ref="formRef" :model="formData" label-placement="left" label-width="100" :rules="addResourceRule">
-          <n-form-item :label="`${categoryName}名`" path="name">
-            <n-input v-model:value="formData.name" :placeholder="`请输入${categoryName}名`" />
-          </n-form-item>
-          <n-form-item
-            v-if="categorySettings.resourcePathType"
-            ref="basePathFormItemRef"
-            :label="`${categoryName}路径`"
-            path="basePath"
-          >
-            <div class="path-field">
-              <n-input
-                disabled
-                v-model:value="formData.basePath"
-                :placeholder="`请选择${categoryName}路径`"
-              />
-              <div class="path-field__actions">
-                <n-button v-if="isSoftwareCategory" @click="handleOpenSoftwareScriptModal">脚本</n-button>
-                <n-button @click="handleSelectBasePath">选择{{categorySettings.resourcePathType === 'file' ? '文件' : '目录'}}</n-button>
-              </div>
-            </div>
-          </n-form-item>
-          <n-form-item
-            v-if="categorySettings.authorText && isNovelCategory"
-            :label="categorySettings.authorText"
-            path="author"
-          >
-            <n-input v-model:value="formData.author" :placeholder="authorInputPlaceholder"/>
-          </n-form-item>
-          <component
-            :is="modelComponent"
-            v-if="modelComponent"
-            :key="modelComponentKey"
-            v-model:metaData="formData.meta"
-            :actors="formData.actors"
-            :base-path="formData.basePath"
-            :title="formData.name"
-            :fetch-info-loading="fetchResourceInfoLoading"
-            :actor-label="videoActorLabel"
-            @update:actors="(value: string[]) => { formData.actors = value }"
-            @check-engine="handleCheckGameEngine"
-            @fetch-game-info="handleFetchGameInfo"
-            @fetch-website-info="handleFetchWebsiteInfo"
-          />
-          <n-form-item v-if="categorySettings.authorText && !isNovelCategory" :label="categorySettings.authorText" path="author">
-            <n-select
-              v-if="isAudioCategory"
-              :value="formData.authors"
-              multiple
-              filterable
-              tag
-              clearable
-              :options="authorSelectOptions"
-              :placeholder="authorInputPlaceholder"
-              :on-create="createSelectOption"
-              @update:value="handleAudioAuthorsChange"
-            />
-            <n-input v-else v-model:value="formData.author" :placeholder="authorInputPlaceholder"/>
-          </n-form-item>
-          <n-form-item :label="descriptionLabel" path="description">
-            <RichTextEditor v-model="formData.description" :placeholder="descriptionPlaceholder" />
-          </n-form-item>
-          <n-form-item :label="`${categoryName}标签`" path="tags">
-            <n-select
-              :value="formData.tags"
-              multiple
-              filterable
-              tag
-              clearable
-              :options="tagSelectOptions"
-              :input-props="{
-                onKeydown: (event: KeyboardEvent) => handleSelectInputKeydown(event, 'tags'),
-                onBlur: handleTagInputCommit
-              }"
-              placeholder="可选择已有标签，也可输入新标签，按空格、顿号、英文逗号或回车批量添加"
-              :on-search="handleTagSearch"
-              :on-create="createSelectOption"
-              @update:value="handleTagsChange"
-            />
-          </n-form-item>
-          <n-form-item v-if="!detailIsAsmr" :label="`${categoryName}分类`" path="types">
-            <n-select
-              :value="formData.types"
-              multiple
-              filterable
-              tag
-              clearable
-              :options="typeSelectOptions"
-              :input-props="{
-                onKeydown: (event: KeyboardEvent) => handleSelectInputKeydown(event, 'types'),
-                onBlur: handleTypeInputCommit
-              }"
-              placeholder="可选择已有分类，也可输入新分类，按空格、顿号、英文逗号或回车批量添加"
-              :on-search="handleTypeSearch"
-              :on-create="createSelectOption"
-              @update:value="handleTypesChange"
-            />
-          </n-form-item>
-          <n-form-item
-            v-if="!['software_meta', 'single_image_meta', 'website_meta'].includes(categorySettings.extendTable)"
-            label="封面图"
-            path="cover"
-          >
-            <div class="cover-field">
-              <div class="cover-preview">
-                <img v-if="coverPreviewSrc" :src="coverPreviewSrc" alt="封面预览" class="cover-preview__image" />
-                <span v-else class="cover-preview__label">{{ coverPreviewLabel }}</span>
-              </div>
-              <n-space size="small" wrap>
-                    <n-button size="small" @click="handleChooseCustomCover">选择自定义封面</n-button>
-                    <n-button
-                      v-if="categorySettings.extendTable === 'audio_meta'"
-                      size="small"
-                      @click="handleFetchAlbumCover"
-                    >
-                      获取专辑封面
-                    </n-button>
-                <n-button
-                  v-if="categorySettings.extendTable === 'video_meta'"
-                  size="small"
-                  :loading="videoCoverFrameLoading"
-                  :disabled="!hasBasePath || videoCoverFrameLoading"
-                  @click="handleUseVideoRandomFrameCover"
-                >
-                  使用随机帧
-                </n-button>
-                <n-button
-                  v-if="!['multi_image_meta', 'asmr_meta', 'audio_meta', 'novel_meta', 'video_meta'].includes(categorySettings.extendTable)"
-                  size="small"
-                  :disabled="!hasBasePath"
-                  @click="handleUseScreenshotCover"
-                >
-                  使用截图作为封面
-                </n-button>
-                <n-button
-                  v-if="categorySettings.extendTable === 'multi_image_meta'"
-                  size="small"
-                  :disabled="!hasBasePath"
-                  @click="handleUseFirstCover"
-                >
-                  选择第一张封面
-                </n-button>
-                <n-button size="small" type="error" quaternary :disabled="!hasCoverPath" @click="handleClearCover">清除封面</n-button>
-              </n-space>
-            </div>
-          </n-form-item>
-        </n-form>
-      </template>
-
-      <template #footer>
-        <div class="modal-footer">
-          <n-button @click="handleCloseModal">取消</n-button>
-          <n-button type="primary" @click="handleSubmitResource">添加</n-button>
-        </div>
-      </template>
-    </n-modal>
+    <ResourceEditorDrawer
+      :show="showModal"
+      mode="add"
+      :category-name="categoryName"
+      :category-settings="categorySettings"
+      :form-data="formData"
+      :form-rules="addResourceRule"
+      :set-form-ref="assignResourceEditorFormRef"
+      :set-base-path-form-item-ref="assignResourceEditorBasePathFormItemRef"
+      :is-novel-category="isNovelCategory"
+      :is-audio-category="isAudioCategory"
+      :is-software-category="isSoftwareCategory"
+      :detail-is-asmr="detailIsAsmr"
+      :actor-filter-label="actorFilterLabel"
+      :author-input-placeholder="authorInputPlaceholder"
+      :description-label="descriptionLabel"
+      :description-placeholder="descriptionPlaceholder"
+      :model-component="modelComponent"
+      :model-component-key="modelComponentKey"
+      :fetch-resource-info-loading="fetchResourceInfoLoading"
+      :author-select-options="authorSelectOptions"
+      :tag-select-options="tagSelectOptions"
+      :type-select-options="typeSelectOptions"
+      :create-select-option="createSelectOption"
+      :cover-preview-src="coverPreviewSrc"
+      :cover-preview-label="coverPreviewLabel"
+      :video-cover-frame-loading="videoCoverFrameLoading"
+      :has-base-path="hasBasePath"
+      :has-cover-path="hasCoverPath"
+      :editing-resource-id="editingResourceId"
+      @update:show="showModal = $event"
+      @open-software-script="handleOpenSoftwareScriptModal"
+      @select-base-path="handleSelectBasePath"
+      @update:actors="(value: string[]) => { formData.actors = value }"
+      @check-engine="handleCheckGameEngine"
+      @fetch-game-info="handleFetchGameInfo"
+      @fetch-website-info="handleFetchWebsiteInfo"
+      @update:audio-authors="handleAudioAuthorsChange"
+      @tags-change="handleTagsChange"
+      @tag-search="handleTagSearch"
+      @tag-input-keydown="(event: KeyboardEvent) => handleSelectInputKeydown(event, 'tags')"
+      @tag-input-blur="handleTagInputCommit"
+      @types-change="handleTypesChange"
+      @type-search="handleTypeSearch"
+      @type-input-keydown="(event: KeyboardEvent) => handleSelectInputKeydown(event, 'types')"
+      @type-input-blur="handleTypeInputCommit"
+      @choose-custom-cover="handleChooseCustomCover"
+      @fetch-website-cover="handleFetchWebsiteCover"
+      @fetch-album-cover="handleFetchAlbumCover"
+      @use-video-random-frame-cover="handleUseVideoRandomFrameCover"
+      @use-screenshot-cover="handleUseScreenshotCover"
+      @choose-cover-from-screenshot-folder="handleChooseCoverFromScreenshotFolder"
+      @use-first-cover="handleUseFirstCover"
+      @clear-cover="handleClearCover"
+      @close="handleCloseModal"
+      @submit-add="handleSubmitResource"
+    />
   </div>
 </template>
 
@@ -9787,295 +4519,6 @@ const handleToggleCompleted = async (resource: any) => {
   word-break: break-word;
 }
 
-.filter-sider {
-  height: 100%;
-}
-
-.filter-sider :deep(.n-scrollbar) {
-  height: 100%;
-  width: 100%;
-  overflow: hidden;
-}
-
-.filter-sider :deep(.filter-sider-scroll-container) {
-  height: 100%;
-  overflow: hidden;
-}
-
-.filter-sider :deep(.filter-sider-content) {
-  height: 100%;
-  overflow: hidden;
-}
-
-.filter-sider :deep(.n-layout-sider-children) {
-  height: 100%;
-  overflow: hidden;
-}
-
-.filter-sider :deep(.n-layout-sider-scroll-container) {
-  height: 100%;
-  overflow: hidden;
-}
-
-.filter-panel {
-  height: 100%;
-  box-sizing: border-box;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  padding: 12px;
-  min-height: 0;
-  gap: 12px;
-  overflow: hidden;
-}
-
-.filter-top {
-  flex: none;
-}
-
-.filter-top-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 12px;
-}
-
-.filter-top-option {
-  min-width: 0;
-}
-
-.filter-top-option :deep(.n-checkbox-box-wrapper) {
-  flex: 0 0 auto;
-}
-
-.filter-top-option :deep(.n-checkbox__label) {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  white-space: nowrap;
-}
-
-.filter-top-option :deep(.n-tag) {
-  margin-left: 6px;
-  flex: 0 0 auto;
-}
-
-.filter-top-option__label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  white-space: nowrap;
-}
-
-.filter-title {
-  flex: none;
-  margin: 0;
-}
-
-.filter-sections {
-  min-height: 0;
-  display: grid;
-  overflow: hidden;
-}
-
-.filter-section {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.filter-group {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.filter-list {
-  height: 100%;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  flex-wrap: nowrap;
-}
-
-.filter-list :deep(.n-checkbox) {
-  flex: none;
-}
-
-.filter-engine-option {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  line-height: 1;
-}
-
-.filter-engine-option__icon {
-  width: 16px;
-  height: 16px;
-  object-fit: contain;
-  display: block;
-}
-
-.filter-section :deep(.n-checkbox__label) {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.filter-section :deep(.n-tag) {
-  display: inline-flex;
-  align-items: center;
-  vertical-align: middle;
-}
-
-.filter-list::-webkit-scrollbar {
-  width: 6px;
-}
-
-.filter-list::-webkit-scrollbar-thumb {
-  background: rgba(128, 128, 128, 0.45);
-  border-radius: 999px;
-}
-
-.audio-cover-candidate-list {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.video-cover-candidate-list {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-}
-
-.video-cover-candidate-section {
-  display: grid;
-  gap: 10px;
-}
-
-.video-cover-candidate-section__title {
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.video-cover-candidate-section__empty {
-  min-height: 42px;
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  border: 1px dashed rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  opacity: 0.68;
-}
-
-.video-sub-cover-candidate-list {
-  display: grid;
-  gap: 18px;
-  padding-right: 4px;
-}
-
-.video-sub-cover-candidate-group {
-  display: grid;
-  gap: 12px;
-  padding: 14px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-}
-
-.video-sub-cover-candidate-group__header {
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-}
-
-.video-sub-cover-candidate-group__title {
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.5;
-  word-break: break-word;
-}
-
-.video-sub-cover-candidate-group__meta {
-  font-size: 12px;
-  line-height: 1.5;
-  color: rgba(255, 255, 255, 0.5);
-  word-break: break-all;
-}
-
-.video-sub-cover-candidate-group__grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.audio-cover-candidate {
-  padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.03);
-  color: inherit;
-  text-align: left;
-  overflow: hidden;
-  cursor: pointer;
-  transition: transform 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
-}
-
-.audio-cover-candidate:hover {
-  transform: translateY(-2px);
-  border-color: rgba(99, 226, 183, 0.34);
-  background: rgba(99, 226, 183, 0.06);
-}
-
-.audio-cover-candidate__preview {
-  aspect-ratio: 1;
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.video-cover-candidate__preview {
-  aspect-ratio: 16 / 9;
-}
-
-.audio-cover-candidate__image {
-  width: 100%;
-  height: 100%;
-  display: block;
-  object-fit: cover;
-}
-
-.audio-cover-candidate__body {
-  padding: 12px;
-}
-
-.audio-cover-candidate__title {
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1.5;
-}
-
-.audio-cover-candidate__query {
-  margin-top: 6px;
-  font-size: 12px;
-  line-height: 1.6;
-  opacity: 0.72;
-  word-break: break-word;
-}
-
-.filter-list::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.filter-bottom {
-  align-self: stretch;
-}
-
-.reset-btn {
-  width: 100%;
-}
-
-.author-search, .album-search, .tag-search, .type-search {
-  margin-top: 5px;
-  margin-bottom: 10px;
-}
 
 .detail-main {
   position: relative;
@@ -10189,260 +4632,6 @@ const handleToggleCompleted = async (resource: any) => {
   padding: 24px;
   box-sizing: border-box;
   overflow: hidden;
-}
-
-.batch-import-loading {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 12px 4px 4px;
-  align-items: center;
-}
-
-.batch-import-loading__title {
-  font-size: 15px;
-  font-weight: 600;
-  text-align: center;
-  line-height: 1.7;
-  width: 100%;
-  max-width: 440px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-
-.batch-import-loading__title-text {
-  display: block;
-}
-
-.batch-import-loading__title-directory {
-  display: block;
-  width: 100%;
-  max-width: 420px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.batch-import-loading__meta {
-  font-size: 12px;
-  opacity: 0.7;
-  text-align: center;
-}
-
-.batch-import-loading__progress {
-  position: relative;
-  width: 128px;
-  height: 128px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-}
-
-.batch-import-loading__progress::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 6px solid rgba(255, 255, 255, 0.08);
-  border-top-color: rgba(99, 226, 183, 0.55);
-  border-right-color: rgba(99, 226, 183, 0.18);
-  box-sizing: border-box;
-  animation: batch-import-spin 1.25s linear infinite;
-}
-
-.batch-import-loading__inner-progress {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 92px;
-  height: 92px;
-  transform: translate(-50%, -50%);
-}
-
-.batch-import-loading__inner-progress :deep(.n-progress) {
-  width: 92px !important;
-  height: 92px !important;
-}
-
-.batch-import-loading__inner-progress :deep(.n-progress-graph) {
-  width: 100% !important;
-  height: 100% !important;
-}
-
-.batch-import-loading__progress-center {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 92px;
-  height: 92px;
-  transform: translate(-50%, -50%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-}
-
-.batch-import-loading__progress-text {
-  font-size: 22px;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.batch-import-toast {
-  position: fixed;
-  top: 20px;
-  right: 20px;
-  z-index: 40;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  width: 375px;
-  max-width: 375px;
-  padding: 14px 16px;
-  border: 1px solid rgba(128, 128, 128, 0.18);
-  border-radius: 16px;
-  background: rgba(32, 32, 32, 0.96);
-  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.26);
-  cursor: pointer;
-}
-
-.batch-import-toast__close {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 1;
-}
-
-.batch-import-toast__progress {
-  position: relative;
-  flex: 0 0 auto;
-  width: 52px;
-  height: 52px;
-  overflow: hidden;
-}
-
-.batch-import-toast__progress::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 4px solid rgba(255, 255, 255, 0.08);
-  border-top-color: rgba(99, 226, 183, 0.95);
-  border-right-color: rgba(99, 226, 183, 0.28);
-  animation: batch-import-spin 1s linear infinite;
-  box-sizing: border-box;
-}
-
-.batch-import-toast__progress :deep(.n-progress) {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 34px !important;
-  height: 34px !important;
-  transform: translate(-50%, -50%);
-}
-
-.batch-import-toast__progress :deep(.n-progress-graph) {
-  width: 100% !important;
-  height: 100% !important;
-}
-
-.batch-import-toast__progress-text {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 34px;
-  height: 34px;
-  transform: translate(-50%, -50%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-@keyframes batch-import-spin {
-  from {
-    transform: rotate(0deg);
-  }
-
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.batch-import-toast__content {
-  min-width: 0;
-  flex: 1;
-  padding-right: 18px;
-  overflow: hidden;
-}
-
-.batch-import-toast__title {
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.4;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.batch-import-toast__subtitle {
-  margin-top: 4px;
-  font-size: 12px;
-  opacity: 0.72;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.batch-import-toast__subtitle:last-child {
-  max-width: 240px;
-}
-
-.batch-import-modal {
-  height: 100%;
-  min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 12px;
-}
-
-.batch-import-modal__toolbar {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding-bottom: 8px;
-  background: rgb(36, 36, 36);
-}
-
-.batch-import-modal__summary {
-  font-size: 12px;
-  opacity: 0.72;
-}
-
-.batch-import-modal__scrollbar {
-  height: 100%;
-  min-height: 0;
-}
-
-.batch-import-modal__scrollbar :deep(.n-scrollbar-container) {
-  height: 100%;
-}
-
-.batch-import-modal__list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding-right: 8px;
 }
 
 .video-order-modal__toolbar {
@@ -10563,114 +4752,6 @@ const handleToggleCompleted = async (resource: any) => {
   font-size: 12px;
   opacity: 0.6;
   white-space: nowrap;
-}
-
-.batch-import-item {
-  padding: 14px 16px;
-  border: 1px solid rgba(128, 128, 128, 0.16);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.02);
-}
-
-.batch-import-item--clickable {
-  cursor: pointer;
-  transition: border-color 0.18s ease, background-color 0.18s ease, transform 0.18s ease;
-}
-
-.batch-import-item--clickable:hover {
-  border-color: rgba(99, 226, 183, 0.28);
-  background: rgba(99, 226, 183, 0.04);
-}
-
-.batch-import-item--checked {
-  border-color: rgba(99, 226, 183, 0.45);
-  background: rgba(99, 226, 183, 0.06);
-}
-
-.batch-import-item__row {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-}
-
-.batch-import-item__main {
-  flex: 1;
-  min-width: 0;
-}
-
-.batch-import-item__title {
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1.4;
-  word-break: break-word;
-}
-
-.batch-import-item__path,
-.batch-import-item__value {
-  margin-top: 4px;
-  font-size: 12px;
-  line-height: 1.6;
-  opacity: 0.74;
-  word-break: break-all;
-}
-
-.batch-import-item__value {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.batch-import-item__file-icon {
-  width: 18px;
-  height: 18px;
-  object-fit: contain;
-  flex: 0 0 auto;
-}
-
-.batch-import-item__detail {
-  margin-left: 34px;
-  margin-top: 10px;
-}
-
-.batch-import-item__fields {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.batch-import-item__field {
-  min-width: 0;
-}
-
-.batch-import-item__field--checkbox {
-  grid-column: 1 / -1;
-}
-
-.batch-import-item__label {
-  font-size: 12px;
-  font-weight: 600;
-  opacity: 0.78;
-}
-
-.batch-import-item__value--error {
-  color: #e88080;
-}
-
-.batch-import-item__result {
-  margin-top: 8px;
-  font-size: 12px;
-  line-height: 1.6;
-  opacity: 0.78;
-  word-break: break-word;
-}
-
-.batch-import-item__result--success {
-  color: #63e2b7;
-}
-
-.batch-import-item__result--error {
-  color: #e88080;
 }
 
 .resource-grid {
@@ -10863,87 +4944,6 @@ const handleToggleCompleted = async (resource: any) => {
   }
 }
 
-.modal-footer {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-  padding-top: 20px;
-  border-top: 1px solid rgba(128, 128, 128, 0.2);
-}
-
-.modal-footer__split {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.cover-field {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.cover-preview {
-  min-height: 108px;
-  border: 1px dashed rgba(128, 128, 128, 0.32);
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  box-sizing: border-box;
-  background: rgba(127, 127, 127, 0.06);
-  overflow: hidden;
-}
-
-.cover-preview__label {
-  font-size: 13px;
-  line-height: 1.5;
-  text-align: center;
-  opacity: 0.72;
-  word-break: break-all;
-}
-
-.cover-preview__image {
-  width: 100%;
-  height: 100%;
-  max-height: 180px;
-  object-fit: contain;
-  display: block;
-}
-
-.path-field {
-  width: 100%;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-}
-
-.path-field__actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.multi-value-field {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.edit-drawer {
-  padding-right: 4px;
-}
-
-.edit-drawer__footer {
-  width: 100%;
-}
-
 .detail-drawer {
   position: relative;
   display: flex;
@@ -10992,9 +4992,8 @@ const handleToggleCompleted = async (resource: any) => {
   justify-content: center;
   gap: 14px;
   color: rgba(255, 255, 255, 0.92);
-  background:
-    radial-gradient(circle at center, rgba(255, 255, 255, 0.09), transparent 56%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
+  background: radial-gradient(circle at center, rgba(255, 255, 255, 0.09), transparent 56%),
+  linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
 }
 
 .detail-drawer__website-cover-glow {
@@ -11388,6 +5387,20 @@ const handleToggleCompleted = async (resource: any) => {
   line-height: 1;
   transform: translate(-50%, -50%);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+}
+
+.detail-directory-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 72px;
+  padding: 8px 2px;
+  color: rgba(255, 255, 255, 0.68);
+}
+
+.detail-directory-loading__indicator {
+  width: 18px;
+  height: 18px;
 }
 
 .detail-audio-tree__subtitle-badge {

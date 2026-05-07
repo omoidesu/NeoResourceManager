@@ -113,6 +113,11 @@ export const Settings = {
     description: '图片阅读模式滚轮功能',
     default: 'zoom'
   },
+  BLUR_ALL_IMAGES: {
+    name: 'blurAllImages',
+    description: '模糊显示所有图片',
+    default: '0'
+  },
   THEME_COLOR: {
     name: 'themeColor',
     description: '主题颜色',

@@ -54,13 +54,24 @@ export class ResourceStoreItem {
   workId!: string
 }
 
-export class VideoSubItem {
+export class MediaSubItem {
   id!: string
   fileName!: string
   relativePath!: string
+  kind!: 'image' | 'audio' | 'video'
   coverPath?: string
   sortOrder!: number
   isVisible!: boolean
+  hasSubtitle?: boolean
+  duration?: number | null
+  bitrate?: number | null
+  sampleRate?: number | null
+  frameRate?: number | null
+  audioBitrate?: number | null
+  audioSampleRate?: number | null
+  width?: number | null
+  height?: number | null
+  metadataUpdatedAt?: Date | null
 }
 
 export class FetchResourceInfoResult {

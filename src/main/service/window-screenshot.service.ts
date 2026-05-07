@@ -444,7 +444,7 @@ Add-Type -TypeDefinition $signature -ReferencedAssemblies 'System.Drawing','Syst
 $matchedWindow = [IntPtr]::Zero
 function Find-VisibleWindowHandle {
   param(
-    [uint32]$Pid
+    [uint32]$ProcessId
   )
 
   $script:matchedWindow = [IntPtr]::Zero
@@ -455,7 +455,7 @@ function Find-VisibleWindowHandle {
     }
     [uint32]$windowPid = 0
     [Win32Capture]::GetWindowThreadProcessId($hWnd, [ref]$windowPid) | Out-Null
-    if ($windowPid -ne $Pid) {
+    if ($windowPid -ne $ProcessId) {
       return $true
     }
     $length = [Win32Capture]::GetWindowTextLength($hWnd)
@@ -475,7 +475,7 @@ function Find-VisibleWindowHandle {
 }
 
 for ($attempt = 0; $attempt -lt 24; $attempt++) {
-  $matchedWindow = Find-VisibleWindowHandle -Pid $targetPid
+  $matchedWindow = Find-VisibleWindowHandle -ProcessId $targetPid
   if ($matchedWindow -ne [IntPtr]::Zero) {
     break
   }

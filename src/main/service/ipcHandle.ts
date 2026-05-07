@@ -74,6 +74,18 @@ function registerResource() {
     return await DatabaseService.getActivityHeatmap(days)
   })
 
+  ipcMain.handle('db:get-dashboard-usage-distribution', async (_event, days?: number) => {
+    return await DatabaseService.getDashboardUsageDistribution(days)
+  })
+
+  ipcMain.handle('db:get-dashboard-long-unvisited-buckets', async () => {
+    return await DatabaseService.getDashboardLongUnvisitedBuckets()
+  })
+
+  ipcMain.handle('db:get-dashboard-added-trend', async (_event, days?: number) => {
+    return await DatabaseService.getDashboardAddedTrend(days)
+  })
+
   ipcMain.handle('db:get-home-next-play-resources', async (_event, limit?: number) => {
     return await DatabaseService.getHomeNextPlayResources(limit)
   })
@@ -82,8 +94,12 @@ function registerResource() {
     return await DatabaseService.getHomeFavoriteOverview()
   })
 
-  ipcMain.handle('db:get-home-cover-wall-data', async (_event, limit?: number) => {
-    return await DatabaseService.getHomeCoverWallData(limit)
+  ipcMain.handle('db:get-home-pinned-resources', async (_event, limit?: number) => {
+    return await DatabaseService.getHomePinnedResources(limit)
+  })
+
+  ipcMain.handle('db:get-home-cover-wall-data', async (_event, query?: number | { filter?: string; limit?: number; offset?: number; keyword?: string }) => {
+    return await DatabaseService.getHomeCoverWallData(query)
   })
 
   ipcMain.handle('db:get-recent-resource-logs', async (_event, page?: number, pageSize?: number) => {
@@ -249,8 +265,16 @@ function registerDialog() {
     return DialogService.getDirectoryImages(directoryPath);
   })
 
-  ipcMain.handle('dialog:get-directory-audio-tree', async (_event, directoryPath: string) => {
-    return DialogService.getDirectoryAudioTree(directoryPath);
+  ipcMain.handle('dialog:get-directory-audio-tree', async (
+    _event,
+    directoryPath: string,
+    options?: { includeMetadata?: boolean }
+  ) => {
+    return DialogService.getDirectoryAudioTree(directoryPath, options);
+  })
+
+  ipcMain.handle('dialog:get-media-metadata', async (_event, filePath: string) => {
+    return DialogService.getMediaMetadata(filePath);
   })
 
   ipcMain.handle('dialog:select-screenshot-image', async (_event, resourceId: string) => {
@@ -349,6 +373,10 @@ function registerService() {
 
   ipcMain.handle('service:fetch-website-info', async (_event, url: string) => {
     return ResourceService.fetchWebsiteInfo(url)
+  })
+
+  ipcMain.handle('service:fetch-website-cover', async (_event, url: string) => {
+    return ResourceService.fetchWebsiteCover(url)
   })
 
   ipcMain.handle('service:capture-cover-screenshot', async (_event, basePath: string) => {
@@ -464,6 +492,14 @@ function registerService() {
 
   ipcMain.handle('service:update-resource-completed', async (_event, resourceId: string, completed: boolean) => {
     return ResourceService.updateResourceCompleted(resourceId, completed)
+  })
+
+  ipcMain.handle('service:update-resource-top', async (_event, resourceId: string, top: boolean) => {
+    return ResourceService.updateResourceTop(resourceId, top)
+  })
+
+  ipcMain.handle('service:update-resource-home-pin', async (_event, resourceId: string, pinned: boolean) => {
+    return ResourceService.updateResourceHomePin(resourceId, pinned)
   })
 
   ipcMain.handle('service:start-notification-push', async (event) => {

@@ -1,7 +1,18 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { CopyOutline, EyeOutline, AddOutline, RemoveOutline, OpenOutline, ChevronBackOutline, ChevronForwardOutline, RefreshOutline, TrashOutline } from '@vicons/ionicons5'
+import {
+  CopyOutline,
+  EyeOutline,
+  AddOutline,
+  RemoveOutline,
+  OpenOutline,
+  ChevronBackOutline,
+  ChevronForwardOutline,
+  RefreshOutline,
+  TrashOutline
+} from '@vicons/ionicons5'
 import { notify } from '../utils/notification'
+import { resolveImagePreviewSource } from '../shared/preview/usePreviewAssetLoader'
 
 const props = withDefaults(defineProps<{
   show: boolean
@@ -23,21 +34,11 @@ const emit = defineEmits<{
 
 const currentIndex = ref(0)
 const scale = ref(1)
-const fitScale = ref(1)
 const thumbSrcMap = ref<Record<string, string>>({})
 const fullImageUrlMap = ref<Record<string, string>>({})
 const stageRef = ref<HTMLDivElement | null>(null)
-const imageScrollContainerRef = ref<HTMLDivElement | null>(null)
-const imageElementRef = ref<HTMLImageElement | null>(null)
 const thumbRefs = ref<HTMLElement[]>([])
-const stageCursor = ref<'default' | 'left' | 'right' | 'grab' | 'grabbing'>('default')
-const isDragging = ref(false)
-const dragState = ref({
-  startX: 0,
-  startY: 0,
-  scrollLeft: 0,
-  scrollTop: 0
-})
+const stageCursor = ref<'default' | 'left' | 'right'>('default')
 
 const clampIndex = (index: number) => {
   if (!props.imagePaths.length) {
@@ -57,7 +58,6 @@ const clampIndex = (index: number) => {
 
 const currentImagePath = computed(() => props.imagePaths[currentIndex.value] ?? '')
 const currentImageUrl = computed(() => fullImageUrlMap.value[currentImagePath.value] ?? '')
-const effectiveScale = computed(() => Number((fitScale.value * scale.value).toFixed(4)))
 const hasPrevious = computed(() => props.imagePaths.length > 1)
 const hasNext = computed(() => props.imagePaths.length > 1)
 
@@ -68,11 +68,12 @@ const loadThumbPreviewImage = async (filePath: string) => {
   }
 
   try {
-    const previewUrl = await window.api.dialog.getImagePreviewUrl(normalizedPath, {
+    const previewUrl = await resolveImagePreviewSource(normalizedPath, {
       maxWidth: 240,
       maxHeight: 160,
       fit: 'cover',
-      quality: 72
+      quality: 72,
+      fallbackToFileUrl: true
     })
     if (!previewUrl) {
       return
@@ -94,11 +95,12 @@ const loadMainImage = async (filePath: string) => {
   }
 
   try {
-    const imageUrl = await window.api.dialog.getImagePreviewUrl(normalizedPath, {
+    const imageUrl = await resolveImagePreviewSource(normalizedPath, {
       maxWidth: 4096,
       maxHeight: 4096,
       fit: 'inside',
-      quality: 90
+      quality: 90,
+      fallbackToFileUrl: true
     })
     if (!imageUrl) {
       return
@@ -133,8 +135,6 @@ const clearImageCache = () => {
   fullImageUrlMap.value = {}
 }
 
-const getScrollbarContainer = () => imageScrollContainerRef.value
-
 const setThumbRef = (element: unknown, index: number) => {
   if (!(element instanceof HTMLElement)) {
     return
@@ -163,16 +163,6 @@ const closeViewer = () => {
 
 const resetZoom = () => {
   scale.value = 1
-  updateFitScale()
-  void nextTick(() => {
-    const container = getScrollbarContainer()
-    if (!container) {
-      return
-    }
-
-    container.scrollLeft = 0
-    container.scrollTop = 0
-  })
 }
 
 const zoomIn = () => {
@@ -248,10 +238,6 @@ const handleThumbWheel = (event: WheelEvent) => {
 }
 
 const handleStageClick = (event: MouseEvent) => {
-  if (isDragging.value) {
-    return
-  }
-
   const stage = event.currentTarget as HTMLDivElement | null
   if (!stage) {
     closeViewer()
@@ -279,16 +265,6 @@ const handleStageDoubleClick = (event: MouseEvent) => {
 }
 
 const updateStageCursor = (event?: MouseEvent) => {
-  if (isDragging.value) {
-    stageCursor.value = 'grabbing'
-    return
-  }
-
-  if (effectiveScale.value > 1) {
-    stageCursor.value = 'grab'
-    return
-  }
-
   if (!event || !stageRef.value) {
     stageCursor.value = 'default'
     return
@@ -315,83 +291,12 @@ const handleStageMouseMove = (event: MouseEvent) => {
 }
 
 const handleStageMouseLeave = () => {
-  if (!isDragging.value) {
-    stageCursor.value = 'default'
-  }
+  stageCursor.value = 'default'
 }
 
-const handleStageMouseDown = (event: MouseEvent) => {
-  if (effectiveScale.value <= 1) {
-    return
-  }
-
-  const container = getScrollbarContainer()
-  if (!container) {
-    return
-  }
-
-  isDragging.value = true
-  dragState.value = {
-    startX: event.clientX,
-    startY: event.clientY,
-    scrollLeft: container.scrollLeft,
-    scrollTop: container.scrollTop
-  }
-  stageCursor.value = 'grabbing'
-  event.preventDefault()
-}
-
-const handleGlobalMouseMove = (event: MouseEvent) => {
-  if (!isDragging.value) {
-    return
-  }
-
-  const container = getScrollbarContainer()
-  if (!container) {
-    return
-  }
-
-  const deltaX = event.clientX - dragState.value.startX
-  const deltaY = event.clientY - dragState.value.startY
-
-  container.scrollLeft = dragState.value.scrollLeft - deltaX
-  container.scrollTop = dragState.value.scrollTop - deltaY
-}
-
-const stopDragging = () => {
-  if (!isDragging.value) {
-    return
-  }
-
-  isDragging.value = false
-  stageCursor.value = effectiveScale.value > 1 ? 'grab' : 'default'
-}
-
-const updateFitScale = () => {
-  const stageElement = stageRef.value
-  const imageElement = imageElementRef.value
-
-  if (!stageElement || !imageElement) {
-    fitScale.value = 1
-    return
-  }
-
-  const stageWidth = Math.max(1, stageElement.clientWidth - 28)
-  const stageHeight = Math.max(1, stageElement.clientHeight)
-  const naturalWidth = Number(imageElement.naturalWidth ?? 0)
-  const naturalHeight = Number(imageElement.naturalHeight ?? 0)
-
-  if (!naturalWidth || !naturalHeight) {
-    fitScale.value = 1
-    return
-  }
-
-  fitScale.value = Math.max(0.1, Math.min(stageWidth / naturalWidth, stageHeight / naturalHeight))
-}
-
-const handleImageLoad = () => {
-  updateFitScale()
-}
+const mainImageStyle = computed(() => ({
+  transform: `scale(${scale.value})`
+}))
 
 const handleKeydown = (event: KeyboardEvent) => {
   if (!props.show) {
@@ -519,21 +424,14 @@ watch(currentIndex, () => {
   void loadMainImage(currentImagePath.value)
   void preloadThumbsAroundCurrent()
   void scrollActiveThumbIntoView()
-  updateFitScale()
 })
 
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown)
-  window.addEventListener('mousemove', handleGlobalMouseMove)
-  window.addEventListener('mouseup', stopDragging)
-  window.addEventListener('resize', updateFitScale)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
-  window.removeEventListener('mousemove', handleGlobalMouseMove)
-  window.removeEventListener('mouseup', stopDragging)
-  window.removeEventListener('resize', updateFitScale)
 })
 </script>
 
@@ -641,28 +539,23 @@ onBeforeUnmount(() => {
         class="picture-viewer__stage"
         :class="{
           'picture-viewer__stage--cursor-left': stageCursor === 'left',
-          'picture-viewer__stage--cursor-right': stageCursor === 'right',
-          'picture-viewer__stage--cursor-grab': stageCursor === 'grab',
-          'picture-viewer__stage--cursor-grabbing': stageCursor === 'grabbing'
+          'picture-viewer__stage--cursor-right': stageCursor === 'right'
         }"
         @wheel="handleWheel"
         @click="handleStageClick"
         @dblclick="handleStageDoubleClick"
         @mousemove="handleStageMouseMove"
         @mouseleave="handleStageMouseLeave"
-        @mousedown="handleStageMouseDown"
       >
-        <div ref="imageScrollContainerRef" class="picture-viewer__image-scroll-container">
+        <div class="picture-viewer__image-scroll-container">
           <div class="picture-viewer__image-center">
             <img
-              ref="imageElementRef"
               v-if="currentImageUrl"
               :src="currentImageUrl"
               :alt="currentImagePath"
               class="picture-viewer__image"
-              :style="{ transform: `scale(${effectiveScale})` }"
+              :style="mainImageStyle"
               draggable="false"
-              @load="handleImageLoad"
             />
             <div v-else class="picture-viewer__empty">
               <n-icon :component="EyeOutline" size="26" />
@@ -755,23 +648,9 @@ onBeforeUnmount(() => {
   cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28'%3E%3Cpath d='M11 6l8 8-8 8' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 14 14, e-resize;
 }
 
-.picture-viewer__stage--cursor-grab {
-  cursor: grab;
-}
-
-.picture-viewer__stage--cursor-grabbing {
-  cursor: grabbing;
-}
-
 .picture-viewer__image-scroll-container {
   position: absolute;
   inset: 0 14px;
-  overflow: auto;
-  min-height: 0;
-  min-width: 0;
-}
-
-.picture-viewer__image-scroll-container {
   width: 100%;
   height: 100%;
   display: flex;
@@ -793,8 +672,10 @@ onBeforeUnmount(() => {
 }
 
 .picture-viewer__image {
-  max-width: none;
-  max-height: none;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
   object-fit: contain;
   transition: transform 0.12s ease;
   transform-origin: center center;

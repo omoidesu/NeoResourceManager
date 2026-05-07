@@ -50,6 +50,11 @@ window.addEventListener('unhandledrejection', (event) => {
 
 // Custom APIs for renderer
 const api = {
+  diagnostics: {
+    logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>) => {
+      sendRendererLog(level, message, meta)
+    }
+  },
   db: {
     getCategory: () => ipcRenderer.invoke('db:get-category'),
     getCategoryById: (id: string) => ipcRenderer.invoke('db:get-category-by-id', id),
@@ -66,9 +71,13 @@ const api = {
     getFavoriteResources: (page?: number, pageSize?: number) => ipcRenderer.invoke('db:get-favorite-resources', page, pageSize),
     getDashboardStats: () => ipcRenderer.invoke('db:get-dashboard-stats'),
     getActivityHeatmap: (days?: number) => ipcRenderer.invoke('db:get-activity-heatmap', days),
+    getDashboardUsageDistribution: (days?: number) => ipcRenderer.invoke('db:get-dashboard-usage-distribution', days),
+    getDashboardLongUnvisitedBuckets: () => ipcRenderer.invoke('db:get-dashboard-long-unvisited-buckets'),
+    getDashboardAddedTrend: (days?: number) => ipcRenderer.invoke('db:get-dashboard-added-trend', days),
     getHomeNextPlayResources: (limit?: number) => ipcRenderer.invoke('db:get-home-next-play-resources', limit),
     getHomeFavoriteOverview: () => ipcRenderer.invoke('db:get-home-favorite-overview'),
-    getHomeCoverWallData: (limit?: number) => ipcRenderer.invoke('db:get-home-cover-wall-data', limit),
+    getHomePinnedResources: (limit?: number) => ipcRenderer.invoke('db:get-home-pinned-resources', limit),
+    getHomeCoverWallData: (query?: number | { filter?: string; limit?: number; offset?: number; keyword?: string }) => ipcRenderer.invoke('db:get-home-cover-wall-data', query),
     getRecentResourceLogs: (page?: number, pageSize?: number) => ipcRenderer.invoke('db:get-recent-resource-logs', page, pageSize),
     getAuthorByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-author-by-category-id', categoryId),
     getActorByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-actor-by-category-id', categoryId),
@@ -120,7 +129,9 @@ const api = {
     saveVideoFrameScreenshot: (resourceId: string, dataUrl: string, currentTime?: number) =>
       ipcRenderer.invoke('dialog:save-video-frame-screenshot', resourceId, dataUrl, currentTime),
     getDirectoryImages: (directoryPath: string) => ipcRenderer.invoke('dialog:get-directory-images', directoryPath),
-    getDirectoryAudioTree: (directoryPath: string) => ipcRenderer.invoke('dialog:get-directory-audio-tree', directoryPath),
+    getDirectoryAudioTree: (directoryPath: string, options?: { includeMetadata?: boolean }) =>
+      ipcRenderer.invoke('dialog:get-directory-audio-tree', directoryPath, options),
+    getMediaMetadata: (filePath: string) => ipcRenderer.invoke('dialog:get-media-metadata', filePath),
     selectScreenshotImage: (resourceId: string) => ipcRenderer.invoke('dialog:select-screenshot-image', resourceId),
     deleteImage: (filePath: string) => ipcRenderer.invoke('dialog:delete-image', filePath),
   },
@@ -154,6 +165,8 @@ const api = {
       ipcRenderer.invoke('service:fetch-resource-info', websiteId, resourceId),
     fetchWebsiteInfo: (url: string) =>
       ipcRenderer.invoke('service:fetch-website-info', url),
+    fetchWebsiteCover: (url: string) =>
+      ipcRenderer.invoke('service:fetch-website-cover', url),
       captureCoverScreenshot: (basePath: string) =>
         ipcRenderer.invoke('service:capture-cover-screenshot', basePath),
       extractVideoCoverFrames: (basePath: string) =>
@@ -206,6 +219,10 @@ const api = {
       ipcRenderer.invoke('service:update-resource-favorite', resourceId, favorite),
     updateResourceCompleted: (resourceId: string, completed: boolean) =>
       ipcRenderer.invoke('service:update-resource-completed', resourceId, completed),
+    updateResourceTop: (resourceId: string, top: boolean) =>
+      ipcRenderer.invoke('service:update-resource-top', resourceId, top),
+    updateResourceHomePin: (resourceId: string, pinned: boolean) =>
+      ipcRenderer.invoke('service:update-resource-home-pin', resourceId, pinned),
     startNotificationPush: () => ipcRenderer.invoke('service:start-notification-push'),
     onNotificationPush: (listener: (message: AppNotificationMessage) => void) => {
       const wrappedListener = (_event: Electron.IpcRendererEvent, message: AppNotificationMessage) => {

@@ -113,6 +113,27 @@
       "when": 1777276800000,
       "tag": "0015_add_category_pill_color",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1777449600000,
+      "tag": "0016_replace_video_sub_with_media_sub",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1777708800000,
+      "tag": "0017_add_home_pin_and_resource_top",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1777968000000,
+      "tag": "0018_add_resource_search_text",
+      "breakpoints": true
     }
   ]
 }

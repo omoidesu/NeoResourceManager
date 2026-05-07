@@ -51,14 +51,14 @@ const DEFAULT_TEXT_CHUNK_BYTES = 512 * 1024
 const AUTO_TEXT_ENCODING = 'auto'
 const textEncodingOptions = [
   { label: '自动检测', value: AUTO_TEXT_ENCODING },
-  { label: 'UTF8', value: 'utf-8' },
-  { label: 'UTF16LE', value: 'utf-16le' },
-  { label: '简体中文', value: 'gb18030' },
-  { label: '繁体中文', value: 'big5' },
-  { label: '日语', value: 'shift_jis' },
-  { label: '朝鲜语', value: 'euc-kr' },
-  { label: '西欧语言', value: 'windows-1252' },
-  { label: '中欧语言', value: 'windows-1250' }
+  { label: 'Unicode(UTF-8)', value: 'utf-8' },
+  { label: 'Unicode(UTF-16LE)', value: 'utf-16le' },
+  { label: '简体中文(GB18030)', value: 'gb18030' },
+  { label: '繁体中文(Big5)', value: 'big5' },
+  { label: '日语(Shift_JIS)', value: 'shift_jis' },
+  { label: '朝鲜语(EUC-KR)', value: 'euc-kr' },
+  { label: '西欧语言(Windows-1252)', value: 'windows-1252' },
+  { label: '中欧语言(Windows-1250)', value: 'windows-1250' }
 ]
 const textEncodingLabelMap = new Map(textEncodingOptions.map((option) => [option.value, option.label]))
 

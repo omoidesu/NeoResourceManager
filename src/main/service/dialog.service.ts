@@ -836,7 +836,12 @@ export class DialogService {
     return this.listImageFiles(normalizedPath)
   }
 
-  static async getDirectoryAudioTree(directoryPath: string) {
+  static async getDirectoryAudioTree(
+    directoryPath: string,
+    options?: {
+      includeMetadata?: boolean
+    }
+  ) {
     const normalizedPath = path.normalize(String(directoryPath ?? '').trim())
     if (!normalizedPath || !fs.existsSync(normalizedPath)) {
       return []
@@ -847,7 +852,37 @@ export class DialogService {
       return []
     }
 
-    return this.listAudioTree(normalizedPath)
+    return this.listAudioTree(normalizedPath, options?.includeMetadata !== false)
+  }
+
+  static async getMediaMetadata(filePath: string) {
+    const normalizedPath = path.normalize(String(filePath ?? '').trim())
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      return null
+    }
+
+    const stats = fs.statSync(normalizedPath)
+    if (!stats.isFile()) {
+      return null
+    }
+
+    const extension = path.extname(normalizedPath).toLowerCase()
+    const isAudio = this.AUDIO_EXTENSIONS.has(extension)
+    const isImage = this.IMAGE_EXTENSIONS.has(extension)
+    const isVideo = this.VIDEO_EXTENSIONS.has(extension)
+
+    if (!isAudio && !isImage && !isVideo) {
+      return null
+    }
+
+    const metadata = isAudio || isVideo
+      ? await this.readMediaMetadata(normalizedPath, isVideo)
+      : await this.readImageMetadata(normalizedPath)
+
+    return {
+      kind: isImage ? 'image' : (isVideo ? 'video' : 'audio'),
+      ...metadata
+    }
   }
 
   static async selectScreenshotImage(resourceId: string) {
@@ -965,7 +1000,7 @@ export class DialogService {
       .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
   }
 
-  private static async listAudioTree(directoryPath: string) {
+  private static async listAudioTree(directoryPath: string, includeMetadata = true) {
     const entries = fs.readdirSync(directoryPath, { withFileTypes: true })
       .sort((left, right) => {
         if (left.isDirectory() !== right.isDirectory()) {
@@ -996,7 +1031,7 @@ export class DialogService {
       const entryPath = path.join(directoryPath, entry.name)
 
       if (entry.isDirectory()) {
-        const children = await this.listAudioTree(entryPath)
+        const children = await this.listAudioTree(entryPath, includeMetadata)
         if (!children.length) {
           continue
         }
@@ -1031,9 +1066,20 @@ export class DialogService {
         isDirectory: false,
         kind: isImage ? 'image' : (isVideo ? 'video' : 'audio'),
         hasSubtitle: isAudio ? this.hasSiblingSubtitleFile(entryPath) : false,
-        ...((isAudio || isVideo)
-          ? await this.readMediaMetadata(entryPath, isVideo)
-          : await this.readImageMetadata(entryPath))
+        ...(includeMetadata
+          ? ((isAudio || isVideo)
+              ? await this.readMediaMetadata(entryPath, isVideo)
+              : await this.readImageMetadata(entryPath))
+          : {
+              duration: null,
+              bitrate: null,
+              sampleRate: null,
+              frameRate: null,
+              audioBitrate: null,
+              audioSampleRate: null,
+              width: null,
+              height: null
+            })
       })
     }
 

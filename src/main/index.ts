@@ -334,6 +334,31 @@ function prepareChromiumStoragePaths() {
   const sessionDataPath = join(userDataPath, 'sessionData')
   const diskCachePath = join(sessionDataPath, 'Cache')
   const gpuCachePath = join(sessionDataPath, 'GPUCache')
+  const volatileSessionEntries = [
+    'Cache',
+    'Code Cache',
+    'DawnGraphiteCache',
+    'DawnWebGPUCache',
+    'GPUCache',
+    'Network'
+  ]
+
+  if (!app.isPackaged && fs.existsSync(sessionDataPath)) {
+    for (const entryName of volatileSessionEntries) {
+      const targetPath = join(sessionDataPath, entryName)
+
+      try {
+        if (fs.existsSync(targetPath)) {
+          fs.rmSync(targetPath, { recursive: true, force: true })
+        }
+      } catch (error) {
+        logger.warn('failed to clear volatile chromium session entry', {
+          targetPath,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+  }
 
   ;[userDataPath, sessionDataPath, diskCachePath, gpuCachePath].forEach((targetPath) => {
     if (!fs.existsSync(targetPath)) {
@@ -677,6 +702,29 @@ function createWindow(): void {
   mainWindow.webContents.on('did-start-loading', () => {
     logger.info('renderer did-start-loading', {
       url: mainWindow.webContents.getURL()
+    })
+  })
+  mainWindow.webContents.on('will-navigate', (_event, navigationUrl) => {
+    logger.info('renderer will-navigate', {
+      navigationUrl,
+      currentUrl: mainWindow.webContents.getURL()
+    })
+  })
+  mainWindow.webContents.on('did-navigate', (_event, navigationUrl, httpResponseCode, httpStatusText) => {
+    logger.info('renderer did-navigate', {
+      navigationUrl,
+      httpResponseCode,
+      httpStatusText,
+      currentUrl: mainWindow.webContents.getURL()
+    })
+  })
+  mainWindow.webContents.on('did-navigate-in-page', (_event, navigationUrl, isMainFrame, frameProcessId, frameRoutingId) => {
+    logger.info('renderer did-navigate-in-page', {
+      navigationUrl,
+      isMainFrame,
+      frameProcessId,
+      frameRoutingId,
+      currentUrl: mainWindow.webContents.getURL()
     })
   })
   mainWindow.webContents.on('dom-ready', () => {

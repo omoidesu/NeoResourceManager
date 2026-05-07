@@ -36,6 +36,7 @@ const panicModeOptions = [
 const appearanceSettings = [
   Settings.THEME_TYPE,
   Settings.PICTURE_READ_SCROLL_MODE,
+  Settings.BLUR_ALL_IMAGES,
   Settings.THEME_COLOR
 ]
 
@@ -76,7 +77,8 @@ const shortcutSettings = [
 const booleanSettingNames = [
   Settings.USE_EVERYTHING_HTTP.name,
   Settings.USE_EVERYTHING_CLI.name,
-  Settings.ENABLE_PROXY.name
+  Settings.ENABLE_PROXY.name,
+  Settings.BLUR_ALL_IMAGES.name
 ] as string[]
 
 const pageStyle = computed(() => ({
@@ -200,6 +202,11 @@ const handleSave = async () => {
       )
     )
     initialFormData.value = { ...formData.value }
+    window.dispatchEvent(new CustomEvent('app-settings-changed', {
+      detail: {
+        settings: { ...formData.value }
+      }
+    }))
     notify('success', '设置', '设置已保存')
   } catch (error) {
     notify('error', '设置', error instanceof Error ? error.message : '保存设置失败')
