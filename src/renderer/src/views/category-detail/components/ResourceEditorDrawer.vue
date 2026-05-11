@@ -66,9 +66,10 @@ const modelKey = computed(() => `${props.modelComponentKey}${isEditMode.value ? 
 const extendTable = computed(() => String(props.categorySettings.extendTable ?? ''))
 const resourcePathType = computed(() => String(props.categorySettings.resourcePathType ?? ''))
 const isWebsiteCategory = computed(() => extendTable.value === 'website_meta')
-const showCoverField = computed(() => !['software_meta', 'single_image_meta'].includes(extendTable.value))
+const showCoverField = computed(() => extendTable.value !== 'single_image_meta')
 const showWebsiteCoverFetchButton = computed(() => isWebsiteCategory.value)
 const showScreenshotCoverButton = computed(() => ![
+  'software_meta',
   'multi_image_meta',
   'asmr_meta',
   'audio_meta',
@@ -77,6 +78,7 @@ const showScreenshotCoverButton = computed(() => ![
   'website_meta'
 ].includes(extendTable.value))
 const showScreenshotFolderButton = computed(() => ![
+  'software_meta',
   'audio_meta',
   'multi_image_meta',
   'asmr_meta',

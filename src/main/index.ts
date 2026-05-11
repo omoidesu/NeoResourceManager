@@ -29,6 +29,8 @@ type WindowState = {
 let isShuttingDown = false
 let isQuitApproved = false
 let isQuitCheckInProgress = false
+let backgroundServicesInitializationTimer: NodeJS.Timeout | null = null
+let backgroundServicesInitializationStarted = false
 const logger = createLogger('main')
 const LOCAL_FILE_PROTOCOL = 'neo-resource-file'
 const AUDIO_TRANSCODE_PROTOCOL = 'neo-resource-audio'
@@ -401,6 +403,10 @@ async function shutdownApp(reason: string) {
 
   isShuttingDown = true
   logger.info(`shutting down: ${reason}`)
+  if (backgroundServicesInitializationTimer) {
+    clearTimeout(backgroundServicesInitializationTimer)
+    backgroundServicesInitializationTimer = null
+  }
 
   try {
     await ResourceWatcher.getInstance().stop()
@@ -825,6 +831,40 @@ function createWindow(): void {
   }
 }
 
+function scheduleBackgroundServicesInitialization(delayMs = 1800) {
+  if (backgroundServicesInitializationStarted || backgroundServicesInitializationTimer) {
+    return
+  }
+
+  logger.info('background services initialization scheduled', { delayMs })
+  backgroundServicesInitializationTimer = setTimeout(() => {
+    backgroundServicesInitializationTimer = null
+    backgroundServicesInitializationStarted = true
+    void (async () => {
+      try {
+        logger.info('background services initialization started')
+        await FetchPluginService.getInstance().initialize()
+        await WindowScreenshotService.initialize()
+        await ResourceWatcher.getInstance().start()
+        ResourceRuntimeMonitorService.getInstance().start()
+        logger.info('background services initialized')
+      } catch (error) {
+        logger.error('failed to initialize background services', error)
+      }
+    })()
+  }, delayMs)
+}
+
+function requestBackgroundServicesInitialization(reason: string, delayMs = 1200) {
+  logger.info('background services initialization requested', {
+    reason,
+    delayMs,
+    alreadyStarted: backgroundServicesInitializationStarted,
+    alreadyScheduled: Boolean(backgroundServicesInitializationTimer)
+  })
+  scheduleBackgroundServicesInitialization(delayMs)
+}
+
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
@@ -884,6 +924,13 @@ app.whenReady().then(async () => {
         logger.info(message, meta)
     }
   })
+  ipcMain.handle('service:start-background-services', async (_event, reason?: string, delayMs?: number) => {
+    requestBackgroundServicesInitialization(
+      String(reason ?? 'renderer-request').trim() || 'renderer-request',
+      Math.max(0, Number(delayMs ?? 1200) || 0)
+    )
+    return true
+  })
   app.on('child-process-gone', (_event, details) => {
     logger.error('electron child-process-gone', details)
   })
@@ -895,18 +942,6 @@ app.whenReady().then(async () => {
     logger.warn('recovered dangling active resource logs on startup', { count: recoveredLogCount })
   }
   createWindow()
-
-  void (async () => {
-    try {
-      await FetchPluginService.getInstance().initialize()
-      await WindowScreenshotService.initialize()
-      await ResourceWatcher.getInstance().start()
-      ResourceRuntimeMonitorService.getInstance().start()
-      logger.info('background services initialized')
-    } catch (error) {
-      logger.error('failed to initialize background services', error)
-    }
-  })()
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the

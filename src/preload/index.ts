@@ -223,6 +223,8 @@ const api = {
       ipcRenderer.invoke('service:update-resource-top', resourceId, top),
     updateResourceHomePin: (resourceId: string, pinned: boolean) =>
       ipcRenderer.invoke('service:update-resource-home-pin', resourceId, pinned),
+    startBackgroundServices: (reason?: string, delayMs?: number) =>
+      ipcRenderer.invoke('service:start-background-services', reason, delayMs),
     startNotificationPush: () => ipcRenderer.invoke('service:start-notification-push'),
     onNotificationPush: (listener: (message: AppNotificationMessage) => void) => {
       const wrappedListener = (_event: Electron.IpcRendererEvent, message: AppNotificationMessage) => {

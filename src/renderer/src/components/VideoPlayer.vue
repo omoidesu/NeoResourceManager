@@ -21,21 +21,10 @@ import {
   setAudioPlayerVisible,
   useAudioPlayerStore
 } from '../utils/audio-player-store'
-
-type VideoTrack = {
-  path: string
-  label: string
-  resourceId?: string
-  resourceTitle?: string
-  coverSrc?: string
-  subtitlePath?: string
-}
-
-type SubtitleCue = {
-  start: number
-  end: number
-  text: string
-}
+import { useVideoPlaybackSession } from './video-player/composables/useVideoPlaybackSession'
+import { useVideoPlaylistPresentation } from './video-player/composables/useVideoPlaylistPresentation'
+import { useVideoPlaylistRuntime, type VideoTrack } from './video-player/composables/useVideoPlaylistRuntime'
+import { useVideoSubtitleRuntime } from './video-player/composables/useVideoSubtitleRuntime'
 
 const props = withDefaults(defineProps<{
   show: boolean
@@ -62,10 +51,6 @@ const videoRef = ref<HTMLVideoElement | null>(null)
 const shellRef = ref<HTMLDivElement | null>(null)
 const sourceUrl = ref('')
 const errorMessage = ref('')
-const subtitleCueList = ref<SubtitleCue[]>([])
-const subtitleLoadState = ref<'idle' | 'loading' | 'ready' | 'empty'>('idle')
-const currentIndex = ref(0)
-const MAX_SUBTITLE_FILE_BYTES = 2 * 1024 * 1024
 const currentTime = ref(0)
 const duration = ref(0)
 const volume = ref(80)
@@ -76,25 +61,18 @@ const isFullscreen = ref(false)
 const isCurrentSourceTranscoded = ref(false)
 const playbackTimeOffset = ref(0)
 const seekPreviewTime = ref<number | null>(null)
-const orderedPlaylist = ref<VideoTrack[]>([])
 const showPlaylist = ref(true)
 const showPlaybackRateMenu = ref(false)
 const fullscreenControlsVisible = ref(true)
 const playbackRate = ref(1)
 const screenshotShortcut = ref(String(Settings.SHORTCUT_PRINT_SCREEN.default ?? 'f11'))
 const captureToast = ref('')
-const manualSubtitlePaths = ref<Record<string, string>>({})
-const draggingTrackIndex = ref<number | null>(null)
-const dragOverTrackIndex = ref<number | null>(null)
-const dragOverPosition = ref<'before' | 'after' | null>(null)
 let loadRequestId = 0
 let pendingStartTime = 0
 let pendingAutoplay = false
-let suppressPlaylistReload = false
 let fullscreenControlsTimer: number | null = null
 let captureToastTimer: number | null = null
 let seekPreviewTimer: number | null = null
-let playbackSessionResourceId = ''
 let removeVideoFrameCaptureShortcutListener: (() => void) | null = null
 
 const resetAudioPlayerStoreState = () => {
@@ -153,147 +131,64 @@ const playbackRateOptions = [
   { label: '0.5x', value: 0.5 }
 ]
 
-const normalizedPlaylist = computed(() =>
-  orderedPlaylist.value
-    .map((track) => ({
-      ...track,
-      path: String(track.path ?? '').trim(),
-      label: String(track.label ?? '').trim() || getFileName(track.path)
-    }))
-    .filter((track) => track.path)
-)
-const currentTrack = computed(() => normalizedPlaylist.value[currentIndex.value] ?? null)
-const displayCurrentTime = computed(() => seekPreviewTime.value ?? currentTime.value)
-const displayTitle = computed(() =>
-  String(currentTrack.value?.resourceTitle ?? currentTrack.value?.label ?? props.title ?? '').trim() || '视频播放'
-)
-const currentSubtitleText = computed(() => {
-  const time = displayCurrentTime.value
-  const cue = subtitleCueList.value.find((item) => time >= item.start && time <= item.end)
-  return cue?.text ?? ''
+const getFileName = (filePath?: string) => String(filePath ?? '').replace(/\\/g, '/').split('/').pop() || '视频'
+const {
+  normalizedPlaylist,
+  currentIndex,
+  currentTrack,
+  canPrevious,
+  canNext,
+  draggingTrackIndex,
+  dragOverTrackIndex,
+  dragOverPosition,
+  syncOrderedPlaylist,
+  consumeSuppressPlaylistReload,
+  handleTrackDragStart,
+  handleTrackDragOver,
+  handleTrackDrop,
+  handleTrackDragEnd
+} = useVideoPlaylistRuntime({
+  getInitialPath: () => String(props.initialPath ?? '').trim(),
+  getFileName,
+  onPlaylistReordered: (playlist) => emit('update:playlist', playlist)
 })
-const canPrevious = computed(() => currentIndex.value > 0)
-const canNext = computed(() => currentIndex.value < normalizedPlaylist.value.length - 1)
+const displayCurrentTime = computed(() => seekPreviewTime.value ?? currentTime.value)
+const fallbackTitle = computed(() => String(props.title ?? ''))
+const {
+  displayTitle,
+  getTrackFileName,
+  getTrackCoverSrc
+} = useVideoPlaylistPresentation({
+  currentTrack,
+  fallbackTitle,
+  getFileName
+})
+const {
+  subtitleLoadState,
+  currentSubtitleText,
+  loadSubtitleForTrack,
+  chooseSubtitleForCurrentTrack
+} = useVideoSubtitleRuntime({
+  displayCurrentTime,
+  getLoadRequestId: () => loadRequestId,
+  getCurrentTrack: () => currentTrack.value
+})
 const shouldHideFullscreenControls = computed(() =>
   isFullscreen.value && !showPlaylist.value && !fullscreenControlsVisible.value
 )
-
-const getFileName = (filePath?: string) => String(filePath ?? '').replace(/\\/g, '/').split('/').pop() || '视频'
-
-const syncOrderedPlaylist = (playlist: VideoTrack[]) => {
-  const nextPlaylist = Array.isArray(playlist)
-    ? playlist
-      .map((track) => ({ ...track }))
-      .filter((track) => String(track?.path ?? '').trim())
-    : []
-
-  const activeTrackPath = String(currentTrack.value?.path ?? '').trim()
-  orderedPlaylist.value = nextPlaylist
-
-  if (!nextPlaylist.length) {
-    currentIndex.value = 0
-    return
-  }
-
-  const preservedIndex = activeTrackPath
-    ? nextPlaylist.findIndex((track) => String(track?.path ?? '').trim() === activeTrackPath)
-    : -1
-
-  if (preservedIndex >= 0) {
-    currentIndex.value = preservedIndex
-    return
-  }
-
-  const initialIndex = nextPlaylist.findIndex((track) => String(track?.path ?? '').trim() === String(props.initialPath ?? '').trim())
-  currentIndex.value = initialIndex >= 0 ? initialIndex : 0
-}
-
-const clearDragState = () => {
-  draggingTrackIndex.value = null
-  dragOverTrackIndex.value = null
-  dragOverPosition.value = null
-}
-
-const resolveDragPosition = (event: DragEvent) => {
-  const currentTarget = event.currentTarget
-  if (!(currentTarget instanceof HTMLElement)) {
-    return 'after' as const
-  }
-
-  const rect = currentTarget.getBoundingClientRect()
-  return event.clientY < rect.top + rect.height / 2 ? 'before' as const : 'after' as const
-}
-
-const reorderPlaylist = (fromIndex: number, targetIndex: number, position: 'before' | 'after') => {
-  if (fromIndex < 0 || targetIndex < 0 || fromIndex >= normalizedPlaylist.value.length || targetIndex >= normalizedPlaylist.value.length) {
-    clearDragState()
-    return
-  }
-
-  let insertIndex = position === 'after' ? targetIndex + 1 : targetIndex
-  if (fromIndex < insertIndex) {
-    insertIndex -= 1
-  }
-
-  if (insertIndex === fromIndex) {
-    clearDragState()
-    return
-  }
-
-  const nextPlaylist = [...orderedPlaylist.value]
-  const [movedTrack] = nextPlaylist.splice(fromIndex, 1)
-  nextPlaylist.splice(insertIndex, 0, movedTrack)
-  const activeTrackPath = String(currentTrack.value?.path ?? '').trim()
-
-  orderedPlaylist.value = nextPlaylist
-
-  if (activeTrackPath) {
-    const nextCurrentIndex = nextPlaylist.findIndex((track) => String(track?.path ?? '').trim() === activeTrackPath)
-    currentIndex.value = nextCurrentIndex >= 0 ? nextCurrentIndex : Math.max(0, Math.min(insertIndex, nextPlaylist.length - 1))
-  } else {
-    currentIndex.value = Math.max(0, Math.min(insertIndex, nextPlaylist.length - 1))
-  }
-
-  suppressPlaylistReload = true
-  emit('update:playlist', nextPlaylist.map((track) => ({ ...track })))
-  clearDragState()
-}
-
-const handleTrackDragStart = (index: number, event: DragEvent) => {
-  draggingTrackIndex.value = index
-  dragOverTrackIndex.value = index
-  dragOverPosition.value = 'after'
-  if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = 'move'
-    event.dataTransfer.setData('text/plain', String(index))
-  }
-}
-
-const handleTrackDragOver = (index: number, event: DragEvent) => {
-  if (draggingTrackIndex.value === null) {
-    return
-  }
-
-  event.preventDefault()
-  dragOverTrackIndex.value = index
-  dragOverPosition.value = resolveDragPosition(event)
-  if (event.dataTransfer) {
-    event.dataTransfer.dropEffect = 'move'
-  }
-}
-
-const handleTrackDrop = (index: number, event: DragEvent) => {
-  if (draggingTrackIndex.value === null) {
-    return
-  }
-
-  event.preventDefault()
-  reorderPlaylist(draggingTrackIndex.value, index, resolveDragPosition(event))
-}
-
-const handleTrackDragEnd = () => {
-  clearDragState()
-}
+const {
+  getPlaybackSessionResourceId,
+  persistCurrentProgress,
+  stopPlaybackSession,
+  startCurrentPlaybackSession,
+  finalizePlaybackSession
+} = useVideoPlaybackSession({
+  videoRef,
+  currentTrack,
+  currentTime,
+  isCurrentSourceTranscoded,
+  onProgressPersisted: (value) => emit('progress-persisted', value)
+})
 
 const formatTime = (value?: number | null) => {
   const seconds = Math.max(0, Math.floor(Number(value ?? 0)))
@@ -316,183 +211,6 @@ const normalizeResumeTime = (resumeTime: number, mediaDuration: number) => {
   return normalizedResumeTime / normalizedDuration >= thresholdPercent / 100 ? 0 : normalizedResumeTime
 }
 
-const timestampToSeconds = (value: string): number | null => {
-  const normalized = String(value ?? '').trim().replace(',', '.')
-  const parts = normalized.split(':').map((part) => Number(part))
-  if (parts.some((part) => Number.isNaN(part))) {
-    return null
-  }
-
-  if (parts.length === 3) {
-    return parts[0] * 3600 + parts[1] * 60 + parts[2]
-  }
-
-  if (parts.length === 2) {
-    return parts[0] * 60 + parts[1]
-  }
-
-  return null
-}
-
-const parseLrc = (content: string) => {
-  const cues: SubtitleCue[] = []
-  const lines = content.split(/\r?\n/)
-
-  for (const line of lines) {
-    const matches = [...line.matchAll(/\[(\d{1,2}:\d{2}(?:[.:]\d{1,3})?)\]/g)]
-    const text = line.replace(/\[(\d{1,2}:\d{2}(?:[.:]\d{1,3})?)\]/g, '').trim()
-    if (!matches.length || !text) {
-      continue
-    }
-
-    for (const match of matches) {
-      const start = timestampToSeconds(match[1].replace('.', ':').replace(/:(\d{1,3})$/, '.$1'))
-      if (start !== null) {
-        cues.push({ start, end: start + 4, text })
-      }
-    }
-  }
-
-  cues.sort((left, right) => left.start - right.start)
-  for (let index = 0; index < cues.length; index += 1) {
-    const nextCue = cues[index + 1]
-    if (nextCue) {
-      cues[index].end = Math.max(cues[index].start + 1.5, nextCue.start - 0.08)
-    }
-  }
-
-  return cues
-}
-
-const parseSrtOrVtt = (content: string) => {
-  const normalizedContent = content.replace(/^\uFEFF/, '').replace(/^WEBVTT\s*/i, '').trim()
-  const blocks = normalizedContent.split(/\r?\n\r?\n/)
-  const cues: SubtitleCue[] = []
-
-  for (const block of blocks) {
-    const lines = block.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-    const timeLine = lines.find((line) => line.includes('-->'))
-    if (!timeLine) {
-      continue
-    }
-
-    const [startRaw, endRaw] = timeLine.split('-->').map((part) => part.trim().split(/\s+/)[0])
-    const start = timestampToSeconds(startRaw)
-    const end = timestampToSeconds(endRaw)
-    if (start === null || end === null) {
-      continue
-    }
-
-    const text = lines.slice(lines.indexOf(timeLine) + 1).join('\n').trim()
-    if (text) {
-      cues.push({ start, end, text })
-    }
-  }
-
-  return cues
-}
-
-const loadSubtitleForTrack = async (track: VideoTrack | null, requestId: number) => {
-  subtitleCueList.value = []
-  subtitleLoadState.value = 'loading'
-  const trackPath = String(track?.path ?? '').trim()
-  if (!trackPath) {
-    subtitleLoadState.value = 'empty'
-    return
-  }
-
-  const subtitleCandidates = [
-    String(manualSubtitlePaths.value[trackPath] ?? '').trim(),
-    String(track?.subtitlePath ?? '').trim(),
-    ...['.srt', '.vtt', '.lrc'].map((extension) => [
-      trackPath.replace(/\.[^./\\]+$/, extension),
-      `${trackPath}${extension}`
-    ]).flat()
-  ].filter(Boolean)
-
-  for (const subtitlePath of subtitleCandidates) {
-    const info = await window.api.dialog.getTextFileInfo(subtitlePath)
-    if (!info || info.size > MAX_SUBTITLE_FILE_BYTES) {
-      continue
-    }
-
-    const content = await window.api.dialog.readTextFile(subtitlePath, info.encoding)
-    if (requestId !== loadRequestId) {
-      return
-    }
-    if (!content) {
-      continue
-    }
-
-    const cues = subtitlePath.toLowerCase().endsWith('.lrc') ? parseLrc(content) : parseSrtOrVtt(content)
-    subtitleCueList.value = cues
-    subtitleLoadState.value = cues.length ? 'ready' : 'empty'
-    return
-  }
-
-  subtitleLoadState.value = 'empty'
-}
-
-const persistCurrentProgress = async () => {
-  const track = currentTrack.value
-  const resourceId = String(track?.resourceId ?? '').trim()
-  const filePath = String(track?.path ?? '').trim()
-  if (!resourceId || !filePath) {
-    return
-  }
-
-  const playbackTime = Math.max(
-    0,
-    Math.floor(isCurrentSourceTranscoded.value ? currentTime.value : (videoRef.value?.currentTime ?? currentTime.value ?? 0))
-  )
-  await window.api.service.updateVideoPlaybackProgress(resourceId, filePath, playbackTime)
-  emit('progress-persisted', {
-    resourceId,
-    filePath,
-    playbackTime
-  })
-}
-
-const stopPlaybackSession = async (resourceId = playbackSessionResourceId) => {
-  const normalizedResourceId = String(resourceId ?? '').trim()
-  if (!normalizedResourceId) {
-    return
-  }
-
-  try {
-    await window.api.service.stopVideoPlayback(normalizedResourceId)
-  } catch {
-    // ignore playback log errors
-  }
-
-  if (playbackSessionResourceId === normalizedResourceId) {
-    playbackSessionResourceId = ''
-  }
-}
-
-const startCurrentPlaybackSession = async () => {
-  const resourceId = String(currentTrack.value?.resourceId ?? '').trim()
-  if (!resourceId || playbackSessionResourceId === resourceId) {
-    return
-  }
-
-  if (playbackSessionResourceId && playbackSessionResourceId !== resourceId) {
-    await stopPlaybackSession(playbackSessionResourceId)
-  }
-
-  try {
-    await window.api.service.startVideoPlayback(resourceId)
-    playbackSessionResourceId = resourceId
-  } catch {
-    // ignore playback log errors
-  }
-}
-
-const finalizePlaybackSession = async () => {
-  await persistCurrentProgress()
-  await stopPlaybackSession()
-}
-
 const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
   const playlist = normalizedPlaylist.value
   if (!playlist.length) {
@@ -501,7 +219,7 @@ const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
 
   const nextIndex = Math.max(0, Math.min(index, playlist.length - 1))
   const previousPath = String(currentTrack.value?.path ?? '').trim()
-  const previousResourceId = playbackSessionResourceId
+  const previousResourceId = getPlaybackSessionResourceId()
   const nextPath = String(playlist[nextIndex]?.path ?? '').trim()
   const nextResourceId = String(playlist[nextIndex]?.resourceId ?? '').trim()
   if (previousPath && previousPath !== nextPath) {
@@ -819,25 +537,6 @@ const togglePlaylist = () => {
   scheduleFullscreenControlsHide()
 }
 
-const handleChooseSubtitle = async () => {
-  const trackPath = String(currentTrack.value?.path ?? '').trim()
-  if (!trackPath) {
-    return
-  }
-
-  const subtitlePath = await window.api.dialog.selectFile(['srt', 'vtt', 'lrc'])
-  const normalizedSubtitlePath = String(subtitlePath ?? '').trim()
-  if (!normalizedSubtitlePath) {
-    return
-  }
-
-  manualSubtitlePaths.value = {
-    ...manualSubtitlePaths.value,
-    [trackPath]: normalizedSubtitlePath
-  }
-  await loadSubtitleForTrack(currentTrack.value, loadRequestId)
-}
-
 const showCaptureToast = (message: string) => {
   captureToast.value = message
   if (captureToastTimer) {
@@ -1034,9 +733,8 @@ watch(() => props.show, (visible) => {
 })
 
 watch(() => props.playlist, (playlist) => {
-  syncOrderedPlaylist(playlist)
-  if (suppressPlaylistReload) {
-    suppressPlaylistReload = false
+  syncOrderedPlaylist(playlist, props.initialPath)
+  if (consumeSuppressPlaylistReload()) {
     return
   }
   if (props.show) {
@@ -1136,11 +834,11 @@ onBeforeUnmount(() => {
               @drop="handleTrackDrop(index, $event)"
               @dragend="handleTrackDragEnd"
             >
-              <img v-if="track.coverSrc" :src="track.coverSrc" alt="" class="video-player__track-cover" draggable="false" />
+              <img v-if="getTrackCoverSrc(track)" :src="getTrackCoverSrc(track)" alt="" class="video-player__track-cover" draggable="false" />
               <div v-else class="video-player__track-cover video-player__track-cover--empty">VIDEO</div>
               <div class="video-player__track-text">
                 <div class="video-player__track-title">{{ track.label }}</div>
-                <div class="video-player__track-path">{{ getFileName(track.path) }}</div>
+                <div class="video-player__track-path">{{ getTrackFileName(track) }}</div>
               </div>
             </button>
           </n-scrollbar>
@@ -1200,7 +898,7 @@ onBeforeUnmount(() => {
             <n-button quaternary circle @click="captureCurrentFrame">
               <template #icon><n-icon :component="CameraOutline" /></template>
             </n-button>
-            <n-button quaternary @click="handleChooseSubtitle">字幕</n-button>
+            <n-button quaternary @click="chooseSubtitleForCurrentTrack">字幕</n-button>
             <div class="video-player__volume">
               <n-button quaternary circle @click="toggleMute">
                 <template #icon><n-icon :component="isMuted || volume <= 0 ? VolumeMuteOutline : VolumeHighOutline" /></template>

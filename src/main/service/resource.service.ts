@@ -3347,6 +3347,17 @@ export class ResourceService {
     }
 
     if (pinned) {
+      const currentHomePin = await DatabaseService.getHomePinByResourceId(normalizedResourceId)
+      if (!currentHomePin) {
+        const pinnedResources = await DatabaseService.getHomePinnedResources(20)
+        if (pinnedResources.length >= 20) {
+          return {
+            type: 'warning',
+            message: '首页固定最多支持 20 个资源，请先移除部分固定项',
+          }
+        }
+      }
+
       await DatabaseService.pinResourceToHome(normalizedResourceId, new Date())
     } else {
       await DatabaseService.unpinResourceFromHome(normalizedResourceId)
@@ -3441,13 +3452,13 @@ export class ResourceService {
       const currentCoverPath = String(resourceForm.coverPath ?? '').trim()
       const existingCoverPath = String(existingResource.coverPath ?? '').trim()
       const extendTableName = getExtendTableName(categoryInfo)
-      const isVideoCoverExplicitlyCleared =
-        extendTableName === 'video_meta'
+      const isAutoResolvedCoverExplicitlyCleared =
+        ['video_meta', 'multi_image_meta'].includes(extendTableName)
         && !currentCoverPath
         && Boolean(existingCoverPath)
       const realCoverPath = isSameCoverPath(currentCoverPath, existingCoverPath)
         ? existingCoverPath
-        : isVideoCoverExplicitlyCleared
+        : isAutoResolvedCoverExplicitlyCleared
           ? ''
           : await resolveResourceCoverPath(currentCoverPath, normalizedResourceId, categoryInfo, pathDealResult)
 

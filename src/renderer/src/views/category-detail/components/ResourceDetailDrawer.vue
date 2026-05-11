@@ -13,6 +13,7 @@ import {
   TrashOutline
 } from '@vicons/ionicons5'
 import BangumiDirectory from '../../../components/BangumiDirectory.vue'
+import { sanitizeRichHtml } from '../../../utils/rich-content-sanitizer'
 import type { DetailLogItem, ResourceDetailDrawerProps } from '../component-contracts'
 
 const props = defineProps<ResourceDetailDrawerProps>()
@@ -38,6 +39,7 @@ const detailGalleryItemsSafe = computed(() => unwrapMaybeRef(props.detailGallery
 const detailAudioTreeSafe = computed(() => unwrapMaybeRef(props.detailAudioTree) ?? [])
 const detailLogsSafe = computed(() => unwrapMaybeRef(props.detailLogs) ?? [])
 const visibleDetailLogsSafe = computed(() => unwrapMaybeRef(props.visibleDetailLogs) ?? [])
+const selectedDetailDescriptionHtml = computed(() => sanitizeRichHtml(String(props.selectedDetailResource?.description ?? '')))
 const detailAudioContextMenuPositionSafe = computed(() => unwrapMaybeRef(props.detailAudioContextMenuPosition) ?? { x: 0, y: 0 })
 const detailAudioContextMenuOptionsSafe = computed(() => unwrapMaybeRef(props.detailAudioContextMenuOptions) ?? [])
 const detailPreviewSectionTitleSafe = computed(() => unwrapMaybeRef(props.detailPreviewSectionTitle) ?? '')
@@ -159,7 +161,7 @@ const handleOpenVideoOrderDialogSafe = (resource: typeof props.selectedDetailRes
           class="detail-drawer"
           :class="{ 'detail-drawer--software': props.detailIsSoftware }"
         >
-          <div v-if="!props.detailIsSoftware" class="detail-drawer__cover">
+          <div class="detail-drawer__cover">
             <img
               v-if="props.detailCoverPreviewSrc"
               :src="props.detailCoverPreviewSrc"
@@ -368,8 +370,8 @@ const handleOpenVideoOrderDialogSafe = (resource: typeof props.selectedDetailRes
                 <n-scrollbar class="detail-drawer__description-scrollbar">
                   <slot name="description-content">
                     <div
-                      class="detail-drawer__value detail-drawer__value--description detail-drawer__value--rich"
-                      v-html="props.selectedDetailResource.description"
+                      class="detail-drawer__value detail-drawer__value--description detail-drawer__value--rich rich-markdown-content"
+                      v-html="selectedDetailDescriptionHtml"
                     />
                   </slot>
                 </n-scrollbar>
@@ -857,28 +859,6 @@ const handleOpenVideoOrderDialogSafe = (resource: typeof props.selectedDetailRes
 .detail-drawer__description-scrollbar :deep(.n-scrollbar-container) {
   height: 100%;
   padding-right: 6px;
-}
-
-.detail-drawer__value--rich {
-  line-height: 1.7;
-}
-
-.detail-drawer__value--rich :deep(p) {
-  margin: 0 0 0.75em;
-}
-
-.detail-drawer__value--rich :deep(p:last-child) {
-  margin-bottom: 0;
-}
-
-.detail-drawer__value--rich :deep(ul),
-.detail-drawer__value--rich :deep(ol) {
-  padding-left: 1.4em;
-  margin: 0.5em 0;
-}
-
-.detail-drawer__value--rich :deep(a) {
-  color: #63e2b7;
 }
 
 .detail-drawer__path-row {

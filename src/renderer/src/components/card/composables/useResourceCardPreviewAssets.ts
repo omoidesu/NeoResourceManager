@@ -96,7 +96,16 @@ export const useResourceCardPreviewAssets = (params: {
     }
   }
 
-  const scheduleFileIconLoad = () => {
+  const isTargetNearViewport = (target: HTMLElement | null, extraBottom = 120) => {
+    if (!target || typeof window === 'undefined') {
+      return false
+    }
+
+    const rect = target.getBoundingClientRect()
+    return rect.top <= window.innerHeight + extraBottom && rect.bottom >= -extraBottom
+  }
+
+  const scheduleFileIconLoad = (immediate = false) => {
     if (!showAsyncFileIcon.value) {
       shouldLoadFileIcon.value = false
       return
@@ -107,13 +116,19 @@ export const useResourceCardPreviewAssets = (params: {
     }
 
     clearFileIconLoadTimer()
+    if (immediate) {
+      logCardTiming('fileIcon.schedule', performance.now(), { immediate: true })
+      shouldLoadFileIcon.value = true
+      return
+    }
+    logCardTiming('fileIcon.schedule', performance.now(), { immediate: false, delayMs: fileIconLoadDelayMs })
     fileIconLoadTimer = setTimeout(() => {
       shouldLoadFileIcon.value = true
       fileIconLoadTimer = null
     }, fileIconLoadDelayMs)
   }
 
-  const scheduleWebsiteFaviconLoad = () => {
+  const scheduleWebsiteFaviconLoad = (immediate = false) => {
     if (!isWebsiteCategory.value) {
       shouldLoadWebsiteFavicon.value = false
       return
@@ -124,6 +139,12 @@ export const useResourceCardPreviewAssets = (params: {
     }
 
     clearWebsiteFaviconLoadTimer()
+    if (immediate) {
+      logCardTiming('websiteFavicon.schedule', performance.now(), { immediate: true })
+      shouldLoadWebsiteFavicon.value = true
+      return
+    }
+    logCardTiming('websiteFavicon.schedule', performance.now(), { immediate: false, delayMs: websiteFaviconLoadDelayMs })
     websiteFaviconLoadTimer = setTimeout(() => {
       shouldLoadWebsiteFavicon.value = true
       websiteFaviconLoadTimer = null
@@ -137,7 +158,7 @@ export const useResourceCardPreviewAssets = (params: {
     }
   }
 
-  const scheduleCoverPreviewLoad = () => {
+  const scheduleCoverPreviewLoad = (immediate = false) => {
     if (!showCover.value) {
       shouldLoadCoverPreview.value = false
       return
@@ -148,6 +169,12 @@ export const useResourceCardPreviewAssets = (params: {
     }
 
     clearCoverPreviewLoadTimer()
+    if (immediate) {
+      logCardTiming('coverPreview.schedule', performance.now(), { immediate: true })
+      shouldLoadCoverPreview.value = true
+      return
+    }
+    logCardTiming('coverPreview.schedule', performance.now(), { immediate: false, delayMs: coverPreviewLoadDelayMs })
     coverPreviewLoadTimer = setTimeout(() => {
       shouldLoadCoverPreview.value = true
       coverPreviewLoadTimer = null
@@ -293,6 +320,8 @@ export const useResourceCardPreviewAssets = (params: {
       const target = cardTriggerRef.value
       if (!target) {
         scheduleCoverPreviewLoad()
+      } else if (isTargetNearViewport(target, 180)) {
+        scheduleCoverPreviewLoad(true)
       } else {
         coverPreviewObserver = new IntersectionObserver((entries) => {
           if (entries.some((entry) => entry.isIntersecting)) {
@@ -318,6 +347,8 @@ export const useResourceCardPreviewAssets = (params: {
       const target = cardTriggerRef.value
       if (!target) {
         scheduleFileIconLoad()
+      } else if (isTargetNearViewport(target, 180)) {
+        scheduleFileIconLoad(true)
       } else {
         fileIconObserver = new IntersectionObserver((entries) => {
           if (entries.some((entry) => entry.isIntersecting)) {
@@ -348,6 +379,11 @@ export const useResourceCardPreviewAssets = (params: {
     const target = cardTriggerRef.value
     if (!target) {
       scheduleWebsiteFaviconLoad()
+      return
+    }
+
+    if (isTargetNearViewport(target, 180)) {
+      scheduleWebsiteFaviconLoad(true)
       return
     }
 

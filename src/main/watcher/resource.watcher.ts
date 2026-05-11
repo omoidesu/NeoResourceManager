@@ -114,7 +114,7 @@ export class ResourceWatcher {
     for (const resource of resources) {
       const normalizedResource = normalizeResource(resource)
       const watchPath = resolveWatchPath(normalizedResource)
-      this.storeResource(normalizedResource)
+      this.storeResource(normalizedResource, { silent: true })
       watchPaths.push(watchPath)
       this.watchedPaths.add(watchPath)
     }
@@ -583,7 +583,7 @@ export class ResourceWatcher {
    * 更新内存中的资源索引。
    * 这份索引用于把文件系统事件快速映射到具体 resourceId。
    */
-  private storeResource(resource: WatchableResource) {
+  private storeResource(resource: WatchableResource, options: { silent?: boolean } = {}) {
     const normalizedResource = normalizeResource(resource)
     const previousResource = this.resourcesById.get(normalizedResource.id)
 
@@ -593,6 +593,10 @@ export class ResourceWatcher {
 
     this.resourcesById.set(normalizedResource.id, normalizedResource)
     this.resourceIdByWatchPath.set(resolveWatchPath(normalizedResource), normalizedResource.id)
+    if (options.silent) {
+      return
+    }
+
     logWatcher('resource cache updated', {
       resourceId: normalizedResource.id,
       previousWatchPath: previousResource ? resolveWatchPath(previousResource) : null,

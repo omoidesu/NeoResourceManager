@@ -88,6 +88,7 @@ interface UseCategoryPageBootstrapOptions {
     warn: (...args: any[]) => void
     error: (...args: any[]) => void
   }
+  emitRendererTiming?: (message: string, meta?: Record<string, unknown>) => void
 }
 
 function formatDebugPayload(payload: Record<string, any>) {
@@ -103,26 +104,31 @@ async function measureAsync<T>(
   scope: string,
   categoryId: string,
   fn: () => Promise<T>,
-  extra?: Record<string, any>
+  extra?: Record<string, any>,
+  emitRendererTiming?: UseCategoryPageBootstrapOptions['emitRendererTiming']
 ) {
   const startedAt = performance.now()
   try {
     const result = await fn()
-    logger.info('category bootstrap timing', {
+    const payload = {
       scope,
       categoryId,
       elapsedMs: Math.round(performance.now() - startedAt),
       ...(extra ?? {})
-    })
+    }
+    logger.info('category bootstrap timing', payload)
+    emitRendererTiming?.('category bootstrap timing', payload)
     return result
   } catch (error) {
-    logger.warn('category bootstrap timing failed', {
+    const payload = {
       scope,
       categoryId,
       elapsedMs: Math.round(performance.now() - startedAt),
       error: error instanceof Error ? error.message : String(error),
       ...(extra ?? {})
-    })
+    }
+    logger.warn('category bootstrap timing failed', payload)
+    emitRendererTiming?.('category bootstrap timing failed', payload)
     throw error
   }
 }
@@ -177,6 +183,9 @@ export const useCategoryPageBootstrap = (options: UseCategoryPageBootstrapOption
     && activeCategoryId === String(options.categoryId.value ?? '').trim()
   )
 
+  const measure = <T>(scope: string, activeCategoryId: string, fn: () => Promise<T>, extra?: Record<string, any>) =>
+    measureAsync(options.logger, scope, activeCategoryId, fn, extra, options.emitRendererTiming)
+
   const loadDeferredCategoryData = async (requestId: number, activeCategoryId: string) => {
     options.logger.info('category bootstrap method start', {
       method: 'loadDeferredCategoryData',
@@ -200,28 +209,28 @@ export const useCategoryPageBootstrap = (options: UseCategoryPageBootstrapOption
         actorList,
         albumList
       ] = await Promise.all([
-        measureAsync(options.logger, 'deferred.languageOptions', activeCategoryId, () =>
+        measure('deferred.languageOptions', activeCategoryId, () =>
           window.api.db.getSelectDictData(DictType.LANGUAGE_TYPE)
         ),
-        measureAsync(options.logger, 'deferred.websiteTypeOptions', activeCategoryId, () =>
+        measure('deferred.websiteTypeOptions', activeCategoryId, () =>
           window.api.db.getSelectDictData(websiteTypeDict)
         ),
-        measureAsync(options.logger, 'deferred.localeEmulatorPath', activeCategoryId, () =>
+        measure('deferred.localeEmulatorPath', activeCategoryId, () =>
           window.api.db.getSetting(Settings.LOCALE_EMULATOR_PATH)
         ),
-        measureAsync(options.logger, 'deferred.mtoolPath', activeCategoryId, () =>
+        measure('deferred.mtoolPath', activeCategoryId, () =>
           window.api.db.getSetting(Settings.MTOOL_PATH)
         ),
-        measureAsync(options.logger, 'deferred.authorList', activeCategoryId, () =>
+        measure('deferred.authorList', activeCategoryId, () =>
           window.api.db.getAuthorByCategoryId(activeCategoryId)
         ),
         options.showActorFilter.value
-          ? measureAsync(options.logger, 'deferred.actorList', activeCategoryId, () =>
+          ? measure('deferred.actorList', activeCategoryId, () =>
               window.api.db.getActorByCategoryId(activeCategoryId)
             )
           : Promise.resolve([]),
         options.isAudioCategory.value
-          ? measureAsync(options.logger, 'deferred.albumList', activeCategoryId, () =>
+          ? measure('deferred.albumList', activeCategoryId, () =>
               window.api.db.getAlbumByCategoryId(activeCategoryId)
             )
           : Promise.resolve([])
@@ -257,12 +266,12 @@ export const useCategoryPageBootstrap = (options: UseCategoryPageBootstrapOption
 
       const [engineOptionList, engineList] = await Promise.all([
         String(options.categorySettings.value.extendTable ?? '').trim() === 'game_meta'
-          ? measureAsync(options.logger, 'deferred.engineOptions', activeCategoryId, () =>
+          ? measure('deferred.engineOptions', activeCategoryId, () =>
               window.api.db.getSelectDictData(DictType.GAME_ENGINE_TYPE)
             )
           : Promise.resolve([]),
         options.showEngineFilter.value
-          ? measureAsync(options.logger, 'deferred.engineList', activeCategoryId, () =>
+          ? measure('deferred.engineList', activeCategoryId, () =>
               window.api.db.getEngineByCategoryId(activeCategoryId)
             )
           : Promise.resolve([])
@@ -287,22 +296,22 @@ export const useCategoryPageBootstrap = (options: UseCategoryPageBootstrapOption
         tagList,
         typeList
       ] = await Promise.all([
-        measureAsync(options.logger, 'deferred.missingCount', activeCategoryId, () =>
+        measure('deferred.missingCount', activeCategoryId, () =>
           window.api.db.getMissingResourceCountByCategoryId(activeCategoryId)
         ),
-        measureAsync(options.logger, 'deferred.favoriteCount', activeCategoryId, () =>
+        measure('deferred.favoriteCount', activeCategoryId, () =>
           window.api.db.getFavoriteResourceCountByCategoryId(activeCategoryId)
         ),
-        measureAsync(options.logger, 'deferred.completedCount', activeCategoryId, () =>
+        measure('deferred.completedCount', activeCategoryId, () =>
           window.api.db.getCompletedResourceCountByCategoryId(activeCategoryId)
         ),
-        measureAsync(options.logger, 'deferred.runningCount', activeCategoryId, () =>
+        measure('deferred.runningCount', activeCategoryId, () =>
           window.api.db.getRunningResourceCountByCategoryId(activeCategoryId)
         ),
-        measureAsync(options.logger, 'deferred.tagList', activeCategoryId, () =>
+        measure('deferred.tagList', activeCategoryId, () =>
           window.api.db.getTagByCategoryId(activeCategoryId)
         ),
-        measureAsync(options.logger, 'deferred.typeList', activeCategoryId, () =>
+        measure('deferred.typeList', activeCategoryId, () =>
           window.api.db.getTypeByCategoryId(activeCategoryId)
         )
       ])
@@ -324,7 +333,7 @@ export const useCategoryPageBootstrap = (options: UseCategoryPageBootstrapOption
       if (sanitizedFilterChanged && requestId === fetchDataRequestId) {
         const rerunRequestId = ++fetchDataRequestId
         const rerunQuery = options.buildResourceQuery(options.currentPage.value, options.pageSize.value)
-        const rerunResponse = await measureAsync(options.logger, 'deferred.sanitizeRerun', activeCategoryId, () =>
+        const rerunResponse = await measure('deferred.sanitizeRerun', activeCategoryId, () =>
           window.api.db.getResourceByCategoryId(activeCategoryId, rerunQuery),
           {
             page: Number(rerunQuery?.page ?? 1),
@@ -350,11 +359,13 @@ export const useCategoryPageBootstrap = (options: UseCategoryPageBootstrapOption
         }
         openRouteRequestedResourceDetail()
       }
-      options.logger.info('category bootstrap timing', {
+      const deferredTotalPayload = {
         scope: 'deferred.total',
         categoryId: activeCategoryId,
         elapsedMs: Math.round(performance.now() - deferredStartedAt)
-      })
+      }
+      options.logger.info('category bootstrap timing', deferredTotalPayload)
+      options.emitRendererTiming?.('category bootstrap timing', deferredTotalPayload)
       options.logger.info('category bootstrap method end', {
         method: 'loadDeferredCategoryData',
         categoryId: activeCategoryId,
@@ -403,10 +414,10 @@ export const useCategoryPageBootstrap = (options: UseCategoryPageBootstrapOption
 
     try {
       const [nextCategoryInfo, resourceResponse] = await Promise.all([
-        measureAsync(options.logger, 'firstStage.categoryInfo', activeCategoryId, () =>
+        measure('firstStage.categoryInfo', activeCategoryId, () =>
           window.api.db.getCategoryById(activeCategoryId)
         ),
-        measureAsync(options.logger, 'firstStage.resourceList', activeCategoryId, () =>
+        measure('firstStage.resourceList', activeCategoryId, () =>
           window.api.db.getResourceByCategoryId(activeCategoryId, resourceQuery),
           {
             page: Number(resourceQuery?.page ?? 1),
@@ -459,13 +470,15 @@ export const useCategoryPageBootstrap = (options: UseCategoryPageBootstrapOption
         }
       }
       options.loading.value = false
-      options.logger.info('category bootstrap timing', {
+      const firstStageTotalPayload = {
         scope: 'firstStage.total',
         categoryId: activeCategoryId,
         elapsedMs: Math.round(performance.now() - firstStageStartedAt),
         totalResources: Number(options.totalResources.value ?? 0),
         itemCount: options.resourceList.value.length
-      })
+      }
+      options.logger.info('category bootstrap timing', firstStageTotalPayload)
+      options.emitRendererTiming?.('category bootstrap timing', firstStageTotalPayload)
       options.logger.info('category bootstrap method end', {
         method: 'fetchData',
         categoryId: activeCategoryId,

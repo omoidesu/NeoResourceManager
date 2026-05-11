@@ -174,7 +174,7 @@ export const resolveCategoryProfile = (input: CategoryProfileInput): CategoryPro
       showMtoolLaunch: isGame,
       showScreenshotFolder: isGame,
       showCompletedToggle: isGame || isNovel || isVideo,
-      showCardCover: !isSoftware,
+      showCardCover: true,
       showDeleteFiles: isGame,
       showEngineFilter: isGame,
       showAuthorFilter: !isWebsite,

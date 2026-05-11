@@ -68,9 +68,31 @@ type Deps = {
   ensureSoftwareScriptRuntimes: () => Promise<Array<{ label: string; value: string; shellType: 'powershell' | 'cmd' }>>
   resolveSoftwareScriptShell: (basePath: string) => 'powershell' | 'cmd'
   denormalizeSoftwareScript: (command: string) => string
+  isEditorActive?: () => boolean
 }
 
 export const useCategoryEditorAssistActions = (deps: Deps) => {
+  let videoCoverFrameRequestId = 0
+  const isEditorActive = () => deps.isEditorActive?.() !== false
+
+  const createAssistRequestSnapshot = () => ({
+    editingResourceId: String(deps.editingResourceId.value ?? ''),
+    basePath: String(deps.formData.value?.basePath ?? '').trim(),
+    name: String(deps.formData.value?.name ?? '').trim(),
+    author: String(deps.formData.value?.author ?? '').trim(),
+    album: String(deps.formData.value?.meta?.album ?? '').trim(),
+    videoFolder: Boolean(deps.isVideoFolderCategory.value)
+  })
+
+  const isAssistRequestCurrent = (snapshot: ReturnType<typeof createAssistRequestSnapshot>) =>
+    isEditorActive()
+    && String(deps.editingResourceId.value ?? '') === snapshot.editingResourceId
+    && String(deps.formData.value?.basePath ?? '').trim() === snapshot.basePath
+    && String(deps.formData.value?.name ?? '').trim() === snapshot.name
+    && String(deps.formData.value?.author ?? '').trim() === snapshot.author
+    && String(deps.formData.value?.meta?.album ?? '').trim() === snapshot.album
+    && Boolean(deps.isVideoFolderCategory.value) === snapshot.videoFolder
+
   const handleOpenSoftwareScriptModal = () => {
     void (async () => {
       if (!deps.isSoftwareCategory.value) {
@@ -94,6 +116,7 @@ export const useCategoryEditorAssistActions = (deps: Deps) => {
   }
 
   const handleFetchAlbumCover = async () => {
+    const requestSnapshot = createAssistRequestSnapshot()
     deps.showNotifyByType('info', '获取专辑封面', '正在获取专辑封面，请稍候')
 
     try {
@@ -116,6 +139,9 @@ export const useCategoryEditorAssistActions = (deps: Deps) => {
       const result = await fetchAudioAlbumCover(payload)
       const resultType = result?.type ?? 'info'
       const resultMessage = result?.message ?? '操作完成'
+      if (!isAssistRequestCurrent(requestSnapshot)) {
+        return
+      }
 
       if (resultType === 'success') {
         const rawCandidates = Array.isArray(result?.data?.coverCandidates) ? result.data.coverCandidates : []
@@ -133,6 +159,9 @@ export const useCategoryEditorAssistActions = (deps: Deps) => {
         )
 
         const availableCandidates = resolvedCandidates.filter((candidate) => candidate.coverPath && candidate.previewSrc)
+        if (!isAssistRequestCurrent(requestSnapshot)) {
+          return
+        }
 
         if (availableCandidates.length) {
           deps.audioCoverCandidates.value = availableCandidates
@@ -144,6 +173,9 @@ export const useCategoryEditorAssistActions = (deps: Deps) => {
 
       deps.showNotifyByType(resultType, '获取专辑封面', resultMessage)
     } catch (error) {
+      if (!isAssistRequestCurrent(requestSnapshot)) {
+        return
+      }
       deps.showNotifyByType('error', '获取专辑封面', error instanceof Error ? error.message : '获取专辑封面失败')
     }
   }
@@ -173,6 +205,8 @@ export const useCategoryEditorAssistActions = (deps: Deps) => {
   }
 
   const handleUseVideoRandomFrameCover = async () => {
+    const requestId = ++videoCoverFrameRequestId
+    const requestSnapshot = createAssistRequestSnapshot()
     const basePath = String(deps.formData.value?.basePath ?? '').trim()
     if (!basePath) {
       deps.showNotifyByType('warning', '随机帧封面', deps.isVideoFolderCategory.value ? '请先选择番剧目录' : '请先选择视频文件')
@@ -185,6 +219,9 @@ export const useCategoryEditorAssistActions = (deps: Deps) => {
         const result = await window.api.service.extractVideoSubCoverFrames(basePath)
         const resultType = result?.type ?? 'info'
         const resultMessage = result?.message ?? '番剧随机帧生成完成'
+        if (!isAssistRequestCurrent(requestSnapshot)) {
+          return
+        }
 
         if (resultType === 'error' || resultType === 'warning') {
           deps.showNotifyByType(resultType, '随机帧封面', resultMessage)
@@ -211,6 +248,9 @@ export const useCategoryEditorAssistActions = (deps: Deps) => {
           }
         }))
         const availableItems = resolvedItems.filter((item) => item.candidates.length)
+        if (!isAssistRequestCurrent(requestSnapshot)) {
+          return
+        }
 
         if (!availableItems.length) {
           deps.showNotifyByType('warning', '随机帧封面', '已生成番剧随机帧，但预览加载失败')
@@ -225,6 +265,9 @@ export const useCategoryEditorAssistActions = (deps: Deps) => {
       const result = await window.api.service.extractVideoCoverFrames(basePath)
       const resultType = result?.type ?? 'info'
       const resultMessage = result?.message ?? '随机帧生成完成'
+      if (!isAssistRequestCurrent(requestSnapshot)) {
+        return
+      }
 
       if (resultType === 'error' || resultType === 'warning') {
         deps.showNotifyByType(resultType, '随机帧封面', resultMessage)
@@ -243,6 +286,9 @@ export const useCategoryEditorAssistActions = (deps: Deps) => {
         }
       }))
       const availableCandidates = resolvedCandidates.filter((candidate) => candidate.coverPath && candidate.previewSrc)
+      if (!isAssistRequestCurrent(requestSnapshot)) {
+        return
+      }
 
       if (!availableCandidates.length) {
         deps.showNotifyByType('warning', '随机帧封面', '已生成随机帧，但预览加载失败')
@@ -252,14 +298,44 @@ export const useCategoryEditorAssistActions = (deps: Deps) => {
       deps.videoCoverCandidates.value = availableCandidates
       deps.showVideoCoverCandidateModal.value = true
     } catch (error) {
+      if (!isAssistRequestCurrent(requestSnapshot)) {
+        return
+      }
       deps.showNotifyByType('error', '随机帧封面', error instanceof Error ? error.message : '生成随机帧失败')
     } finally {
-      deps.videoCoverFrameLoading.value = false
+      if (requestId === videoCoverFrameRequestId) {
+        deps.videoCoverFrameLoading.value = false
+      }
     }
   }
 
   const handleUseFirstCover = () => {
-    deps.formData.value.coverPath = 'auto://first-cover'
+    void (async () => {
+      const requestSnapshot = createAssistRequestSnapshot()
+      const basePath = String(deps.formData.value?.basePath ?? '').trim()
+      if (String(deps.categorySettings.value.extendTable ?? '').trim() === 'multi_image_meta' && basePath) {
+        try {
+          const result = await window.api.service.analyzeMultiImageDirectory(basePath)
+          if (!isAssistRequestCurrent(requestSnapshot)) {
+            return
+          }
+
+          const coverPath = String(result?.data?.coverPath ?? '').trim()
+          if (coverPath) {
+            deps.formData.value.coverPath = coverPath
+            return
+          }
+        } catch {
+          // Fall back to the backend auto marker; saving still resolves it.
+        }
+      }
+
+      if (!isAssistRequestCurrent(requestSnapshot)) {
+        return
+      }
+
+      deps.formData.value.coverPath = 'auto://first-cover'
+    })()
   }
 
   const handleChooseCustomCover = async () => {

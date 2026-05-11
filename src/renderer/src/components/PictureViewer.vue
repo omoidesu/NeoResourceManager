@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineComponent, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   CopyOutline,
   EyeOutline,
@@ -12,7 +12,7 @@ import {
   TrashOutline
 } from '@vicons/ionicons5'
 import { notify } from '../utils/notification'
-import { resolveImagePreviewSource } from '../shared/preview/usePreviewAssetLoader'
+import { useReaderImagePreviewCache } from './reader/useReaderImagePreviewCache'
 
 const props = withDefaults(defineProps<{
   show: boolean
@@ -32,13 +32,57 @@ const emit = defineEmits<{
   (event: 'index-change', index: number): void
 }>()
 
+const AntDesignRotateRightOutlined = defineComponent({
+  name: 'AntDesignRotateRightOutlined',
+  setup: () => () => h(
+    'svg',
+    {
+      xmlns: 'http://www.w3.org/2000/svg',
+      viewBox: '0 0 1024 1024'
+    },
+    [
+      h('path', {
+        fill: 'currentColor',
+        d: 'M480.5 251.2c13-1.6 25.9-2.4 38.8-2.5v63.9c0 6.5 7.5 10.1 12.6 6.1L660 217.6c4-3.2 4-9.2 0-12.3l-128-101c-5.1-4-12.6-.4-12.6 6.1l-.2 64c-118.6.5-235.8 53.4-314.6 154.2c-69.6 89.2-95.7 198.6-81.1 302.4h74.9c-.9-5.3-1.7-10.7-2.4-16.1c-5.1-42.1-2.1-84.1 8.9-124.8c11.4-42.2 31-81.1 58.1-115.8c27.2-34.7 60.3-63.2 98.4-84.3c37-20.6 76.9-33.6 119.1-38.8'
+      }),
+      h('path', {
+        fill: 'currentColor',
+        d: 'M880 418H352c-17.7 0-32 14.3-32 32v414c0 17.7 14.3 32 32 32h528c17.7 0 32-14.3 32-32V450c0-17.7-14.3-32-32-32m-44 402H396V494h440z'
+      })
+    ]
+  )
+})
+
 const currentIndex = ref(0)
 const scale = ref(1)
-const thumbSrcMap = ref<Record<string, string>>({})
-const fullImageUrlMap = ref<Record<string, string>>({})
+const rotationDeg = ref(0)
+const thumbPreviewCache = useReaderImagePreviewCache({
+  maxWidth: 240,
+  maxHeight: 160,
+  fit: 'cover',
+  quality: 72,
+  fallbackToFileUrl: true
+})
+const mainImagePreviewCache = useReaderImagePreviewCache({
+  maxWidth: 4096,
+  maxHeight: 4096,
+  fit: 'inside',
+  quality: 90,
+  fallbackToFileUrl: true
+})
+const thumbSrcMap = thumbPreviewCache.srcMap
+const fullImageUrlMap = mainImagePreviewCache.srcMap
 const stageRef = ref<HTMLDivElement | null>(null)
+const mainImageRef = ref<HTMLImageElement | null>(null)
 const thumbRefs = ref<HTMLElement[]>([])
 const stageCursor = ref<'default' | 'left' | 'right'>('default')
+const isStageDragging = ref(false)
+const imagePanOffset = ref({ x: 0, y: 0 })
+const imageDragState = ref({
+  lastX: 0,
+  lastY: 0,
+  moved: false
+})
 
 const clampIndex = (index: number) => {
   if (!props.imagePaths.length) {
@@ -60,59 +104,14 @@ const currentImagePath = computed(() => props.imagePaths[currentIndex.value] ?? 
 const currentImageUrl = computed(() => fullImageUrlMap.value[currentImagePath.value] ?? '')
 const hasPrevious = computed(() => props.imagePaths.length > 1)
 const hasNext = computed(() => props.imagePaths.length > 1)
+const isImageDraggable = computed(() => scale.value > 1 && Boolean(currentImageUrl.value))
 
 const loadThumbPreviewImage = async (filePath: string) => {
-  const normalizedPath = String(filePath ?? '').trim()
-  if (!normalizedPath || thumbSrcMap.value[normalizedPath]) {
-    return
-  }
-
-  try {
-    const previewUrl = await resolveImagePreviewSource(normalizedPath, {
-      maxWidth: 240,
-      maxHeight: 160,
-      fit: 'cover',
-      quality: 72,
-      fallbackToFileUrl: true
-    })
-    if (!previewUrl) {
-      return
-    }
-
-    thumbSrcMap.value = {
-      ...thumbSrcMap.value,
-      [normalizedPath]: previewUrl
-    }
-  } catch {
-    // ignore preview load failure and keep fallback state
-  }
+  await thumbPreviewCache.load(filePath)
 }
 
 const loadMainImage = async (filePath: string) => {
-  const normalizedPath = String(filePath ?? '').trim()
-  if (!normalizedPath || fullImageUrlMap.value[normalizedPath]) {
-    return
-  }
-
-  try {
-    const imageUrl = await resolveImagePreviewSource(normalizedPath, {
-      maxWidth: 4096,
-      maxHeight: 4096,
-      fit: 'inside',
-      quality: 90,
-      fallbackToFileUrl: true
-    })
-    if (!imageUrl) {
-      return
-    }
-
-    fullImageUrlMap.value = {
-      ...fullImageUrlMap.value,
-      [normalizedPath]: imageUrl
-    }
-  } catch {
-    // ignore full image load failure and keep fallback state
-  }
+  await mainImagePreviewCache.load(filePath)
 }
 
 const preloadThumbsAroundCurrent = async (radius = 8) => {
@@ -131,8 +130,8 @@ const preloadThumbsAroundCurrent = async (radius = 8) => {
 }
 
 const clearImageCache = () => {
-  thumbSrcMap.value = {}
-  fullImageUrlMap.value = {}
+  thumbPreviewCache.clear()
+  mainImagePreviewCache.clear()
 }
 
 const setThumbRef = (element: unknown, index: number) => {
@@ -161,8 +160,30 @@ const closeViewer = () => {
   emit('update:show', false)
 }
 
+const resetImagePan = () => {
+  imagePanOffset.value = { x: 0, y: 0 }
+  isStageDragging.value = false
+  imageDragState.value = {
+    lastX: 0,
+    lastY: 0,
+    moved: false
+  }
+}
+
+const resetTransform = () => {
+  scale.value = 1
+  rotationDeg.value = 0
+  resetImagePan()
+}
+
 const resetZoom = () => {
   scale.value = 1
+  resetImagePan()
+}
+
+const rotateClockwise = () => {
+  rotationDeg.value = (rotationDeg.value + 90) % 360
+  resetImagePan()
 }
 
 const zoomIn = () => {
@@ -170,7 +191,11 @@ const zoomIn = () => {
 }
 
 const zoomOut = () => {
-  scale.value = Math.max(0.4, Number((scale.value - 0.2).toFixed(2)))
+  const nextScale = Math.max(0.4, Number((scale.value - 0.2).toFixed(2)))
+  scale.value = nextScale
+  if (nextScale <= 1) {
+    resetImagePan()
+  }
 }
 
 const toggleZoom = () => {
@@ -188,7 +213,7 @@ const goPrevious = () => {
   }
 
   currentIndex.value = clampIndex(currentIndex.value - 1)
-  resetZoom()
+  resetTransform()
 }
 
 const goNext = () => {
@@ -197,7 +222,7 @@ const goNext = () => {
   }
 
   currentIndex.value = clampIndex(currentIndex.value + 1)
-  resetZoom()
+  resetTransform()
 }
 
 const handleWheel = (event: WheelEvent) => {
@@ -238,6 +263,11 @@ const handleThumbWheel = (event: WheelEvent) => {
 }
 
 const handleStageClick = (event: MouseEvent) => {
+  if (imageDragState.value.moved) {
+    imageDragState.value.moved = false
+    return
+  }
+
   const stage = event.currentTarget as HTMLDivElement | null
   if (!stage) {
     closeViewer()
@@ -265,6 +295,11 @@ const handleStageDoubleClick = (event: MouseEvent) => {
 }
 
 const updateStageCursor = (event?: MouseEvent) => {
+  if (isImageDraggable.value || isStageDragging.value) {
+    stageCursor.value = 'default'
+    return
+  }
+
   if (!event || !stageRef.value) {
     stageCursor.value = 'default'
     return
@@ -291,11 +326,95 @@ const handleStageMouseMove = (event: MouseEvent) => {
 }
 
 const handleStageMouseLeave = () => {
+  if (isStageDragging.value) {
+    return
+  }
+
   stageCursor.value = 'default'
 }
 
+const imagePanBounds = computed(() => {
+  const stageElement = stageRef.value
+  const imageElement = mainImageRef.value
+  if (!stageElement || !imageElement || scale.value <= 1) {
+    return {
+      minX: 0,
+      maxX: 0,
+      minY: 0,
+      maxY: 0
+    }
+  }
+
+  const isQuarterTurn = Math.abs(rotationDeg.value % 180) === 90
+  const renderedWidth = (isQuarterTurn ? imageElement.clientHeight : imageElement.clientWidth) * scale.value
+  const renderedHeight = (isQuarterTurn ? imageElement.clientWidth : imageElement.clientHeight) * scale.value
+  const overflowX = Math.max(0, renderedWidth - stageElement.clientWidth)
+  const overflowY = Math.max(0, renderedHeight - stageElement.clientHeight)
+
+  return {
+    minX: -overflowX / 2,
+    maxX: overflowX / 2,
+    minY: -overflowY / 2,
+    maxY: overflowY / 2
+  }
+})
+
+const clampImagePanOffset = () => {
+  const bounds = imagePanBounds.value
+  imagePanOffset.value = {
+    x: Math.min(bounds.maxX, Math.max(bounds.minX, imagePanOffset.value.x)),
+    y: Math.min(bounds.maxY, Math.max(bounds.minY, imagePanOffset.value.y))
+  }
+}
+
+const handleStageMouseDown = (event: MouseEvent) => {
+  if (!isImageDraggable.value || event.button !== 0) {
+    return
+  }
+
+  isStageDragging.value = true
+  stageCursor.value = 'default'
+  imageDragState.value = {
+    lastX: event.clientX,
+    lastY: event.clientY,
+    moved: false
+  }
+  event.preventDefault()
+}
+
+const handleGlobalMouseMove = (event: MouseEvent) => {
+  if (!isStageDragging.value) {
+    return
+  }
+
+  const deltaX = event.clientX - imageDragState.value.lastX
+  const deltaY = event.clientY - imageDragState.value.lastY
+  if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) {
+    imageDragState.value.moved = true
+  }
+
+  const bounds = imagePanBounds.value
+  imagePanOffset.value = {
+    x: Math.min(bounds.maxX, Math.max(bounds.minX, imagePanOffset.value.x + deltaX)),
+    y: Math.min(bounds.maxY, Math.max(bounds.minY, imagePanOffset.value.y + deltaY))
+  }
+  imageDragState.value = {
+    ...imageDragState.value,
+    lastX: event.clientX,
+    lastY: event.clientY
+  }
+}
+
+const stopStageDragging = () => {
+  if (!isStageDragging.value) {
+    return
+  }
+
+  isStageDragging.value = false
+}
+
 const mainImageStyle = computed(() => ({
-  transform: `scale(${scale.value})`
+  transform: `translate(${imagePanOffset.value.x}px, ${imagePanOffset.value.y}px) rotate(${rotationDeg.value}deg) scale(${scale.value})`
 }))
 
 const handleKeydown = (event: KeyboardEvent) => {
@@ -379,12 +498,13 @@ watch(
   () => props.show,
   (visible) => {
     if (!visible) {
+      resetTransform()
       clearImageCache()
       return
     }
 
     currentIndex.value = clampIndex(props.initialIndex)
-    resetZoom()
+    resetTransform()
     void loadMainImage(currentImagePath.value)
     void preloadThumbsAroundCurrent()
     void scrollActiveThumbIntoView()
@@ -400,7 +520,7 @@ watch(
     }
 
     currentIndex.value = clampIndex(value)
-    resetZoom()
+    resetTransform()
     void loadMainImage(currentImagePath.value)
     void preloadThumbsAroundCurrent()
     void scrollActiveThumbIntoView()
@@ -411,6 +531,7 @@ watch(
   () => props.imagePaths,
   () => {
     currentIndex.value = clampIndex(currentIndex.value)
+    resetTransform()
     clearImageCache()
     void loadMainImage(currentImagePath.value)
     void preloadThumbsAroundCurrent()
@@ -426,12 +547,25 @@ watch(currentIndex, () => {
   void scrollActiveThumbIntoView()
 })
 
+watch([scale, currentImageUrl, imagePanBounds], () => {
+  if (scale.value <= 1) {
+    resetImagePan()
+    return
+  }
+
+  clampImagePanOffset()
+})
+
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown)
+  window.addEventListener('mousemove', handleGlobalMouseMove)
+  window.addEventListener('mouseup', stopStageDragging)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('mousemove', handleGlobalMouseMove)
+  window.removeEventListener('mouseup', stopStageDragging)
 })
 </script>
 
@@ -493,6 +627,16 @@ onBeforeUnmount(() => {
           </n-tooltip>
           <n-tooltip trigger="hover">
             <template #trigger>
+              <n-button quaternary circle @click="rotateClockwise">
+                <template #icon>
+                  <n-icon :component="AntDesignRotateRightOutlined" />
+                </template>
+              </n-button>
+            </template>
+            顺时针旋转90度
+          </n-tooltip>
+          <n-tooltip trigger="hover">
+            <template #trigger>
               <n-button quaternary circle @click="zoomIn">
                 <template #icon>
                   <n-icon :component="AddOutline" />
@@ -539,11 +683,14 @@ onBeforeUnmount(() => {
         class="picture-viewer__stage"
         :class="{
           'picture-viewer__stage--cursor-left': stageCursor === 'left',
-          'picture-viewer__stage--cursor-right': stageCursor === 'right'
+          'picture-viewer__stage--cursor-right': stageCursor === 'right',
+          'picture-viewer__stage--draggable': isImageDraggable,
+          'picture-viewer__stage--dragging': isStageDragging
         }"
         @wheel="handleWheel"
         @click="handleStageClick"
         @dblclick="handleStageDoubleClick"
+        @mousedown="handleStageMouseDown"
         @mousemove="handleStageMouseMove"
         @mouseleave="handleStageMouseLeave"
       >
@@ -551,6 +698,7 @@ onBeforeUnmount(() => {
           <div class="picture-viewer__image-center">
             <img
               v-if="currentImageUrl"
+              ref="mainImageRef"
               :src="currentImageUrl"
               :alt="currentImagePath"
               class="picture-viewer__image"
@@ -578,7 +726,7 @@ onBeforeUnmount(() => {
             :ref="(element) => setThumbRef(element, index)"
             class="picture-viewer__thumb"
             :class="{ 'picture-viewer__thumb--active': index === currentIndex }"
-            @click="currentIndex = index; resetZoom()"
+            @click="currentIndex = index; resetTransform()"
           >
             <img v-if="thumbSrcMap[imagePath]" :src="thumbSrcMap[imagePath]" :alt="imagePath" class="picture-viewer__thumb-image" />
             <div v-else class="picture-viewer__thumb-placeholder">加载中</div>
@@ -648,6 +796,14 @@ onBeforeUnmount(() => {
   cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28'%3E%3Cpath d='M11 6l8 8-8 8' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 14 14, e-resize;
 }
 
+.picture-viewer__stage--draggable {
+  cursor: grab;
+}
+
+.picture-viewer__stage--dragging {
+  cursor: grabbing;
+}
+
 .picture-viewer__image-scroll-container {
   position: absolute;
   inset: 0 14px;
@@ -681,6 +837,10 @@ onBeforeUnmount(() => {
   transform-origin: center center;
   user-select: none;
   -webkit-user-drag: none;
+}
+
+.picture-viewer__stage--dragging .picture-viewer__image {
+  transition: none;
 }
 
 .picture-viewer__empty {

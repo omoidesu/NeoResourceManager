@@ -970,11 +970,11 @@ export class DatabaseService {
     ]
   }
 
-  static async getHomePinnedResources(limit = 12) {
+  static async getHomePinnedResources(limit = 20) {
     await this.ensureResourceTopAndHomePinSchema()
     await this.ensureCategoryPillColorColumn()
 
-    const normalizedLimit = Math.max(1, Math.min(24, Math.floor(Number(limit) || 12)))
+    const normalizedLimit = Math.max(1, Math.min(20, Math.floor(Number(limit) || 20)))
 
     return await db
       .select({
@@ -1005,7 +1005,7 @@ export class DatabaseService {
       .limit(normalizedLimit)
   }
 
-  static async getHomeCoverWallData(query: number | { filter?: string; limit?: number; offset?: number; keyword?: string } = 15) {
+  static async getHomeCoverWallData(query: number | { filter?: string; limit?: number; offset?: number; keyword?: string; categoryId?: string } = 15) {
     await this.ensureCategoryPillColorColumn()
     await this.ensureResourceSearchTextColumn()
 
@@ -1015,6 +1015,7 @@ export class DatabaseService {
     const normalizedLimit = Math.max(1, Math.min(180, Math.floor(typeof query === 'object' ? Number(query?.limit) : Number(query)) || 60))
     const normalizedOffset = Math.max(0, Math.floor(typeof query === 'object' ? Number(query?.offset) : 0) || 0)
     const keyword = typeof query === 'object' ? String(query?.keyword ?? '').trim().toLowerCase() : ''
+    const categoryId = typeof query === 'object' ? String(query?.categoryId ?? '').trim() : ''
     const keywordTerms = keyword.split(/\s+/).filter(Boolean)
 
     const selectFields = {
@@ -1051,9 +1052,13 @@ export class DatabaseService {
       )`,
       searchText: resource.searchText
     }
-    const sharedWhere = and(
+    const sharedWhereBase = and(
       eq(resource.isDeleted, false),
       eq(category.isDeleted, false)
+    )
+    const sharedWhere = and(
+      sharedWhereBase,
+      categoryId ? eq(resource.categoryId, categoryId) : undefined
     )
     const recentRunWhere = and(
       sharedWhere,
@@ -1078,7 +1083,34 @@ export class DatabaseService {
       return filtered.length ? and(...filtered) : undefined
     }
 
-    const [allCount, recentRunCount, recentAddCount, favoriteCount, coverOnlyCount] = await Promise.all([
+    const categoryCountWhere = filter === 'recentRun'
+      ? mergeWhere(
+        and(
+          sharedWhereBase,
+          eq(resourceLog.isDeleted, false),
+          sql`${resourceLog.startTime} >= strftime('%s', 'now', '-30 days')`
+        ),
+        keywordWhere
+      )
+      : filter === 'recentAdd'
+        ? mergeWhere(
+          and(
+            sharedWhereBase,
+            sql`${resource.createTime} >= strftime('%s', 'now', '-30 days')`
+          ),
+          keywordWhere
+        )
+        : filter === 'favorite'
+          ? mergeWhere(and(sharedWhereBase, eq(resource.ifFavorite, true)), keywordWhere)
+          : filter === 'coverOnly'
+            ? mergeWhere(and(
+              sharedWhereBase,
+              sql`${resource.coverPath} is not null`,
+              sql`trim(${resource.coverPath}) <> ''`
+            ), keywordWhere)
+            : mergeWhere(sharedWhereBase, keywordWhere)
+
+    const [allCount, recentRunCount, recentAddCount, favoriteCount, coverOnlyCount, categoryCounts] = await Promise.all([
       db.select({ total: count(resource.id) })
         .from(resource)
         .innerJoin(category, eq(resource.categoryId, category.id))
@@ -1099,7 +1131,33 @@ export class DatabaseService {
       db.select({ total: count(resource.id) })
         .from(resource)
         .innerJoin(category, eq(resource.categoryId, category.id))
-        .where(mergeWhere(coverOnlyWhere, keywordWhere))
+        .where(mergeWhere(coverOnlyWhere, keywordWhere)),
+      filter === 'recentRun'
+        ? db.select({
+          categoryId: category.id,
+          categoryName: category.name,
+          categoryEmoji: category.emoji,
+          categoryPillColor: category.pillColor,
+          total: count(sql`distinct ${resource.id}`)
+        })
+          .from(resourceLog)
+          .innerJoin(resource, eq(resourceLog.resourceId, resource.id))
+          .innerJoin(category, eq(resource.categoryId, category.id))
+          .where(categoryCountWhere)
+          .groupBy(category.id)
+          .orderBy(desc(count(sql`distinct ${resource.id}`)), asc(category.name))
+        : db.select({
+          categoryId: category.id,
+          categoryName: category.name,
+          categoryEmoji: category.emoji,
+          categoryPillColor: category.pillColor,
+          total: count(resource.id)
+        })
+          .from(resource)
+          .innerJoin(category, eq(resource.categoryId, category.id))
+          .where(categoryCountWhere)
+          .groupBy(category.id)
+          .orderBy(desc(count(resource.id)), asc(category.name))
     ])
 
     const counts = {
@@ -1177,6 +1235,7 @@ export class DatabaseService {
 
     return {
       counts,
+      categoryCounts: Array.isArray(categoryCounts) ? categoryCounts : [],
       items,
       total: totalForFilter,
       hasMore: normalizedOffset + items.length < totalForFilter

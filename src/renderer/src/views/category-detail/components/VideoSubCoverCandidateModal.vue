@@ -98,6 +98,7 @@ const emit = defineEmits<{
 .video-sub-cover-candidate-group__title {
   font-size: 14px;
   font-weight: 700;
+  color: var(--n-title-text-color, #f0f0f0);
 }
 
 .video-sub-cover-candidate-group__meta {
@@ -105,6 +106,7 @@ const emit = defineEmits<{
   line-height: 1.5;
   opacity: 0.68;
   word-break: break-all;
+  color: var(--n-text-color-3, #9b9b9b);
 }
 
 .video-sub-cover-candidate-group__grid {
@@ -119,11 +121,19 @@ const emit = defineEmits<{
   gap: 12px;
   width: 100%;
   padding: 12px;
-  border: 1px solid rgba(127, 127, 127, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 12px;
-  background: rgba(127, 127, 127, 0.04);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--n-text-color, #d6d6d6);
   cursor: pointer;
   text-align: left;
+  transition: border-color 0.16s ease, background-color 0.16s ease, transform 0.16s ease;
+}
+
+.audio-cover-candidate:hover {
+  border-color: rgba(99, 226, 183, 0.5);
+  background: rgba(99, 226, 183, 0.08);
+  transform: translateY(-1px);
 }
 
 .audio-cover-candidate__preview {
@@ -156,12 +166,14 @@ const emit = defineEmits<{
   font-size: 14px;
   font-weight: 700;
   line-height: 1.5;
+  color: var(--n-title-text-color, #f0f0f0);
 }
 
 .audio-cover-candidate__query {
   font-size: 12px;
   line-height: 1.5;
   opacity: 0.72;
+  color: var(--n-text-color-3, #9b9b9b);
 }
 
 .audio-cover-candidate__footer {

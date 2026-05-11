@@ -2,6 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Icon, addCollection } from '@iconify/vue'
 import mdiIcons from '@iconify-json/mdi/icons.json'
+import { sanitizeRichHtml } from '../utils/rich-content-sanitizer'
+import { renderMarkdownToHtml } from '../utils/markdown-renderer'
 
 addCollection(mdiIcons)
 
@@ -28,17 +30,27 @@ const backgroundColor = ref('#2a2a2a')
 const fontFamily = ref('Arial')
 const fontSize = ref('3')
 const savedRange = ref<Range | null>(null)
+const lastMarkdownRenderedHtml = ref('')
 const showLinkModal = ref(false)
 const showTableModal = ref(false)
 const linkValue = ref('')
 const linkTextValue = ref('')
 const tableRows = ref(2)
 const tableCols = ref(2)
+const inlineFormatState = ref({
+  bold: false,
+  italic: false,
+  underline: false,
+  strikeThrough: false
+})
+const isApplyingToolbarCommand = ref(false)
 const activeFormats = ref({
   bold: false,
   italic: false,
   underline: false,
   strikeThrough: false,
+  blockquote: false,
+  code: false,
   unorderedList: false,
   orderedList: false,
   justifyLeft: false,
@@ -55,7 +67,25 @@ const activeButtonStyle = {
 
 const getButtonStyle = (active: boolean) => (active ? activeButtonStyle : undefined)
 
-const normalizeHtml = (value: string) => String(value ?? '').trim()
+const normalizeHtml = (value: string) => sanitizeRichHtml(String(value ?? '').trim())
+
+type InlineFormatKey = 'bold' | 'italic' | 'underline' | 'strikeThrough'
+const INLINE_FORMAT_COMMANDS: InlineFormatKey[] = ['bold', 'italic', 'underline', 'strikeThrough']
+
+const createInactiveFormats = () => ({
+  bold: false,
+  italic: false,
+  underline: false,
+  strikeThrough: false,
+  blockquote: false,
+  code: false,
+  unorderedList: false,
+  orderedList: false,
+  justifyLeft: false,
+  justifyCenter: false,
+  justifyRight: false,
+  justifyFull: false
+})
 
 const escapeHtml = (value: string) =>
   value
@@ -84,55 +114,13 @@ const htmlToPlainText = (value: string) =>
     .trim()
   )
 
-const renderInlineMarkdown = (value: string) =>
-  value
-    .replace(/\[([^\]]+)]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/__([^_]+)__/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    .replace(/_([^_]+)_/g, '<em>$1</em>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-
 // Markdown mode stores plain text in the textarea, but the outer form still
 // persists HTML so the detail drawer and viewer can render rich content directly.
-const markdownToHtml = (value: string) => {
-  const escaped = escapeHtml(String(value ?? ''))
-  const blocks = escaped
-    .split(/\n{2,}/)
-    .map((block) => block.trim())
-    .filter(Boolean)
-
-  return blocks.map((block) => {
-    const lines = block.split('\n').map((line) => line.trimEnd())
-
-    if (lines.every((line) => /^[-*]\s+/.test(line))) {
-      return `<ul>${lines.map((line) => `<li>${renderInlineMarkdown(line.replace(/^[-*]\s+/, ''))}</li>`).join('')}</ul>`
-    }
-
-    if (lines.every((line) => /^\d+\.\s+/.test(line))) {
-      return `<ol>${lines.map((line) => `<li>${renderInlineMarkdown(line.replace(/^\d+\.\s+/, ''))}</li>`).join('')}</ol>`
-    }
-
-    if (lines.every((line) => /^>\s?/.test(line))) {
-      return `<blockquote>${lines.map((line) => renderInlineMarkdown(line.replace(/^>\s?/, ''))).join('<br>')}</blockquote>`
-    }
-
-    const firstLine = lines[0] ?? ''
-    if (/^###\s+/.test(firstLine)) {
-      return `<h3>${renderInlineMarkdown(firstLine.replace(/^###\s+/, ''))}</h3>`
-    }
-
-    if (/^##\s+/.test(firstLine)) {
-      return `<h2>${renderInlineMarkdown(firstLine.replace(/^##\s+/, ''))}</h2>`
-    }
-
-    if (/^#\s+/.test(firstLine)) {
-      return `<h1>${renderInlineMarkdown(firstLine.replace(/^#\s+/, ''))}</h1>`
-    }
-
-    return `<p>${lines.map((line) => renderInlineMarkdown(line)).join('<br>')}</p>`
-  }).join('')
-}
+const markdownToHtml = (value: string) =>
+  renderMarkdownToHtml(value, {
+    enableMath: false,
+    enableMermaid: false
+  })
 
 const fontFamilyOptions = [
   { label: 'Arial', value: 'Arial' },
@@ -156,6 +144,17 @@ const syncEditorContent = (value: string) => {
   }
 
   const nextValue = normalizeHtml(value)
+  const currentValue = normalizeHtml(editorRef.value.innerHTML)
+  if (currentValue === nextValue) {
+    return
+  }
+
+  // Avoid rewriting contenteditable while the user is typing. Replacing
+  // innerHTML during an active edit resets the browser selection to the start.
+  if (document.activeElement === editorRef.value) {
+    return
+  }
+
   if (editorRef.value.innerHTML !== nextValue) {
     editorRef.value.innerHTML = nextValue
   }
@@ -171,6 +170,163 @@ const emitEditorContent = () => {
 
 const canClear = computed(() => Boolean(normalizeHtml(props.modelValue)))
 
+const isNodeInsideEditor = (node: Node | null) => {
+  const rootNode = editorRef.value
+  if (!rootNode || !node) {
+    return false
+  }
+
+  return node === rootNode || rootNode.contains(node)
+}
+
+const isSelectionInsideEditor = () => {
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0) {
+    return false
+  }
+
+  const range = selection.getRangeAt(0)
+  return isNodeInsideEditor(range.commonAncestorContainer)
+    && isNodeInsideEditor(range.startContainer)
+    && isNodeInsideEditor(range.endContainer)
+}
+
+const isCurrentSelectionCollapsed = () => {
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0 || !isSelectionInsideEditor()) {
+    return false
+  }
+
+  return selection.getRangeAt(0).collapsed
+}
+
+const resetToolbarState = () => {
+  inlineFormatState.value = {
+    bold: false,
+    italic: false,
+    underline: false,
+    strikeThrough: false
+  }
+  activeFormats.value = createInactiveFormats()
+}
+
+const getSelectionElement = () => {
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0 || !isSelectionInsideEditor()) {
+    return null
+  }
+
+  let node: Node | null = selection.anchorNode
+  if (node?.nodeType === Node.TEXT_NODE) {
+    node = node.parentNode
+  }
+
+  return node instanceof Element ? node : null
+}
+
+const getClosestSelectionTag = (tagName: string) => {
+  const rootNode = editorRef.value
+  const element = getSelectionElement()
+  if (!rootNode || !element) {
+    return null
+  }
+
+  const matchedElement = element.closest(tagName)
+  return matchedElement && rootNode.contains(matchedElement) ? matchedElement : null
+}
+
+const isSelectionWithinTag = (tagName: string) => {
+  return Boolean(getClosestSelectionTag(tagName))
+}
+
+const isSelectionWithinQuoteBlock = () => {
+  return Boolean(getClosestSelectionTag('blockquote')?.classList.contains('rich-text-editor-quote'))
+}
+
+const markCurrentQuoteBlock = () => {
+  getClosestSelectionTag('blockquote')?.classList.add('rich-text-editor-quote')
+}
+
+const getSelectionComputedStyle = () => {
+  const element = getSelectionElement()
+  if (!element) {
+    return null
+  }
+
+  return window.getComputedStyle(element)
+}
+
+const isSelectionUnderlined = () => {
+  const style = getSelectionComputedStyle()
+  return isSelectionWithinTag('u') || Boolean(style?.textDecorationLine.includes('underline'))
+}
+
+const isSelectionStruckThrough = () => {
+  const style = getSelectionComputedStyle()
+  return isSelectionWithinTag('s')
+    || isSelectionWithinTag('strike')
+    || Boolean(style?.textDecorationLine.includes('line-through'))
+}
+
+const detectInlineFormatState = () => {
+  const style = getSelectionComputedStyle()
+  const fontWeight = Number(style?.fontWeight ?? 0)
+
+  return {
+    bold: isSelectionWithinTag('b') || isSelectionWithinTag('strong') || fontWeight >= 600,
+    italic: isSelectionWithinTag('i') || isSelectionWithinTag('em') || style?.fontStyle === 'italic',
+    underline: isSelectionUnderlined(),
+    strikeThrough: isSelectionStruckThrough()
+  }
+}
+
+const setInlineFormatState = (patch: Partial<Record<InlineFormatKey, boolean>>) => {
+  inlineFormatState.value = {
+    ...inlineFormatState.value,
+    ...patch
+  }
+
+  activeFormats.value = {
+    ...activeFormats.value,
+    ...patch
+  }
+}
+
+const placeCursorAtEnd = () => {
+  const rootNode = editorRef.value
+  if (!rootNode) {
+    return
+  }
+
+  rootNode.focus()
+  const range = document.createRange()
+  range.selectNodeContents(rootNode)
+  range.collapse(false)
+
+  const selection = window.getSelection()
+  if (!selection) {
+    return
+  }
+
+  selection.removeAllRanges()
+  selection.addRange(range)
+  savedRange.value = range.cloneRange()
+}
+
+const placeCursorAfterElement = (element: Element) => {
+  const selection = window.getSelection()
+  if (!selection) {
+    return
+  }
+
+  const range = document.createRange()
+  range.setStartAfter(element)
+  range.collapse(true)
+  selection.removeAllRanges()
+  selection.addRange(range)
+  savedRange.value = range.cloneRange()
+}
+
 // Toolbar clicks move focus away from contenteditable. Cache the current range
 // so commands like insert link/table can still apply to the original cursor.
 const captureSelection = () => {
@@ -180,17 +336,13 @@ const captureSelection = () => {
   }
 
   const range = selection.getRangeAt(0)
-  const commonNode = range.commonAncestorContainer
-  const rootNode = editorRef.value
-  const isInsideEditor = commonNode === rootNode || rootNode.contains(commonNode)
-
-  if (isInsideEditor) {
+  if (isNodeInsideEditor(range.commonAncestorContainer)) {
     savedRange.value = range.cloneRange()
   }
 }
 
 const restoreSelection = () => {
-  if (!savedRange.value) {
+  if (!savedRange.value || !isNodeInsideEditor(savedRange.value.commonAncestorContainer)) {
     return
   }
 
@@ -203,6 +355,21 @@ const restoreSelection = () => {
   selection.addRange(savedRange.value)
 }
 
+const clearEditorSelectionIfOutside = (event: FocusEvent) => {
+  if (showLinkModal.value || showTableModal.value) {
+    return
+  }
+
+  const target = event.target as Node | null
+  const editorShell = editorRef.value?.closest('.rich-text-editor')
+  if (target && editorShell?.contains(target)) {
+    return
+  }
+
+  savedRange.value = null
+  resetToolbarState()
+}
+
 // Preventing the default mousedown keeps the editor selection alive while the
 // user clicks toolbar buttons.
 const handleToolbarMouseDown = (event: MouseEvent) => {
@@ -213,7 +380,11 @@ const handleToolbarMouseDown = (event: MouseEvent) => {
 
   if (target.closest('.n-button')) {
     event.preventDefault()
+    isApplyingToolbarCommand.value = true
     restoreSelection()
+    window.setTimeout(() => {
+      isApplyingToolbarCommand.value = false
+    }, 0)
   }
 }
 
@@ -238,11 +409,25 @@ const updateToolbarState = () => {
     return
   }
 
+  if (!isSelectionInsideEditor()) {
+    resetToolbarState()
+    return
+  }
+
+  // A collapsed caret can carry "pending" inline formats that have not been
+  // materialized into DOM yet. Re-detecting from DOM here would lose states
+  // like: enable italic -> disable bold before typing the next character.
+  if (!isApplyingToolbarCommand.value && !isCurrentSelectionCollapsed()) {
+    inlineFormatState.value = detectInlineFormatState()
+  }
+
   activeFormats.value = {
-    bold: safeQueryCommandState('bold'),
-    italic: safeQueryCommandState('italic'),
-    underline: safeQueryCommandState('underline'),
-    strikeThrough: safeQueryCommandState('strikeThrough'),
+    bold: inlineFormatState.value.bold,
+    italic: inlineFormatState.value.italic,
+    underline: inlineFormatState.value.underline,
+    strikeThrough: inlineFormatState.value.strikeThrough,
+    blockquote: isSelectionWithinQuoteBlock(),
+    code: isSelectionWithinTag('code'),
     unorderedList: safeQueryCommandState('insertUnorderedList'),
     orderedList: safeQueryCommandState('insertOrderedList'),
     justifyLeft: safeQueryCommandState('justifyLeft'),
@@ -265,13 +450,61 @@ const updateToolbarState = () => {
   }
 }
 
+const syncBrowserInlineFormatState = () => {
+  for (const command of INLINE_FORMAT_COMMANDS) {
+    const desiredState = inlineFormatState.value[command]
+    if (safeQueryCommandState(command) !== desiredState) {
+      document.execCommand(command, false)
+    }
+  }
+}
+
 const runCommand = (command: string, value = '') => {
-  editorRef.value?.focus()
+  if (!editorRef.value) {
+    return
+  }
+
+  editorRef.value.focus()
   restoreSelection()
+  if (!isSelectionInsideEditor()) {
+    placeCursorAtEnd()
+  }
   document.execCommand(command, false, value)
+  if (command === 'removeFormat') {
+    inlineFormatState.value = {
+      bold: false,
+      italic: false,
+      underline: false,
+      strikeThrough: false
+    }
+  }
   emitEditorContent()
   captureSelection()
   updateToolbarState()
+}
+
+const toggleInlineFormat = (command: InlineFormatKey) => {
+  if (!editorRef.value) {
+    return
+  }
+
+  editorRef.value.focus()
+  restoreSelection()
+  if (!isSelectionInsideEditor()) {
+    placeCursorAtEnd()
+  }
+
+  const nextState = !activeFormats.value[command]
+  isApplyingToolbarCommand.value = true
+  document.execCommand(command, false)
+  setInlineFormatState({ [command]: nextState })
+  syncBrowserInlineFormatState()
+  emitEditorContent()
+  captureSelection()
+
+  window.setTimeout(() => {
+    isApplyingToolbarCommand.value = false
+  }, 0)
 }
 
 const applyTextColor = (value: string) => {
@@ -308,6 +541,80 @@ const handleInsertTable = () => {
   showTableModal.value = true
 }
 
+const toggleBlockquote = () => {
+  restoreSelection()
+  if (!isSelectionInsideEditor()) {
+    placeCursorAtEnd()
+  }
+
+  if (isSelectionWithinQuoteBlock()) {
+    runCommand('formatBlock', '<p>')
+    return
+  }
+
+  runCommand('formatBlock', '<blockquote>')
+  markCurrentQuoteBlock()
+  emitEditorContent()
+  updateToolbarState()
+}
+
+const toggleInlineCode = () => {
+  if (!editorRef.value) {
+    return
+  }
+
+  editorRef.value.focus()
+  restoreSelection()
+  if (!isSelectionInsideEditor()) {
+    placeCursorAtEnd()
+  }
+
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0) {
+    return
+  }
+
+  const range = selection.getRangeAt(0)
+  const existingCodeElement = getClosestSelectionTag('code')
+  if (existingCodeElement && range.collapsed) {
+    placeCursorAfterElement(existingCodeElement)
+    captureSelection()
+    updateToolbarState()
+    return
+  }
+
+  if (range.collapsed) {
+    const codeElement = document.createElement('code')
+    const markerNode = document.createTextNode('\u200b')
+    codeElement.appendChild(markerNode)
+    range.insertNode(codeElement)
+
+    const nextRange = document.createRange()
+    nextRange.setStart(markerNode, markerNode.length)
+    nextRange.collapse(true)
+    selection.removeAllRanges()
+    selection.addRange(nextRange)
+
+    emitEditorContent()
+    captureSelection()
+    updateToolbarState()
+    return
+  }
+
+  const codeElement = document.createElement('code')
+  codeElement.appendChild(range.extractContents())
+  range.insertNode(codeElement)
+
+  const nextRange = document.createRange()
+  nextRange.selectNodeContents(codeElement)
+  selection.removeAllRanges()
+  selection.addRange(nextRange)
+
+  emitEditorContent()
+  captureSelection()
+  updateToolbarState()
+}
+
 const confirmInsertLink = async () => {
   const url = linkValue.value.trim()
   const text = linkTextValue.value.trim()
@@ -342,7 +649,14 @@ const confirmInsertTable = async () => {
 
 const handleMarkdownInput = (value: string) => {
   markdownValue.value = value
-  emit('update:modelValue', normalizeHtml(markdownToHtml(value)))
+  const nextHtml = normalizeHtml(markdownToHtml(value))
+  lastMarkdownRenderedHtml.value = nextHtml
+  emit('update:modelValue', nextHtml)
+}
+
+const handleEditorInput = () => {
+  emitEditorContent()
+  updateToolbarState()
 }
 
 const toggleMarkdownMode = () => {
@@ -350,10 +664,13 @@ const toggleMarkdownMode = () => {
 
   if (isMarkdownMode.value) {
     markdownValue.value = htmlToPlainText(props.modelValue)
+    lastMarkdownRenderedHtml.value = normalizeHtml(markdownToHtml(markdownValue.value))
     return
   }
 
-  emit('update:modelValue', normalizeHtml(markdownToHtml(markdownValue.value)))
+  const nextHtml = normalizeHtml(markdownToHtml(markdownValue.value))
+  lastMarkdownRenderedHtml.value = nextHtml
+  emit('update:modelValue', nextHtml)
   nextTick(() => {
     syncEditorContent(props.modelValue)
     updateToolbarState()
@@ -362,6 +679,7 @@ const toggleMarkdownMode = () => {
 
 const handleClear = () => {
   markdownValue.value = ''
+  lastMarkdownRenderedHtml.value = ''
   emit('update:modelValue', '')
   nextTick(() => {
     syncEditorContent('')
@@ -372,11 +690,13 @@ onMounted(() => {
   syncEditorContent(props.modelValue)
   document.addEventListener('selectionchange', updateToolbarState)
   document.addEventListener('selectionchange', captureSelection)
+  document.addEventListener('focusin', clearEditorSelectionIfOutside)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('selectionchange', updateToolbarState)
   document.removeEventListener('selectionchange', captureSelection)
+  document.removeEventListener('focusin', clearEditorSelectionIfOutside)
 })
 
 watch(
@@ -384,7 +704,12 @@ watch(
   async (value) => {
     await nextTick()
     if (isMarkdownMode.value) {
+      if (normalizeHtml(value) === lastMarkdownRenderedHtml.value) {
+        return
+      }
+
       markdownValue.value = htmlToPlainText(value)
+      lastMarkdownRenderedHtml.value = normalizeHtml(value)
     } else {
       syncEditorContent(value)
       updateToolbarState()
@@ -397,10 +722,10 @@ watch(
   <div class="rich-text-editor">
     <div class="rich-text-editor__toolbar" @mousedown="handleToolbarMouseDown">
       <n-button-group>
-        <n-button quaternary size="small" class="rich-text-editor__button" :style="getButtonStyle(activeFormats.bold)" title="加粗" @click="runCommand('bold')"><Icon class="rich-text-editor__icon" icon="mdi:format-bold" /></n-button>
-        <n-button quaternary size="small" class="rich-text-editor__button" :style="getButtonStyle(activeFormats.italic)" title="斜体" @click="runCommand('italic')"><Icon class="rich-text-editor__icon" icon="mdi:format-italic" /></n-button>
-        <n-button quaternary size="small" class="rich-text-editor__button" :style="getButtonStyle(activeFormats.underline)" title="下划线" @click="runCommand('underline')"><Icon class="rich-text-editor__icon" icon="mdi:format-underline" /></n-button>
-        <n-button quaternary size="small" class="rich-text-editor__button" :style="getButtonStyle(activeFormats.strikeThrough)" title="删除线" @click="runCommand('strikeThrough')"><Icon class="rich-text-editor__icon" icon="mdi:format-strikethrough-variant" /></n-button>
+        <n-button quaternary size="small" class="rich-text-editor__button" :style="getButtonStyle(activeFormats.bold)" title="加粗" @click="toggleInlineFormat('bold')"><Icon class="rich-text-editor__icon" icon="mdi:format-bold" /></n-button>
+        <n-button quaternary size="small" class="rich-text-editor__button" :style="getButtonStyle(activeFormats.italic)" title="斜体" @click="toggleInlineFormat('italic')"><Icon class="rich-text-editor__icon" icon="mdi:format-italic" /></n-button>
+        <n-button quaternary size="small" class="rich-text-editor__button" :style="getButtonStyle(activeFormats.underline)" title="下划线" @click="toggleInlineFormat('underline')"><Icon class="rich-text-editor__icon" icon="mdi:format-underline" /></n-button>
+        <n-button quaternary size="small" class="rich-text-editor__button" :style="getButtonStyle(activeFormats.strikeThrough)" title="删除线" @click="toggleInlineFormat('strikeThrough')"><Icon class="rich-text-editor__icon" icon="mdi:format-strikethrough-variant" /></n-button>
       </n-button-group>
       <span class="rich-text-editor__divider">|</span>
       <label class="rich-text-editor__color-shell" title="文本颜色">
@@ -415,8 +740,8 @@ watch(
       <n-select size="small" class="rich-text-editor__select rich-text-editor__select--size" :value="fontSize" :options="fontSizeOptions" @update:value="applyFontSize" />
       <n-button-group>
         <n-button quaternary size="small" class="rich-text-editor__button" title="链接" @click="handleInsertLink"><Icon class="rich-text-editor__icon" icon="mdi:link-variant" /></n-button>
-        <n-button quaternary size="small" class="rich-text-editor__button" title="引用" @click="runCommand('formatBlock', '<blockquote>')"><Icon class="rich-text-editor__icon" icon="mdi:format-quote-open" /></n-button>
-        <n-button quaternary size="small" class="rich-text-editor__button" title="代码" @click="runCommand('insertHTML', '<code>代码</code>')"><Icon class="rich-text-editor__icon" icon="mdi:code-tags" /></n-button>
+        <n-button quaternary size="small" class="rich-text-editor__button" :style="getButtonStyle(activeFormats.blockquote)" title="引用" @click="toggleBlockquote"><Icon class="rich-text-editor__icon" icon="mdi:format-quote-open" /></n-button>
+        <n-button quaternary size="small" class="rich-text-editor__button" :style="getButtonStyle(activeFormats.code)" title="代码" @click="toggleInlineCode"><Icon class="rich-text-editor__icon" icon="mdi:code-tags" /></n-button>
       </n-button-group>
       <span class="rich-text-editor__divider">|</span>
       <n-button-group>
@@ -451,11 +776,11 @@ watch(
     <div
       v-else
       ref="editorRef"
-      class="rich-text-editor__content"
+      class="rich-text-editor__content rich-markdown-content"
       :class="{ 'rich-text-editor__content--empty': !modelValue }"
       :data-placeholder="placeholder"
       contenteditable="true"
-      @input="emitEditorContent"
+      @input="handleEditorInput"
       @mouseup="captureSelection"
       @keyup="captureSelection"
       @focus="captureSelection"
@@ -569,21 +894,4 @@ watch(
   color: rgba(127, 127, 127, 0.8);
 }
 
-.rich-text-editor__content :deep(p) {
-  margin: 0 0 0.75em;
-}
-
-.rich-text-editor__content :deep(p:last-child) {
-  margin-bottom: 0;
-}
-
-.rich-text-editor__content :deep(ul),
-.rich-text-editor__content :deep(ol) {
-  padding-left: 1.4em;
-  margin: 0.5em 0;
-}
-
-.rich-text-editor__content :deep(a) {
-  color: #63e2b7;
-}
 </style>

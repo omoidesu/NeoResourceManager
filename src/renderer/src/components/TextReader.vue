@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ComputedRef } from 'vue'
-import MarkdownIt from 'markdown-it'
+import * as ABCJS from 'abcjs'
+import mermaid from 'mermaid'
+import 'katex/dist/katex.min.css'
 import {
   BookOutline,
   ChevronBackOutline,
@@ -11,6 +13,9 @@ import {
   RemoveOutline,
   AddOutline
 } from '@vicons/ionicons5'
+import { renderMarkdownToHtml } from '../utils/markdown-renderer'
+import { useReaderTheme } from './reader/useReaderTheme'
+import { useReaderVisibleWindowEvent } from './reader/useReaderVisibleWindowEvent'
 
 const props = withDefaults(
   defineProps<{
@@ -82,16 +87,6 @@ let pendingRestoreProgress: number | null = null
 let lastLoadedFilePath = ''
 
 const appIsDark = inject<ComputedRef<boolean>>('appIsDark', computed(() => true))
-const readerBackgroundOptions = [
-  '#f6f5f7',
-  '#e9e4d0',
-  '#e6f1da',
-  '#d9e4ef',
-  '#0f0d0f',
-  '#1a191b',
-  '#272627'
-]
-const darkReaderBackgrounds = new Set(['#0f0d0f', '#1a191b', '#272627'])
 const normalizedFilePath = computed(() => String(props.filePath ?? '').trim())
 const fileName = computed(() => normalizedFilePath.value.replace(/\\/g, '/').split('/').pop() ?? '')
 const fileExtension = computed(() => String(fileName.value.match(/\.([^.]+)$/)?.[1] ?? '').toLowerCase())
@@ -114,47 +109,80 @@ const textEncodingLabel = computed(() => {
 const contentStyle = computed(() => ({
   fontSize: `${fontSize.value}px`
 }))
-const readerBodyBackground = computed(
-  () => selectedReaderBackground.value || (appIsDark.value ? '#1a191b' : '#f6f5f7')
-)
-const isReaderBackgroundDark = computed(() =>
-  darkReaderBackgrounds.has(readerBodyBackground.value.toLowerCase())
-)
-const readerThemeStyle = computed(() => {
-  if (appIsDark.value) {
-    return {
-      '--reader-shell-bg': 'rgb(24, 25, 28)',
-      '--reader-body-bg': readerBodyBackground.value,
-      '--reader-text-color': isReaderBackgroundDark.value ? '#d8dde5' : '#262626',
-      '--reader-muted-color': 'rgba(216, 221, 229, 0.68)',
-      '--reader-border-color': 'rgba(255, 255, 255, 0.08)',
-      '--reader-border-strong-color': 'rgba(255, 255, 255, 0.12)',
-      '--reader-link-color': isReaderBackgroundDark.value ? '#7de8c4' : '#0f8f6f',
-      '--reader-block-bg': 'rgba(255, 255, 255, 0.04)',
-      '--reader-code-bg': 'rgba(255, 255, 255, 0.08)',
-      '--reader-pre-bg': 'rgba(0, 0, 0, 0.28)'
-    }
+const {
+  readerBackgroundOptions,
+  readerBodyBackground,
+  isReaderBackgroundDark,
+  readerThemeStyle
+} = useReaderTheme(appIsDark, selectedReaderBackground)
+const renderedMarkdown = computed(() => (
+  isMarkdown.value
+    ? renderMarkdownToHtml(content.value, { enableMath: true, enableMermaid: true, enableAbc: true })
+    : ''
+))
+
+const initializeMermaid = () => {
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'strict',
+    theme: appIsDark.value ? 'dark' : 'default'
+  })
+}
+
+const renderMermaidDiagrams = async () => {
+  if (!isMarkdown.value || !viewportRef.value) {
+    return
   }
 
-  return {
-    '--reader-shell-bg': '#f5f5f5',
-    '--reader-body-bg': readerBodyBackground.value,
-    '--reader-text-color': isReaderBackgroundDark.value ? '#d8dde5' : '#262626',
-    '--reader-muted-color': 'rgba(38, 38, 38, 0.62)',
-    '--reader-border-color': 'rgba(24, 24, 28, 0.1)',
-    '--reader-border-strong-color': 'rgba(24, 24, 28, 0.16)',
-    '--reader-link-color': isReaderBackgroundDark.value ? '#7de8c4' : '#0f8f6f',
-    '--reader-block-bg': 'rgba(24, 24, 28, 0.04)',
-    '--reader-code-bg': 'rgba(24, 24, 28, 0.08)',
-    '--reader-pre-bg': 'rgba(24, 24, 28, 0.06)'
+  await nextTick()
+  const nodes = Array.from(viewportRef.value.querySelectorAll<HTMLElement>('.markdown-mermaid'))
+  if (!nodes.length) {
+    return
   }
-})
-const markdown = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true
-})
-const renderedMarkdown = computed(() => (isMarkdown.value ? markdown.render(content.value) : ''))
+
+  try {
+    await mermaid.run({ nodes })
+  } catch (error) {
+    console.warn('[TextReader] Mermaid render failed', error)
+  }
+}
+
+const renderAbcScores = async () => {
+  if (!isMarkdown.value || !viewportRef.value) {
+    return
+  }
+
+  await nextTick()
+  const nodes = Array.from(viewportRef.value.querySelectorAll<HTMLElement>('.markdown-abc'))
+  if (!nodes.length) {
+    return
+  }
+
+  for (const node of nodes) {
+    const abcSource = node.dataset.abcSource || node.textContent || ''
+    if (!abcSource.trim()) {
+      continue
+    }
+
+    node.dataset.abcSource = abcSource
+    node.textContent = ''
+
+    try {
+      ABCJS.renderAbc(node, abcSource, {
+        responsive: 'resize',
+        foregroundColor: isReaderBackgroundDark.value ? '#d8dde5' : '#262626'
+      })
+    } catch (error) {
+      console.warn('[TextReader] ABC score render failed', error)
+      node.textContent = abcSource
+    }
+  }
+}
+
+const renderMarkdownEnhancements = async () => {
+  await renderMermaidDiagrams()
+  await renderAbcScores()
+}
 
 const clearProgressTimer = (): void => {
   if (progressTimer) {
@@ -564,6 +592,8 @@ const handleKeydown = (event: KeyboardEvent): void => {
   }
 }
 
+useReaderVisibleWindowEvent(() => props.show, 'keydown', handleKeydown)
+
 watch(
   () => [props.show, props.filePath],
   () => {
@@ -583,15 +613,32 @@ watch(
 
 watch(appIsDark, () => {
   selectedReaderBackground.value = ''
+  initializeMermaid()
+  void renderMarkdownEnhancements()
+})
+
+watch(readerBodyBackground, () => {
+  void renderMarkdownEnhancements()
+})
+
+watch(
+  renderedMarkdown,
+  () => {
+    if (props.show && state.value === 'ready') {
+      void renderMarkdownEnhancements()
+    }
+  },
+  { flush: 'post' }
+)
+
+onMounted(() => {
+  initializeMermaid()
 })
 
 watch(
   () => props.show,
   (visible) => {
-    if (visible) {
-      window.addEventListener('keydown', handleKeydown)
-    } else {
-      window.removeEventListener('keydown', handleKeydown)
+    if (!visible) {
       emitProgress()
       loadRequestId += 1
       resetReader()
@@ -601,7 +648,6 @@ watch(
 )
 
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', handleKeydown)
   emitProgress()
   loadRequestId += 1
   resetReader()
@@ -710,7 +756,7 @@ onBeforeUnmount(() => {
         >
           <article
             v-if="isMarkdown"
-            class="text-reader__content text-reader__content--markdown"
+            class="text-reader__content text-reader__content--markdown rich-markdown-content rich-markdown-content--reader"
             :style="contentStyle"
             v-html="renderedMarkdown"
           />
@@ -915,110 +961,6 @@ onBeforeUnmount(() => {
 
 .text-reader__content--markdown {
   white-space: normal;
-}
-
-.text-reader__content--markdown :deep(h1),
-.text-reader__content--markdown :deep(h2),
-.text-reader__content--markdown :deep(h3),
-.text-reader__content--markdown :deep(h4),
-.text-reader__content--markdown :deep(h5),
-.text-reader__content--markdown :deep(h6) {
-  margin: 1.3em 0 0.7em;
-  line-height: 1.35;
-  font-weight: 700;
-}
-
-.text-reader__content--markdown :deep(h1) {
-  font-size: 1.9em;
-}
-
-.text-reader__content--markdown :deep(h2) {
-  font-size: 1.55em;
-}
-
-.text-reader__content--markdown :deep(h3) {
-  font-size: 1.25em;
-}
-
-.text-reader__content--markdown :deep(p),
-.text-reader__content--markdown :deep(ul),
-.text-reader__content--markdown :deep(ol),
-.text-reader__content--markdown :deep(blockquote),
-.text-reader__content--markdown :deep(pre),
-.text-reader__content--markdown :deep(table) {
-  margin: 0 0 1em;
-}
-
-.text-reader__content--markdown :deep(ul),
-.text-reader__content--markdown :deep(ol) {
-  padding-left: 1.6em;
-}
-
-.text-reader__content--markdown :deep(li + li) {
-  margin-top: 0.3em;
-}
-
-.text-reader__content--markdown :deep(a) {
-  color: var(--reader-link-color);
-  text-decoration: none;
-}
-
-.text-reader__content--markdown :deep(a:hover) {
-  text-decoration: underline;
-}
-
-.text-reader__content--markdown :deep(blockquote) {
-  padding: 0.9em 1.1em;
-  border-left: 3px solid rgba(125, 232, 196, 0.6);
-  background: var(--reader-block-bg);
-  color: var(--reader-text-color);
-}
-
-.text-reader__content--markdown :deep(code) {
-  padding: 0.15em 0.35em;
-  border-radius: 4px;
-  background: var(--reader-code-bg);
-  font-family: 'Cascadia Code', 'Consolas', monospace;
-  font-size: 0.92em;
-}
-
-.text-reader__content--markdown :deep(pre) {
-  padding: 1em 1.1em;
-  border-radius: 8px;
-  overflow: auto;
-  background: var(--reader-pre-bg);
-}
-
-.text-reader__content--markdown :deep(pre code) {
-  padding: 0;
-  background: transparent;
-}
-
-.text-reader__content--markdown :deep(hr) {
-  border: 0;
-  border-top: 1px solid var(--reader-border-strong-color);
-  margin: 1.5em 0;
-}
-
-.text-reader__content--markdown :deep(table) {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
-}
-
-.text-reader__content--markdown :deep(th),
-.text-reader__content--markdown :deep(td) {
-  padding: 0.6em 0.75em;
-  border: 1px solid var(--reader-border-color);
-  text-align: left;
-  vertical-align: top;
-  word-break: break-word;
-}
-
-.text-reader__content--markdown :deep(img) {
-  max-width: 100%;
-  height: auto;
-  border-radius: 6px;
 }
 
 .text-reader__footer {

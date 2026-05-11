@@ -1,0 +1,313 @@
+.rich-markdown-content {
+  --rich-markdown-link-color: var(--n-primary-color, #63e2b7);
+  --rich-markdown-link-decoration-color: rgba(99, 226, 183, 0.55);
+  --rich-markdown-code-bg: rgba(99, 226, 183, 0.12);
+  --rich-markdown-code-color: var(--n-primary-color, #63e2b7);
+  --rich-markdown-pre-bg: rgba(0, 0, 0, 0.22);
+  --rich-markdown-block-bg: rgba(0, 0, 0, 0.16);
+  --rich-markdown-border-color: rgba(127, 127, 127, 0.28);
+  --rich-markdown-border-muted-color: rgba(127, 127, 127, 0.22);
+  --rich-markdown-marker-border-color: rgba(127, 127, 127, 0.55);
+  --rich-markdown-muted-color: rgba(255, 255, 255, 0.58);
+  --rich-markdown-subtle-color: rgba(255, 255, 255, 0.48);
+  --rich-markdown-quote-color: rgba(255, 255, 255, 0.72);
+  --rich-markdown-mark-bg: rgba(250, 204, 21, 0.22);
+  line-height: 1.7;
+}
+
+.rich-markdown-content p {
+  margin: 0 0 0.75em;
+}
+
+.rich-markdown-content p:last-child {
+  margin-bottom: 0;
+}
+
+.rich-markdown-content h1,
+.rich-markdown-content h2,
+.rich-markdown-content h3,
+.rich-markdown-content h4,
+.rich-markdown-content h5,
+.rich-markdown-content h6 {
+  margin: 0.7em 0 0.35em;
+  color: inherit;
+  font-weight: 800;
+  line-height: 1.3;
+}
+
+.rich-markdown-content h1 {
+  font-size: 1.65em;
+}
+
+.rich-markdown-content h2 {
+  font-size: 1.42em;
+}
+
+.rich-markdown-content h3 {
+  font-size: 1.22em;
+}
+
+.rich-markdown-content h4,
+.rich-markdown-content h5,
+.rich-markdown-content h6 {
+  font-size: 1.08em;
+}
+
+.rich-markdown-content ul,
+.rich-markdown-content ol {
+  padding-left: 1.4em;
+  margin: 0.5em 0;
+}
+
+.rich-markdown-content li {
+  margin: 0.2em 0;
+}
+
+.rich-markdown-content a {
+  color: var(--rich-markdown-link-color);
+  text-decoration-color: var(--rich-markdown-link-decoration-color);
+  text-underline-offset: 3px;
+}
+
+.rich-markdown-content a:hover {
+  text-decoration: underline;
+}
+
+.rich-markdown-content code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--rich-markdown-code-bg);
+  color: var(--rich-markdown-code-color);
+  font-family: "Courier New", "Cascadia Code", Consolas, monospace;
+  font-size: 0.95em;
+}
+
+.rich-markdown-content pre {
+  margin: 0.75em 0;
+  padding: 12px;
+  border: 1px solid var(--rich-markdown-border-muted-color);
+  border-radius: 8px;
+  background: var(--rich-markdown-pre-bg);
+  overflow-x: auto;
+}
+
+.rich-markdown-content pre code {
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 0.92em;
+  white-space: pre;
+}
+
+.rich-markdown-content .markdown-code-language {
+  margin: -0.3em 0 0.8em;
+  color: var(--rich-markdown-subtle-color);
+  font-size: 0.78em;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.rich-markdown-content blockquote {
+  margin: 0.75em 0;
+  padding: 0 0 0 12px;
+  border-left: 3px solid var(--rich-markdown-link-color);
+  color: var(--rich-markdown-quote-color);
+}
+
+.rich-markdown-content .rich-text-editor-task-list {
+  list-style: none;
+  padding-left: 0;
+}
+
+.rich-markdown-content .rich-text-editor-task-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rich-markdown-content .rich-text-editor-task-marker {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--rich-markdown-marker-border-color);
+  border-radius: 3px;
+  color: var(--rich-markdown-link-color);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.rich-markdown-content .rich-text-editor-task-marker--checked {
+  border-color: var(--rich-markdown-link-color);
+  background: var(--rich-markdown-code-bg);
+}
+
+.rich-markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75em 0;
+}
+
+.rich-markdown-content th,
+.rich-markdown-content td {
+  padding: 8px 10px;
+  border: 1px solid var(--rich-markdown-border-color);
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+.rich-markdown-content .markdown-footnotes {
+  margin-top: 1em;
+  padding-top: 0.8em;
+  border-top: 1px solid var(--rich-markdown-border-color);
+  color: var(--rich-markdown-muted-color);
+  font-size: 0.92em;
+}
+
+.rich-markdown-content .markdown-footnote-ref,
+.rich-markdown-content .markdown-math-inline {
+  color: var(--rich-markdown-link-color);
+}
+
+.rich-markdown-content .markdown-math-block,
+.rich-markdown-content .markdown-mermaid,
+.rich-markdown-content .markdown-abc {
+  margin: 0.75em 0;
+  padding: 12px;
+  border: 1px solid var(--rich-markdown-border-muted-color);
+  border-radius: 8px;
+  background: var(--rich-markdown-block-bg);
+  overflow-x: auto;
+}
+
+.rich-markdown-content .markdown-mermaid {
+  display: flex;
+  justify-content: center;
+}
+
+.rich-markdown-content .markdown-abc {
+  color: var(--rich-markdown-code-color);
+}
+
+.rich-markdown-content .markdown-abc svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.rich-markdown-content mark {
+  border-radius: 4px;
+  padding: 0 4px;
+  background: var(--rich-markdown-mark-bg);
+  color: inherit;
+}
+
+.rich-markdown-content hr {
+  border: 0;
+  border-top: 1px solid var(--rich-markdown-border-color);
+  margin: 12px 0;
+}
+
+.rich-markdown-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+
+.rich-markdown-content--reader {
+  --rich-markdown-link-color: var(--reader-link-color);
+  --rich-markdown-link-decoration-color: var(--reader-link-color);
+  --rich-markdown-code-bg: var(--reader-code-bg);
+  --rich-markdown-code-color: var(--reader-text-color);
+  --rich-markdown-pre-bg: var(--reader-pre-bg);
+  --rich-markdown-block-bg: var(--reader-block-bg);
+  --rich-markdown-border-color: var(--reader-border-color);
+  --rich-markdown-border-muted-color: var(--reader-border-color);
+  --rich-markdown-marker-border-color: var(--reader-border-strong-color);
+  --rich-markdown-muted-color: var(--reader-muted-color);
+  --rich-markdown-subtle-color: var(--reader-muted-color);
+  --rich-markdown-quote-color: var(--reader-text-color);
+  --rich-markdown-mark-bg: rgba(250, 204, 21, 0.26);
+}
+
+.rich-markdown-content--reader h1,
+.rich-markdown-content--reader h2,
+.rich-markdown-content--reader h3,
+.rich-markdown-content--reader h4,
+.rich-markdown-content--reader h5,
+.rich-markdown-content--reader h6 {
+  margin: 1.3em 0 0.7em;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.rich-markdown-content--reader h1 {
+  font-size: 1.9em;
+}
+
+.rich-markdown-content--reader h2 {
+  font-size: 1.55em;
+}
+
+.rich-markdown-content--reader h3 {
+  font-size: 1.25em;
+}
+
+.rich-markdown-content--reader p,
+.rich-markdown-content--reader ul,
+.rich-markdown-content--reader ol,
+.rich-markdown-content--reader blockquote,
+.rich-markdown-content--reader pre,
+.rich-markdown-content--reader table {
+  margin: 0 0 1em;
+}
+
+.rich-markdown-content--reader ul,
+.rich-markdown-content--reader ol {
+  padding-left: 1.6em;
+}
+
+.rich-markdown-content--reader li + li {
+  margin-top: 0.3em;
+}
+
+.rich-markdown-content--reader a {
+  text-decoration: none;
+}
+
+.rich-markdown-content--reader blockquote {
+  padding: 0.9em 1.1em;
+  border-left-color: rgba(125, 232, 196, 0.6);
+}
+
+.rich-markdown-content--reader code {
+  padding: 0.15em 0.35em;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.rich-markdown-content--reader pre {
+  padding: 1em 1.1em;
+}
+
+.rich-markdown-content--reader table {
+  table-layout: fixed;
+}
+
+.rich-markdown-content--reader .markdown-math-block,
+.rich-markdown-content--reader .markdown-mermaid,
+.rich-markdown-content--reader .markdown-abc {
+  margin: 1em 0;
+  padding: 0.9em 1.1em;
+}
+
+.rich-markdown-content--reader .markdown-footnotes {
+  margin-top: 2em;
+  padding-top: 1em;
+}
+
+.rich-markdown-content--reader hr {
+  margin: 1.5em 0;
+}

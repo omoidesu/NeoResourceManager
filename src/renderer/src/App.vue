@@ -7,6 +7,9 @@ import { notify, setNotificationTheme } from "./utils/notification";
 const appIsDark = ref(true)
 const blurAllImages = ref(false)
 let stopNotificationPushListener: null | (() => void) = null
+const emitRendererTiming = (message: string, meta?: Record<string, unknown>) => {
+  window.api?.diagnostics?.logRenderer('info', message, meta)
+}
 
 const applyBlurImageSetting = (rawValue: unknown) => {
   const normalizedValue = String(rawValue ?? '').trim().toLowerCase()
@@ -24,15 +27,34 @@ const handleAppSettingsChanged = (event: Event) => {
 }
 
 onMounted(async () => {
+  const mountedAt = performance.now()
+  const bootStartedAt = Number((window as any).__nrmRendererBootPerf?.startedAt ?? mountedAt)
+  emitRendererTiming('app settings bootstrap', {
+    phase: 'mounted-start',
+    sinceRendererStartMs: Math.round(mountedAt - bootStartedAt)
+  })
+
+  const notificationStartedAt = performance.now()
   stopNotificationPushListener = window.api.service.onNotificationPush((message) => {
     notify(message.type, message.title, message.content)
   })
   await window.api.service.startNotificationPush()
+  emitRendererTiming('app settings bootstrap', {
+    phase: 'notification-ready',
+    elapsedMs: Math.round(performance.now() - notificationStartedAt),
+    sinceRendererStartMs: Math.round(performance.now() - bootStartedAt)
+  })
 
+  const settingsStartedAt = performance.now()
   const [theme, blurSetting] = await Promise.all([
     window.api.db.getSetting(Settings.THEME_TYPE),
     window.api.db.getSetting(Settings.BLUR_ALL_IMAGES)
   ])
+  emitRendererTiming('app settings bootstrap', {
+    phase: 'settings-loaded',
+    elapsedMs: Math.round(performance.now() - settingsStartedAt),
+    sinceRendererStartMs: Math.round(performance.now() - bootStartedAt)
+  })
   if (!theme || theme.value === 'dark') {
     appIsDark.value = true
   } else {
@@ -41,6 +63,11 @@ onMounted(async () => {
   applyBlurImageSetting(blurSetting?.value ?? Settings.BLUR_ALL_IMAGES.default)
   setNotificationTheme(appIsDark.value)
   window.addEventListener('app-settings-changed', handleAppSettingsChanged as EventListener)
+  emitRendererTiming('app settings bootstrap', {
+    phase: 'mounted-end',
+    elapsedMs: Math.round(performance.now() - mountedAt),
+    sinceRendererStartMs: Math.round(performance.now() - bootStartedAt)
+  })
 })
 
 watch(() => appIsDark.value,

@@ -7,12 +7,13 @@ import { resolveImagePreviewSource } from '../shared/preview/usePreviewAssetLoad
 import {
   clearAudioPlayerControls,
   registerAudioPlayerControls,
-  type AudioPlaybackMode,
   setAudioPlayerPlaybackState,
   setAudioPlayerSession,
   setAudioPlayerVisible
 } from '../utils/audio-player-store'
 import { removeOngoingCenterItem, upsertOngoingCenterItem } from '../utils/notification-center'
+import { useAudioPlaylistRuntime } from './audio-player/composables/useAudioPlaylistRuntime'
+import { useAudioPlaybackSession } from './audio-player/composables/useAudioPlaybackSession'
 
 type AudioTrack = {
   path: string
@@ -63,14 +64,13 @@ const AUDIO_PLAYER_ONGOING_ID = 'audio-player:ongoing'
 const logger = createLogger('audio-player')
 
 const audioRef = ref<HTMLAudioElement | null>(null)
-const currentIndex = ref(0)
 const isPlaying = ref(false)
 const currentTime = ref(0)
 const duration = ref(0)
 const volume = ref(85)
-const orderedPlaylist = ref<AudioTrack[]>([])
 const audioUrlMap = ref<Record<string, string>>({})
 const audioObjectUrlMap = ref<Record<string, string>>({})
+const trackDurationMap = ref<Record<string, number>>({})
 const subtitleCueList = ref<SubtitleCue[]>([])
 const subtitleLoadState = ref<'idle' | 'loading' | 'ready' | 'empty'>('idle')
 const lyricLineRefs = ref<Array<HTMLElement | null>>([])
@@ -80,24 +80,44 @@ const isLyricScrollPreviewing = ref(false)
 const pendingAutoplay = ref(false)
 const pendingSeekTime = ref(0)
 const playbackError = ref('')
-const playbackSessionActive = ref(false)
 const stopPlaybackTask = ref<Promise<void> | null>(null)
-const playbackMode = ref<AudioPlaybackMode>('order')
 let lyricScrollPreviewTimer: ReturnType<typeof setTimeout> | null = null
-const draggingTrackIndex = ref<number | null>(null)
-const dragOverTrackIndex = ref<number | null>(null)
-const dragOverPosition = ref<'before' | 'after' | null>(null)
-let suppressPlaylistReload = false
-let playbackSessionResourceId = ''
-let playbackSessionTrackPath = ''
+let playlistDurationLoadToken = 0
 
-const currentTrack = computed(() => orderedPlaylist.value[currentIndex.value] ?? null)
+const {
+  orderedPlaylist,
+  currentIndex,
+  playbackMode,
+  draggingTrackIndex,
+  dragOverTrackIndex,
+  dragOverPosition,
+  currentTrack,
+  playlistBaseSegments,
+  clampIndex,
+  resolveNextTrackIndex,
+  cyclePlaybackMode,
+  syncOrderedPlaylist,
+  consumeSuppressPlaylistReload,
+  handleTrackDragStart,
+  handleTrackDragOver,
+  handleTrackDrop,
+  handleTrackDragEnd
+} = useAudioPlaylistRuntime({
+  getInitialPath: () => String(props.initialPath ?? '').trim(),
+  onPlaylistReordered: (playlist, initialPath) => {
+    setAudioPlayerSession({
+      playlist,
+      initialPath
+    })
+  }
+})
 const currentAudioSrc = computed(() => audioUrlMap.value[currentTrack.value?.path ?? ''] ?? '')
 const currentResourceId = computed(() => String(currentTrack.value?.resourceId ?? props.resourceId ?? '').trim())
 const resourceTitleText = computed(() => String(currentTrack.value?.resourceTitle ?? '').trim() || String(props.title ?? '').trim() || String(currentTrack.value?.label ?? '').trim() || '音频播放器')
 const artistText = computed(() => String(currentTrack.value?.artist ?? props.artist ?? '').trim())
 const currentCoverSrc = computed(() => currentCoverPreviewSrc.value)
 const isMusicDisplayMode = computed(() => props.displayMode === 'music')
+const toolbarTitleText = computed(() => String(currentTrack.value?.label ?? '').trim() || resourceTitleText.value)
 const fullPlayerPrimaryText = computed(() => {
   if (isMusicDisplayMode.value) {
     return resourceTitleText.value
@@ -152,34 +172,6 @@ const playbackModeLabel = computed(() => {
 
   return '顺序播放'
 })
-const playlistBaseSegments = computed(() => {
-  const directorySegments = orderedPlaylist.value
-    .map((track) => String(track?.path ?? '').replace(/\\/g, '/').trim())
-    .filter(Boolean)
-    .map((trackPath) => {
-      const segments = trackPath.split('/').filter(Boolean)
-      return segments.slice(0, -1)
-    })
-    .filter((segments) => segments.length > 0)
-
-  if (!directorySegments.length) {
-    return [] as string[]
-  }
-
-  const [firstSegments, ...restSegments] = directorySegments
-  const commonSegments: string[] = []
-
-  for (let index = 0; index < firstSegments.length; index += 1) {
-    const currentSegment = firstSegments[index]
-    if (!restSegments.every((segments) => segments[index] === currentSegment)) {
-      break
-    }
-
-    commonSegments.push(currentSegment)
-  }
-
-  return commonSegments
-})
 const currentSubtitleText = computed(() => {
   const activeCue = subtitleCueList.value.find((cue) => currentTime.value >= cue.start && currentTime.value <= cue.end)
   return activeCue?.text ?? ''
@@ -187,6 +179,19 @@ const currentSubtitleText = computed(() => {
 const activeSubtitleIndex = computed(() =>
   subtitleCueList.value.findIndex((cue) => currentTime.value >= cue.start && currentTime.value <= cue.end)
 )
+const {
+  playbackSessionActive,
+  getPlaybackSessionResourceId,
+  getPlaybackSessionTrackPath,
+  hasPlaybackSessionSnapshot,
+  startPlaybackSession,
+  finalizePlaybackSession
+} = useAudioPlaybackSession({
+  audioRef,
+  currentTime,
+  currentResourceId,
+  getCurrentTrackPath: () => String(currentTrack.value?.path ?? '').trim()
+})
 
 const getLyricLineStyle = (index: number) => {
   if (isLyricScrollPreviewing.value) {
@@ -254,68 +259,6 @@ const scrollToActiveLyric = (behavior: ScrollBehavior = 'smooth') => {
   })
 }
 
-const clampIndex = (index: number) => {
-  if (!orderedPlaylist.value.length) {
-    return 0
-  }
-
-  if (index < 0) {
-    return orderedPlaylist.value.length - 1
-  }
-
-  if (index >= orderedPlaylist.value.length) {
-    return 0
-  }
-
-  return index
-}
-
-const resolveNextTrackIndex = (direction: 'previous' | 'next' | 'ended') => {
-  if (!orderedPlaylist.value.length) {
-    return currentIndex.value
-  }
-
-  if (playbackMode.value === 'repeat-one' && direction === 'ended') {
-    return currentIndex.value
-  }
-
-  if (direction === 'previous') {
-    return clampIndex(currentIndex.value - 1)
-  }
-
-  if (playbackMode.value === 'shuffle' && orderedPlaylist.value.length > 1) {
-    let nextIndex = currentIndex.value
-    while (nextIndex === currentIndex.value) {
-      nextIndex = Math.floor(Math.random() * orderedPlaylist.value.length)
-    }
-    return nextIndex
-  }
-
-  const nextIndex = currentIndex.value + 1
-  if (nextIndex >= orderedPlaylist.value.length) {
-    if (playbackMode.value === 'loop') {
-      return 0
-    }
-
-    if (direction === 'ended') {
-      return -1
-    }
-  }
-
-  return clampIndex(nextIndex)
-}
-
-const cyclePlaybackMode = () => {
-  const nextModeMap: Record<AudioPlaybackMode, AudioPlaybackMode> = {
-    order: 'loop',
-    loop: 'shuffle',
-    shuffle: 'repeat-one',
-    'repeat-one': 'order'
-  }
-
-  playbackMode.value = nextModeMap[playbackMode.value]
-}
-
 const canReuseCurrentPlayback = () => {
   const activeTrackPath = String(currentTrack.value?.path ?? '').trim()
   if (!activeTrackPath) {
@@ -344,6 +287,38 @@ const formatTime = (seconds: number | null | undefined) => {
   }
 
   return `${String(minutes).padStart(2, '0')}:${String(remainSeconds).padStart(2, '0')}`
+}
+
+const normalizeTrackDuration = (value: unknown) => {
+  const durationValue = Number(value ?? 0)
+  return Number.isFinite(durationValue) && durationValue > 0 ? durationValue : 0
+}
+
+const rememberTrackDuration = (trackPath: string, nextDuration: unknown) => {
+  const normalizedPath = String(trackPath ?? '').trim()
+  const normalizedDuration = normalizeTrackDuration(nextDuration)
+  if (!normalizedPath || !normalizedDuration) {
+    return
+  }
+
+  trackDurationMap.value = {
+    ...trackDurationMap.value,
+    [normalizedPath]: normalizedDuration
+  }
+}
+
+const getTrackDisplayDuration = (track: AudioTrack, index: number) => {
+  const trackPath = String(track?.path ?? '').trim()
+  const cachedDuration = normalizeTrackDuration(trackDurationMap.value[trackPath])
+  if (cachedDuration) {
+    return cachedDuration
+  }
+
+  if (index === currentIndex.value && duration.value > 0) {
+    return duration.value
+  }
+
+  return normalizeTrackDuration(track?.duration)
 }
 
 const normalizeResumeTime = (resumeTime: number, mediaDuration: number) => {
@@ -438,125 +413,6 @@ const buildPlaybackLogContext = () => ({
   playlistSize: orderedPlaylist.value.length
 })
 
-const syncOrderedPlaylist = (playlist: AudioTrack[]) => {
-  const nextPlaylist = Array.isArray(playlist)
-    ? playlist
-      .map((track) => ({ ...track }))
-      .filter((track) => String(track?.path ?? '').trim())
-    : []
-
-  const activeTrackPath = String(currentTrack.value?.path ?? '').trim()
-  orderedPlaylist.value = nextPlaylist
-
-  if (!nextPlaylist.length) {
-    currentIndex.value = 0
-    return
-  }
-
-  const preservedIndex = activeTrackPath
-    ? nextPlaylist.findIndex((track) => String(track?.path ?? '').trim() === activeTrackPath)
-    : -1
-
-  if (preservedIndex >= 0) {
-    currentIndex.value = preservedIndex
-    return
-  }
-
-  const initialIndex = nextPlaylist.findIndex((track) => String(track?.path ?? '').trim() === String(props.initialPath ?? '').trim())
-  currentIndex.value = initialIndex >= 0 ? initialIndex : 0
-}
-
-const clearDragState = () => {
-  draggingTrackIndex.value = null
-  dragOverTrackIndex.value = null
-  dragOverPosition.value = null
-}
-
-const resolveDragPosition = (event: DragEvent) => {
-  const currentTarget = event.currentTarget
-  if (!(currentTarget instanceof HTMLElement)) {
-    return 'after' as const
-  }
-
-  const rect = currentTarget.getBoundingClientRect()
-  return event.clientY < rect.top + rect.height / 2 ? 'before' as const : 'after' as const
-}
-
-const reorderPlaylist = (fromIndex: number, targetIndex: number, position: 'before' | 'after') => {
-  if (fromIndex < 0 || targetIndex < 0 || fromIndex >= orderedPlaylist.value.length || targetIndex >= orderedPlaylist.value.length) {
-    clearDragState()
-    return
-  }
-
-  let insertIndex = position === 'after' ? targetIndex + 1 : targetIndex
-  if (fromIndex < insertIndex) {
-    insertIndex -= 1
-  }
-
-  if (insertIndex === fromIndex) {
-    clearDragState()
-    return
-  }
-
-  const nextPlaylist = [...orderedPlaylist.value]
-  const [movedTrack] = nextPlaylist.splice(fromIndex, 1)
-  nextPlaylist.splice(insertIndex, 0, movedTrack)
-  const activeTrackPath = String(currentTrack.value?.path ?? '').trim()
-
-  orderedPlaylist.value = nextPlaylist
-
-  if (activeTrackPath) {
-    const nextCurrentIndex = nextPlaylist.findIndex((track) => String(track?.path ?? '').trim() === activeTrackPath)
-    currentIndex.value = nextCurrentIndex >= 0 ? nextCurrentIndex : Math.max(0, Math.min(insertIndex, nextPlaylist.length - 1))
-  } else {
-    currentIndex.value = Math.max(0, Math.min(insertIndex, nextPlaylist.length - 1))
-  }
-
-  setAudioPlayerSession({
-    playlist: nextPlaylist,
-    initialPath: activeTrackPath || String(nextPlaylist[currentIndex.value]?.path ?? '')
-  })
-  suppressPlaylistReload = true
-
-  clearDragState()
-}
-
-const handleTrackDragStart = (index: number, event: DragEvent) => {
-  draggingTrackIndex.value = index
-  dragOverTrackIndex.value = index
-  dragOverPosition.value = 'after'
-  if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = 'move'
-    event.dataTransfer.setData('text/plain', String(index))
-  }
-}
-
-const handleTrackDragOver = (index: number, event: DragEvent) => {
-  if (draggingTrackIndex.value === null) {
-    return
-  }
-
-  event.preventDefault()
-  dragOverTrackIndex.value = index
-  dragOverPosition.value = resolveDragPosition(event)
-  if (event.dataTransfer) {
-    event.dataTransfer.dropEffect = 'move'
-  }
-}
-
-const handleTrackDrop = (index: number, event: DragEvent) => {
-  if (draggingTrackIndex.value === null) {
-    return
-  }
-
-  event.preventDefault()
-  reorderPlaylist(draggingTrackIndex.value, index, resolveDragPosition(event))
-}
-
-const handleTrackDragEnd = () => {
-  clearDragState()
-}
-
 const playCurrentAudio = async () => {
   const audioElement = audioRef.value
   if (!audioElement || !currentTrack.value) {
@@ -577,16 +433,7 @@ const playCurrentAudio = async () => {
     playbackError.value = ''
     logger.info('audio playback started', buildPlaybackLogContext())
 
-    if (!playbackSessionActive.value && currentResourceId.value) {
-      try {
-        await window.api.service.startAsmrPlayback(currentResourceId.value)
-        playbackSessionActive.value = true
-        playbackSessionResourceId = currentResourceId.value
-        playbackSessionTrackPath = String(currentTrack.value?.path ?? '').trim()
-      } catch {
-        // ignore playback log errors
-      }
-    }
+    await startPlaybackSession(currentResourceId.value, String(currentTrack.value?.path ?? '').trim())
 
     return true
   } catch (error) {
@@ -598,62 +445,6 @@ const playCurrentAudio = async () => {
     })
     return false
   }
-}
-
-const getResolvedPlaybackTime = () => {
-  const elementTime = Number(audioRef.value?.currentTime ?? 0)
-  const stateTime = Number(currentTime.value ?? 0)
-  return Math.max(0, Math.floor(Math.max(elementTime, stateTime)))
-}
-
-const persistPlaybackProgressFor = async (
-  resourceId: string,
-  filePath: string,
-  playbackTimeOverride?: number
-) => {
-  const normalizedResourceId = String(resourceId ?? '').trim()
-  const normalizedFilePath = String(filePath ?? '').trim()
-  const playbackTime = Math.max(0, Math.floor(Number(playbackTimeOverride ?? getResolvedPlaybackTime())))
-
-  if (!normalizedResourceId || !normalizedFilePath) {
-    return
-  }
-
-  try {
-    await window.api.service.updateAsmrPlaybackProgress(normalizedResourceId, normalizedFilePath, playbackTime)
-  } catch {
-    // ignore persistence errors
-  }
-}
-
-const persistPlaybackProgress = async (playbackTimeOverride?: number) => {
-  await persistPlaybackProgressFor(
-    playbackSessionResourceId || currentResourceId.value,
-    playbackSessionTrackPath || String(currentTrack.value?.path ?? ''),
-    playbackTimeOverride
-  )
-}
-
-const finalizePlaybackSession = async (resourceIdOverride?: string, filePathOverride?: string, playbackTimeOverride?: number) => {
-  const resourceId = String(resourceIdOverride ?? playbackSessionResourceId ?? currentResourceId.value ?? '').trim()
-  const filePath = String(filePathOverride ?? playbackSessionTrackPath ?? currentTrack.value?.path ?? '').trim()
-  const playbackTime = Math.max(0, Math.floor(Number(playbackTimeOverride ?? getResolvedPlaybackTime())))
-
-  if (filePath) {
-    await persistPlaybackProgressFor(resourceId, filePath, playbackTime)
-  }
-
-  if (playbackSessionActive.value && resourceId) {
-    try {
-      await window.api.service.stopAsmrPlayback(resourceId)
-    } catch {
-      // ignore playback log errors
-    }
-  }
-
-  playbackSessionActive.value = false
-  playbackSessionResourceId = ''
-  playbackSessionTrackPath = ''
 }
 
 const stopPlayback = async () => {
@@ -763,6 +554,46 @@ const ensureAudioUrl = async (filePath: string) => {
   audioUrlMap.value = {
     ...audioUrlMap.value,
     [normalizedPath]: fileUrl
+  }
+}
+
+const preloadMissingPlaylistDurations = async () => {
+  const loadToken = ++playlistDurationLoadToken
+  const tracks = orderedPlaylist.value
+    .filter((track) => {
+      const trackPath = String(track?.path ?? '').trim()
+      return trackPath && !normalizeTrackDuration(track.duration) && !normalizeTrackDuration(trackDurationMap.value[trackPath])
+    })
+    .slice(0, 120)
+
+  if (!tracks.length) {
+    return
+  }
+
+  logger.info('preloading missing audio playlist durations', {
+    ...buildPlaybackLogContext(),
+    trackCount: tracks.length
+  })
+
+  for (const track of tracks) {
+    if (loadToken !== playlistDurationLoadToken || !props.show) {
+      return
+    }
+
+    const trackPath = String(track?.path ?? '').trim()
+    if (!trackPath) {
+      continue
+    }
+
+    try {
+      const metadata = await window.api.dialog.getMediaMetadata(trackPath)
+      rememberTrackDuration(trackPath, metadata?.duration)
+    } catch (error) {
+      logger.warn('failed to preload audio playlist duration', {
+        filePath: trackPath,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
   }
 }
 
@@ -903,7 +734,7 @@ const loadSubtitleForTrack = async (trackPath: string, explicitSubtitlePath?: st
 const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
   const nextIndex = clampIndex(index)
   const previousTrackPath = String(currentTrack.value?.path ?? '').trim()
-  const previousResourceId = String(playbackSessionResourceId || currentResourceId.value).trim()
+  const previousResourceId = String(getPlaybackSessionResourceId() || currentResourceId.value).trim()
   const nextTrackPath = String(orderedPlaylist.value[nextIndex]?.path ?? '').trim()
 
   if (previousTrackPath && previousTrackPath !== nextTrackPath) {
@@ -1014,6 +845,7 @@ const handleLoadedMetadata = () => {
     readyState: Number(audioElement.readyState ?? 0),
     networkState: Number(audioElement.networkState ?? 0)
   })
+  rememberTrackDuration(String(currentTrack.value?.path ?? '').trim(), duration.value)
 }
 
 const handleCanPlay = () => {
@@ -1134,6 +966,7 @@ watch(() => props.show, async (visible) => {
   setAudioPlayerVisible(visible)
 
   if (!visible) {
+    playlistDurationLoadToken += 1
     return
   }
 
@@ -1170,10 +1003,9 @@ watch(() => props.sessionVersion, async (nextVersion, previousVersion) => {
 })
 
 watch(() => props.playlist, async (playlist) => {
-  syncOrderedPlaylist(playlist)
+  syncOrderedPlaylist(playlist, props.initialPath)
 
-  if (suppressPlaylistReload) {
-    suppressPlaylistReload = false
+  if (consumeSuppressPlaylistReload()) {
     return
   }
 
@@ -1184,6 +1016,21 @@ watch(() => props.playlist, async (playlist) => {
   const nextIndex = orderedPlaylist.value.findIndex((track) => track.path === props.initialPath)
   await syncTrack(nextIndex >= 0 ? nextIndex : 0, true, props.initialTime)
 }, { deep: true, immediate: true })
+
+watch(
+  () => [
+    props.show,
+    orderedPlaylist.value.map((track) => `${String(track?.path ?? '').trim()}:${String(track?.duration ?? '')}`).join('|')
+  ] as const,
+  ([visible]) => {
+    if (!visible) {
+      return
+    }
+
+    void preloadMissingPlaylistDurations()
+  },
+  { immediate: true }
+)
 
 watch(() => props.initialTime, (nextTime) => {
   if (!props.show) {
@@ -1215,13 +1062,13 @@ watch(() => props.resourceId, async (nextResourceId, previousResourceId) => {
     return
   }
 
-  if (!playbackSessionActive.value && !playbackSessionResourceId && !playbackSessionTrackPath) {
+  if (!hasPlaybackSessionSnapshot()) {
     return
   }
 
   await finalizePlaybackSession(
-    playbackSessionResourceId || normalizedPreviousResourceId,
-    playbackSessionTrackPath || String(currentTrack.value?.path ?? '')
+    getPlaybackSessionResourceId() || normalizedPreviousResourceId,
+    getPlaybackSessionTrackPath() || String(currentTrack.value?.path ?? '')
   )
 })
 
@@ -1350,11 +1197,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
-  void persistPlaybackProgress()
+  void finalizePlaybackSession()
   audioRef.value?.pause()
-  if (playbackSessionActive.value && playbackSessionResourceId) {
-    void window.api.service.stopAsmrPlayback(playbackSessionResourceId)
-  }
   clearAudioPlayerControls()
   removeOngoingCenterItem(AUDIO_PLAYER_ONGOING_ID)
   revokeAllAudioObjectUrls()
@@ -1379,7 +1223,7 @@ onBeforeUnmount(() => {
   >
     <div class="audio-player__shell">
       <div class="audio-player__toolbar" @click.stop>
-        <div class="audio-player__toolbar-title">{{ title }}</div>
+        <div class="audio-player__toolbar-title">{{ toolbarTitleText }}</div>
         <div class="audio-player__toolbar-actions">
           <n-button quaternary circle @click="stopPlayback">
             <template #icon>
@@ -1539,7 +1383,7 @@ onBeforeUnmount(() => {
                     <span v-if="track.hasSubtitle" class="audio-player__subtitle-badge">{{ isMusicDisplayMode ? '歌词' : '字幕' }}</span>
                   </div>
                 </div>
-                <div class="audio-player__track-duration">{{ formatTime(track.duration) }}</div>
+                <div class="audio-player__track-duration">{{ formatTime(getTrackDisplayDuration(track, index)) }}</div>
               </button>
             </div>
           </n-scrollbar>

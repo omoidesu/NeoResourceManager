@@ -44,6 +44,7 @@ import {resolveCategoryProfile} from './category-detail/profile-registry'
 import {setAudioPlayerSession, setAudioPlayerVisible, useAudioPlayerStore} from '../utils/audio-player-store'
 import {getWebsitePlaceholderEmoji} from '../utils/website-placeholder-emoji'
 import {Settings} from '../../../common/constants'
+import {sanitizeRichHtml} from '../utils/rich-content-sanitizer'
 
 const PictureViewer = defineAsyncComponent(() => import('../components/PictureViewer.vue'))
 const ComicReader = defineAsyncComponent(() => import('../components/ComicReader.vue'))
@@ -945,6 +946,7 @@ const visibleDetailLogs = computed(() => detailLogs.value.slice(0, visibleLogCou
 const hasMoreDetailLogs = computed(() => visibleLogCount.value < detailLogs.value.length)
 const noMore = computed(() => detailLogs.value.length > 5 && !hasMoreDetailLogs.value)
 const detailStats = computed(() => selectedDetailResource.value?.stats ?? null)
+const selectedDetailDescriptionHtml = computed(() => sanitizeRichHtml(String(selectedDetailResource.value?.description ?? '')))
 const sortActionTerms = computed(() => {
   if (isWebsiteCategory.value) {
     return {
@@ -2864,7 +2866,8 @@ const pageBootstrap = useCategoryPageBootstrap({
   patchBatchImportState,
   syncBatchImportOngoingCenter,
   clearBatchImportOngoingCenter,
-  logger
+  logger,
+  emitRendererTiming
 })
 fetchData = pageBootstrap.fetchData
 
@@ -2962,7 +2965,8 @@ const editorAssistActions = useCategoryEditorAssistActions({
   formatAudioCoverCandidateQuery,
   ensureSoftwareScriptRuntimes,
   resolveSoftwareScriptShell,
-  denormalizeSoftwareScript
+  denormalizeSoftwareScript,
+  isEditorActive: () => Boolean(showModal.value || showEditModal.value)
 })
 const handleOpenSoftwareScriptModal = editorAssistActions.handleOpenSoftwareScriptModal
 const handleFetchAlbumCover = editorAssistActions.handleFetchAlbumCover
@@ -4014,8 +4018,8 @@ const handleToggleCompleted = async (resource: any) => {
       <template #description-content>
         <div
           ref="detailDescriptionContentRef"
-          class="detail-drawer__value detail-drawer__value--description detail-drawer__value--rich"
-          v-html="selectedDetailResource?.description"
+          class="detail-drawer__value detail-drawer__value--description detail-drawer__value--rich rich-markdown-content"
+          v-html="selectedDetailDescriptionHtml"
         />
       </template>
     </ResourceDetailDrawer>
@@ -5161,28 +5165,6 @@ const handleToggleCompleted = async (resource: any) => {
 .detail-drawer__description-scrollbar :deep(.n-scrollbar-container) {
   height: 100%;
   padding-right: 6px;
-}
-
-.detail-drawer__value--rich {
-  line-height: 1.7;
-}
-
-.detail-drawer__value--rich :deep(p) {
-  margin: 0 0 0.75em;
-}
-
-.detail-drawer__value--rich :deep(p:last-child) {
-  margin-bottom: 0;
-}
-
-.detail-drawer__value--rich :deep(ul),
-.detail-drawer__value--rich :deep(ol) {
-  padding-left: 1.4em;
-  margin: 0.5em 0;
-}
-
-.detail-drawer__value--rich :deep(a) {
-  color: #63e2b7;
 }
 
 .detail-drawer__path-row {

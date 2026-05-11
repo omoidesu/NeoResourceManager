@@ -11,6 +11,8 @@ import {
   OpenOutline,
   RemoveOutline
 } from '@vicons/ionicons5'
+import { useReaderTheme } from './reader/useReaderTheme'
+import { useReaderVisibleWindowEvent } from './reader/useReaderVisibleWindowEvent'
 
 const props = withDefaults(
   defineProps<{
@@ -60,16 +62,6 @@ let pageTurnInProgress = false
 let pageTurnCooldownTimer: number | null = null
 
 const appIsDark = inject<ComputedRef<boolean>>('appIsDark', computed(() => true))
-const readerBackgroundOptions = [
-  '#f6f5f7',
-  '#e9e4d0',
-  '#e6f1da',
-  '#d9e4ef',
-  '#0f0d0f',
-  '#1a191b',
-  '#272627'
-]
-const darkReaderBackgrounds = new Set(['#0f0d0f', '#1a191b', '#272627'])
 const normalizedFilePath = computed(() => String(props.filePath ?? '').trim())
 const fileName = computed(() => normalizedFilePath.value.replace(/\\/g, '/').split('/').pop() ?? '')
 const displayTitle = computed(() => props.title || fileName.value || 'EPUB 阅读')
@@ -78,37 +70,12 @@ const progressText = computed(
 )
 const progressLabel = computed(() => (locationsReady.value ? progressText.value : '进度索引生成中'))
 const fontSizeText = computed(() => `${fontSize.value}px`)
-const readerBodyBackground = computed(
-  () => selectedReaderBackground.value || (appIsDark.value ? '#1a191b' : '#f6f5f7')
-)
-const isReaderBackgroundDark = computed(() =>
-  darkReaderBackgrounds.has(readerBodyBackground.value.toLowerCase())
-)
-const readerThemeColors = computed(() => {
-  if (appIsDark.value) {
-    return {
-      shellBg: 'rgb(24, 25, 28)',
-      bodyBg: readerBodyBackground.value,
-      textColor: isReaderBackgroundDark.value ? '#d8dde5' : '#262626',
-      borderColor: 'rgba(255, 255, 255, 0.08)',
-      linkColor: isReaderBackgroundDark.value ? '#7de8c4' : '#0f8f6f'
-    }
-  }
-
-  return {
-    shellBg: '#f5f5f5',
-    bodyBg: readerBodyBackground.value,
-    textColor: isReaderBackgroundDark.value ? '#d8dde5' : '#262626',
-    borderColor: 'rgba(24, 24, 28, 0.1)',
-    linkColor: isReaderBackgroundDark.value ? '#7de8c4' : '#0f8f6f'
-  }
-})
-const readerThemeStyle = computed(() => ({
-  '--reader-shell-bg': readerThemeColors.value.shellBg,
-  '--reader-body-bg': readerThemeColors.value.bodyBg,
-  '--reader-text-color': readerThemeColors.value.textColor,
-  '--reader-border-color': readerThemeColors.value.borderColor
-}))
+const {
+  readerBackgroundOptions,
+  readerBodyBackground,
+  readerThemeColors,
+  readerThemeStyle
+} = useReaderTheme(appIsDark, selectedReaderBackground)
 
 const getLocationStart = (location: EpubLocationLike | EpubLocationPoint): EpubLocationPoint => {
   return 'start' in location && location.start ? location.start : location
@@ -543,6 +510,9 @@ const handleKeydown = (event: KeyboardEvent): void => {
   }
 }
 
+useReaderVisibleWindowEvent(() => props.show, 'keydown', handleKeydown)
+useReaderVisibleWindowEvent(() => props.show, 'resize', handleResize)
+
 watch(
   () => [props.show, props.filePath],
   () => {
@@ -554,12 +524,7 @@ watch(
 watch(
   () => props.show,
   (visible) => {
-    if (visible) {
-      window.addEventListener('keydown', handleKeydown)
-      window.addEventListener('resize', handleResize)
-    } else {
-      window.removeEventListener('keydown', handleKeydown)
-      window.removeEventListener('resize', handleResize)
+    if (!visible) {
       emitProgress(progress.value)
       loadRequestId += 1
       resetReader()
@@ -574,8 +539,6 @@ watch(appIsDark, () => {
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', handleKeydown)
-  window.removeEventListener('resize', handleResize)
   emitProgress(progress.value)
   loadRequestId += 1
   resetReader()

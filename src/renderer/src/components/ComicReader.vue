@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { BookOutline, CloseOutline, ChevronBackOutline, ChevronForwardOutline, ImagesOutline, ExpandOutline, ContractOutline } from '@vicons/ionicons5'
-import { resolveImagePreviewSource } from '../shared/preview/usePreviewAssetLoader'
+import { useReaderImagePreviewCache } from './reader/useReaderImagePreviewCache'
 
 const props = withDefaults(defineProps<{
   show: boolean
@@ -23,8 +23,22 @@ const readingMode = ref<ReadingMode>('continuous')
 const fitMode = ref<FitMode>('width')
 const continuousGapless = ref(false)
 const currentIndex = ref(0)
-const pageSrcMap = ref<Record<string, string>>({})
-const thumbSrcMap = ref<Record<string, string>>({})
+const pagePreviewCache = useReaderImagePreviewCache({
+  maxWidth: 4096,
+  maxHeight: 4096,
+  fit: 'inside',
+  quality: 88,
+  fallbackToFileUrl: true
+})
+const thumbPreviewCache = useReaderImagePreviewCache({
+  maxWidth: 240,
+  maxHeight: 320,
+  fit: 'cover',
+  quality: 70,
+  fallbackToFileUrl: true
+})
+const pageSrcMap = pagePreviewCache.srcMap
+const thumbSrcMap = thumbPreviewCache.srcMap
 const pageSizeMap = ref<Record<string, { width: number; height: number }>>({})
 const viewerRef = ref<HTMLDivElement | null>(null)
 const thumbRefs = ref<HTMLElement[]>([])
@@ -82,8 +96,8 @@ const closeReader = () => {
 }
 
 const clearCache = () => {
-  pageSrcMap.value = {}
-  thumbSrcMap.value = {}
+  pagePreviewCache.clear()
+  thumbPreviewCache.clear()
   pageSizeMap.value = {}
 }
 
@@ -96,57 +110,11 @@ const syncFitModeWithReadingMode = (mode: ReadingMode) => {
 }
 
 const loadThumb = async (filePath: string) => {
-  const normalizedPath = String(filePath ?? '').trim()
-  if (!normalizedPath || thumbSrcMap.value[normalizedPath]) {
-    return
-  }
-
-  try {
-    const previewUrl = await resolveImagePreviewSource(normalizedPath, {
-      maxWidth: 240,
-      maxHeight: 320,
-      fit: 'cover',
-      quality: 70,
-      fallbackToFileUrl: true
-    })
-    if (!previewUrl) {
-      return
-    }
-
-    thumbSrcMap.value = {
-      ...thumbSrcMap.value,
-      [normalizedPath]: previewUrl
-    }
-  } catch {
-    // ignore thumb loading failure
-  }
+  await thumbPreviewCache.load(filePath)
 }
 
 const loadPage = async (filePath: string) => {
-  const normalizedPath = String(filePath ?? '').trim()
-  if (!normalizedPath || pageSrcMap.value[normalizedPath]) {
-    return
-  }
-
-  try {
-    const imageUrl = await resolveImagePreviewSource(normalizedPath, {
-      maxWidth: 4096,
-      maxHeight: 4096,
-      fit: 'inside',
-      quality: 88,
-      fallbackToFileUrl: true
-    })
-    if (!imageUrl) {
-      return
-    }
-
-    pageSrcMap.value = {
-      ...pageSrcMap.value,
-      [normalizedPath]: imageUrl
-    }
-  } catch {
-    // ignore page loading failure
-  }
+  await pagePreviewCache.load(filePath)
 }
 
 const updateViewerViewport = async () => {
