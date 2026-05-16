@@ -303,6 +303,120 @@ function applyIdempotentColumnMigrations(migrationsPath: string) {
   }
 }
 
+function createMediaSubTableIfMissing() {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS "media_sub" (
+      "id" text PRIMARY KEY NOT NULL,
+      "resource_id" text NOT NULL,
+      "file_name" text NOT NULL,
+      "relative_path" text NOT NULL,
+      "kind" text NOT NULL DEFAULT 'video',
+      "cover_path" text,
+      "sort_order" integer DEFAULT 0,
+      "is_visible" integer DEFAULT 1,
+      "has_subtitle" integer DEFAULT 0,
+      "duration" integer,
+      "bitrate" integer,
+      "sample_rate" integer,
+      "frame_rate" real,
+      "audio_bitrate" integer,
+      "audio_sample_rate" integer,
+      "width" integer,
+      "height" integer,
+      "metadata_updated_at" integer,
+      FOREIGN KEY ("resource_id") REFERENCES "resource"("id") ON UPDATE no action ON DELETE no action
+    )
+  `)
+}
+
+function backfillMediaSubFromVideoSub() {
+  if (!hasTable('video_sub')) {
+    return
+  }
+
+  sqlite.exec(`
+    INSERT OR IGNORE INTO "media_sub" (
+      "id",
+      "resource_id",
+      "file_name",
+      "relative_path",
+      "kind",
+      "cover_path",
+      "sort_order",
+      "is_visible",
+      "has_subtitle",
+      "duration",
+      "bitrate",
+      "sample_rate",
+      "frame_rate",
+      "audio_bitrate",
+      "audio_sample_rate",
+      "width",
+      "height",
+      "metadata_updated_at"
+    )
+    SELECT
+      "id",
+      "resource_id",
+      "file_name",
+      "relative_path",
+      'video',
+      "cover_path",
+      COALESCE("sort_order", 0),
+      COALESCE("is_visible", 1),
+      0,
+      NULL,
+      NULL,
+      NULL,
+      NULL,
+      NULL,
+      NULL,
+      NULL,
+      NULL,
+      NULL
+    FROM "video_sub"
+  `)
+}
+
+function reconcileMediaSubMigration(migrationsPath: string) {
+  ensureMigrationsTable()
+
+  const journalPath = path.join(migrationsPath, 'meta', '_journal.json')
+  if (!fs.existsSync(journalPath)) {
+    return
+  }
+
+  const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8')) as {
+    entries: Array<{ tag: string; when: number }>
+  }
+
+  const journalEntry = journal.entries.find((entry) => entry.tag === '0016_replace_video_sub_with_media_sub')
+  if (!journalEntry || isMigrationApplied(journalEntry.when)) {
+    return
+  }
+
+  const hasMediaSub = hasTable('media_sub')
+  const hasVideoSub = hasTable('video_sub')
+  if (!hasMediaSub && !hasVideoSub) {
+    return
+  }
+
+  createMediaSubTableIfMissing()
+  backfillMediaSubFromVideoSub()
+
+  const hash = getMigrationSqlHash(migrationsPath, journalEntry.tag)
+  if (!hash) {
+    return
+  }
+
+  markMigrationApplied(hash, journalEntry.when)
+  logger.warn('reconciled media_sub migration for upgraded database', {
+    migration: journalEntry.tag,
+    createdMediaSub: !hasMediaSub,
+    migratedFromVideoSub: hasVideoSub
+  })
+}
+
 // 执行自动迁移
 export const migrateDb = async () => {
   // 这里的 path 要指向你 generate 出来的 drizzle 文件夹
@@ -314,6 +428,7 @@ export const migrateDb = async () => {
   logger.info('migration path exists', { exists: fs.existsSync(migrationsPath) })
 
   try {
+    reconcileMediaSubMigration(migrationsPath)
     reconcileSchemaMigrations(migrationsPath)
     applyIdempotentColumnMigrations(migrationsPath)
     migrate(db, {migrationsFolder: migrationsPath});

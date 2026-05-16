@@ -220,7 +220,7 @@ export const useResourceCardContextMenu = (params: {
       icon: renderIconifyMenuIcon('icon-park-outline:to-top')
     },
     {
-      label: resource.value?.homePinnedAt ? '取消固定到首页' : '固定到首页',
+      label: resource.value?.homePinnedAt ? '取消快速启动' : '添加至快速启动',
       key: 'toggle-home-pin',
       icon: renderIconifyMenuIcon(resource.value?.homePinnedAt ? 'fluent:pin-off-24-regular' : 'fluent:pin-24-regular')
     },

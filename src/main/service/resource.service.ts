@@ -3231,6 +3231,72 @@ export class ResourceService {
     }
   }
 
+  static async setGovernanceIssueIgnored(
+    resourceId: string,
+    issueType: 'brokenPath' | 'missingCover' | 'longUnvisited',
+    ignored: boolean
+  ) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    if (!normalizedResourceId) {
+      return {
+        type: 'warning',
+        message: '资源ID无效'
+      }
+    }
+
+    const existingResource = await DatabaseService.getResourceById(normalizedResourceId)
+    if (!existingResource) {
+      return {
+        type: 'warning',
+        message: '资源不存在或已被删除'
+      }
+    }
+
+    await DatabaseService.setGovernanceIssueIgnored(normalizedResourceId, issueType, ignored)
+
+    return {
+      type: 'success',
+      message: ignored ? '问题已忽略' : '已恢复为待处理'
+    }
+  }
+
+  static async batchSetGovernanceIssueIgnored(
+    items: Array<{ resourceId: string; issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' }>,
+    ignored: boolean
+  ) {
+    const normalizedItems = Array.isArray(items)
+      ? items
+        .map((item) => ({
+          resourceId: String(item?.resourceId ?? '').trim(),
+          issueType: item?.issueType
+        }))
+        .filter((item) => item.resourceId && ['brokenPath', 'missingCover', 'longUnvisited'].includes(String(item.issueType)))
+      : []
+
+    if (!normalizedItems.length) {
+      return {
+        type: 'warning',
+        message: '未选择有效的问题资源'
+      }
+    }
+
+    await DatabaseService.transaction(async (tx) => {
+      for (const item of normalizedItems) {
+        await DatabaseService.setGovernanceIssueIgnored(
+          item.resourceId,
+          item.issueType as 'brokenPath' | 'missingCover' | 'longUnvisited',
+          ignored,
+          tx
+        )
+      }
+    })
+
+    return {
+      type: 'success',
+      message: ignored ? `已忽略 ${normalizedItems.length} 项问题资源` : `已恢复 ${normalizedItems.length} 项问题资源`
+    }
+  }
+
   static async updateResourceFavorite(resourceId: string, favorite: boolean) {
     const normalizedResourceId = String(resourceId ?? '').trim()
 
@@ -3349,11 +3415,11 @@ export class ResourceService {
     if (pinned) {
       const currentHomePin = await DatabaseService.getHomePinByResourceId(normalizedResourceId)
       if (!currentHomePin) {
-        const pinnedResources = await DatabaseService.getHomePinnedResources(20)
-        if (pinnedResources.length >= 20) {
+        const pinnedResources = await DatabaseService.getHomePinnedResources(12)
+        if (pinnedResources.length >= 12) {
           return {
             type: 'warning',
-            message: '首页固定最多支持 20 个资源，请先移除部分固定项',
+            message: '快速启动最多支持 12 个资源，请先移除部分资源',
           }
         }
       }
@@ -3365,7 +3431,7 @@ export class ResourceService {
 
     return {
       type: 'success',
-      message: pinned ? '已固定到首页' : '已取消首页固定',
+      message: pinned ? '已添加至快速启动' : '已取消快速启动',
     }
   }
 

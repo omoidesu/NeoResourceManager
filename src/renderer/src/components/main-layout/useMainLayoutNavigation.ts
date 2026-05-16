@@ -38,9 +38,9 @@ const buildMenuOptions = (categoryItems: CategoryMenuItem[]): MenuOption[] => [
     icon: renderMenuIcon(item.emoji || '📁')
   })),
   {
-    label: renderMenuLabel('搜索', '快速检索资源'),
+    label: renderMenuLabel('资源管理', '问题整理与归档'),
     key: 'search',
-    icon: renderMenuIcon('🔎')
+    icon: renderMenuIcon('🛠️')
   },
   {
     label: renderMenuLabel('设置', '偏好与运行选项'),

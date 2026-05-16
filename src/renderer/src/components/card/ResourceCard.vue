@@ -127,6 +127,7 @@ const {
   showStopConfirm,
   launchButtonStyle,
   canLaunch,
+  launchButtonHidden,
   canStop,
   stopNeedsConfirm,
   canToggleFavorite,
@@ -530,11 +531,10 @@ watch(
         </n-float-button>
 
         <n-float-button
-          v-else
+          v-else-if="!launchButtonHidden"
           type="primary"
           class="resource-card__launch"
           :description="launchActionText"
-          :disabled="!canLaunch"
           @click.stop="handleLaunch()"
         >
           <n-icon>

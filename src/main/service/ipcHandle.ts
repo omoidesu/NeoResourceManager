@@ -137,6 +137,10 @@ function registerResource() {
   ipcMain.handle('db:get-running-resource-count-by-category-id', async (_event, categoryId: string) => {
     return await DatabaseService.getRunningResourceCountByCategoryId(categoryId)
   })
+
+  ipcMain.handle('db:get-governance-issue-workbench', async (_event, query?: any) => {
+    return await DatabaseService.getGovernanceIssueWorkbench(query)
+  })
 }
 
 function registerTag() {
@@ -501,6 +505,20 @@ function registerService() {
   ipcMain.handle('service:update-resource-home-pin', async (_event, resourceId: string, pinned: boolean) => {
     return ResourceService.updateResourceHomePin(resourceId, pinned)
   })
+
+  ipcMain.handle(
+    'service:set-governance-issue-ignored',
+    async (_event, resourceId: string, issueType: 'brokenPath' | 'missingCover' | 'longUnvisited', ignored: boolean) => {
+      return ResourceService.setGovernanceIssueIgnored(resourceId, issueType, ignored)
+    }
+  )
+
+  ipcMain.handle(
+    'service:batch-set-governance-issue-ignored',
+    async (_event, items: Array<{ resourceId: string; issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' }>, ignored: boolean) => {
+      return ResourceService.batchSetGovernanceIssueIgnored(items, ignored)
+    }
+  )
 
   ipcMain.handle('service:start-notification-push', async (event) => {
     NotificationQueueService.getInstance().registerRenderer(event.sender)

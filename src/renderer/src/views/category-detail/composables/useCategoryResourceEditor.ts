@@ -33,6 +33,8 @@ type EditorDeps = {
   applyGamePathAnalysis: (resourcePath: string) => Promise<void>
   applyNovelFileAnalysis: (resourcePath: string) => Promise<void>
   applyMultiImageDirectoryAnalysis: (resourcePath: string) => Promise<void>
+  duplicateResourceChecking: Ref<boolean>
+  duplicateResourceMessage: Ref<string>
 }
 
 const WEBSITE_EXTEND_TABLE = 'website_meta'
@@ -121,6 +123,16 @@ export const useCategoryResourceEditor = (deps: EditorDeps) => {
   }
 
   const handleSubmitResource = async () => {
+    if (deps.duplicateResourceChecking.value) {
+      deps.showNotifyByType('warning', '添加资源', '正在检查是否重复，请稍候')
+      return
+    }
+
+    if (deps.duplicateResourceMessage.value) {
+      deps.showNotifyByType('warning', '添加资源', deps.duplicateResourceMessage.value)
+      return
+    }
+
     if (!await validateEditorBeforeSubmit('添加资源')) {
       return
     }

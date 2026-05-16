@@ -64,6 +64,7 @@ const launchButtonTextSafe = computed(() => {
 
   return usesPlaybackTerms && hasResumeProgress ? '继续播放' : fallback
 })
+const launchButtonHidden = computed(() => Boolean(props.selectedDetailResource?.missingStatus))
 
 
 const formatDateTimeSafe = (value: unknown) => {
@@ -603,10 +604,10 @@ const handleOpenVideoOrderDialogSafe = (resource: typeof props.selectedDetailRes
           </div>
 
           <n-float-button
+            v-if="!launchButtonHidden"
             :type="props.selectedDetailResource?.isRunning ? 'error' : 'primary'"
             class="detail-drawer__launch"
             :description="props.selectedDetailResource?.isRunning ? '停止' : launchButtonTextSafe"
-            :disabled="!props.detailCanLaunch && !props.detailCanStop"
             @click="props.handleDetailLaunchAction"
           >
             <n-icon>

@@ -6,6 +6,7 @@ type NextPlayCardLike = {
   categoryEmoji: string
   reason: string
   coverUrl?: string
+  missingStatus?: boolean
   [key: string]: unknown
 }
 
@@ -58,7 +59,7 @@ const emit = defineEmits<{
           <button
             type="button"
             class="next-play-hero__action next-play-hero__action--primary"
-            :disabled="props.nextPlayLaunchingId === props.nextPlayHero.id"
+            :disabled="props.nextPlayLaunchingId === props.nextPlayHero.id || Boolean(props.nextPlayHero.missingStatus)"
             @click.stop="emit('launch', props.nextPlayHero)"
           >
             {{ props.nextPlayLaunchingId === props.nextPlayHero.id ? '打开中' : props.getNextPlayActionLabel(props.nextPlayHero.categoryName) }}

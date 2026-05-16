@@ -119,6 +119,9 @@ export const useDashboardDetailRuntime = ({
   )
   const detailCanLaunch = computed(() => {
     const resource = selectedDetailResource.value
+    if (resource?.missingStatus) {
+      return false
+    }
     if (detailCategoryProfile.value.flags.isWebsite) {
       return Boolean(detailWebsiteUrl.value)
     }

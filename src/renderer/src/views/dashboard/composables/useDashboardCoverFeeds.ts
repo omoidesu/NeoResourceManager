@@ -843,10 +843,10 @@ export const useDashboardCoverFeeds = ({
 
   const getCoverWallStateBadges = (item: CoverWallResource) => {
     const badges: string[] = []
-    if (item.missingStatus) badges.push('资源失效')
+    if (item.missingStatus) badges.push('🚫 资源失效')
     if (item.favorite) badges.push('已收藏')
     if (item.isCompleted) badges.push(getCoverWallCompletedLabel(item))
-    if (item.isPinned) badges.push('已固定')
+    if (item.isPinned) badges.push('已添加')
     return badges
   }
 

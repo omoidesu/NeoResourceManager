@@ -246,6 +246,9 @@ export interface ResourceEditorDrawerProps {
   hasBasePath: boolean
   hasCoverPath: boolean
   editingResourceId: string
+  duplicateResourceChecking?: boolean
+  duplicateResourceMessage?: string
+  duplicateResourceTitle?: string
 }
 
 export interface CategoryFilterPanelProps {

@@ -297,10 +297,12 @@ function registerVideoTranscodeProtocol() {
         ffmpegArgs,
         {
           detached: false,
-          stdio: ['ignore', 'pipe', 'ignore'],
+          stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true
         }
       )
+
+      let ffmpegErrorOutput = ''
 
       child.stdout.on('close', () => {
         if (!child.killed) {
@@ -308,8 +310,24 @@ function registerVideoTranscodeProtocol() {
         }
       })
 
+      child.stderr?.on('data', (chunk) => {
+        ffmpegErrorOutput += String(chunk ?? '')
+      })
+
       child.on('error', (error) => {
         logger.error('failed to start video transcode stream', error)
+      })
+
+      child.on('exit', (code, signal) => {
+        if (code && code !== 0) {
+          logger.error('video transcode process exited abnormally', {
+            code,
+            signal,
+            filePath,
+            ffmpegArgs,
+            stderr: ffmpegErrorOutput.trim()
+          })
+        }
       })
 
       callback({

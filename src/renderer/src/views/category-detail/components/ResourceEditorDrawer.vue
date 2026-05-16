@@ -85,6 +85,9 @@ const showScreenshotFolderButton = computed(() => ![
   'novel_meta',
   'website_meta'
 ].includes(extendTable.value))
+const showDuplicateResourceHint = computed(() =>
+  !isEditMode.value && Boolean(props.duplicateResourceChecking)
+)
 </script>
 
 <template>
@@ -120,6 +123,9 @@ const showScreenshotFolderButton = computed(() => ![
                     选择{{ resourcePathType === 'file' ? '文件' : '目录' }}
                   </n-button>
                 </div>
+              </div>
+              <div v-if="showDuplicateResourceHint" class="path-field__hint">
+                <span class="path-field__hint-text">正在检查是否重复...</span>
               </div>
             </n-form-item>
             <n-form-item
@@ -294,6 +300,9 @@ const showScreenshotFolderButton = computed(() => ![
               </n-button>
             </div>
           </div>
+          <div v-if="showDuplicateResourceHint" class="path-field__hint">
+            <span class="path-field__hint-text">正在检查是否重复...</span>
+          </div>
         </n-form-item>
         <n-form-item
           v-if="categorySettings.authorText && isNovelCategory"
@@ -454,7 +463,13 @@ const showScreenshotFolderButton = computed(() => ![
         </template>
         <template v-else>
           <n-button @click="emit('close')">取消</n-button>
-          <n-button type="primary" @click="emit('submit-add')">添加</n-button>
+          <n-button
+            type="primary"
+            :disabled="Boolean(props.duplicateResourceChecking || props.duplicateResourceMessage)"
+            @click="emit('submit-add')"
+          >
+            添加
+          </n-button>
         </template>
       </div>
     </template>
@@ -518,6 +533,16 @@ const showScreenshotFolderButton = computed(() => ![
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.path-field__hint {
+  margin-top: 8px;
+}
+
+.path-field__hint-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.52);
 }
 
 .edit-drawer {

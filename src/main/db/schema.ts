@@ -42,6 +42,14 @@ export const homePin = sqliteTable('home_pin', {
   isDeleted: integer('is_deleted', { mode: 'boolean' }).default(false),
 })
 
+export const resourceIssueIgnore = sqliteTable('resource_issue_ignore', {
+  resourceId: text('resource_id').notNull().references(() => resource.id),
+  issueType: text('issue_type').notNull(),
+  ignoredAt: integer('ignored_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.resourceId, t.issueType] }),
+}))
+
 // --- 3. 统计信息 ---
 
 export const resourceStat = sqliteTable('resource_stat', {

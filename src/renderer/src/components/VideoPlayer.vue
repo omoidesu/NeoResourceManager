@@ -647,6 +647,16 @@ const handleTimeUpdate = () => {
   currentTime.value = isCurrentSourceTranscoded.value ? playbackTimeOffset.value + localTime : localTime
 }
 
+const handleSeeked = () => {
+  if (isCurrentSourceTranscoded.value) {
+    return
+  }
+
+  const localTime = Math.max(0, Number(videoRef.value?.currentTime ?? 0))
+  currentTime.value = localTime
+  seekPreviewTime.value = null
+}
+
 const handlePlay = () => {
   isPlaying.value = true
   errorMessage.value = ''
@@ -797,6 +807,7 @@ onBeforeUnmount(() => {
             :src="sourceUrl"
             @loadedmetadata="handleLoadedMetadata"
             @timeupdate="handleTimeUpdate"
+            @seeked="handleSeeked"
             @play="handlePlay"
             @pause="handlePause"
             @ended="handleEnded"

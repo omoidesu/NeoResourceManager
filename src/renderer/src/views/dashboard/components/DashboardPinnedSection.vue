@@ -6,6 +6,7 @@ type HomePinnedCardLike = {
   title: string
   categoryEmoji: string
   meta: string
+  missingStatus?: boolean
   [key: string]: unknown
 }
 
@@ -111,7 +112,7 @@ const handleAddKeywordInput = (event: Event) => {
 <template>
   <aside class="queue-panel">
     <div class="queue-panel__header">
-      <h2>{{ showAddPanel ? '添加首页固定' : '首页固定' }}</h2>
+      <h2>{{ showAddPanel ? '添加快速启动' : '快速启动' }}</h2>
       <button
         v-if="showAddPanel"
         type="button"
@@ -121,7 +122,7 @@ const handleAddKeywordInput = (event: Event) => {
         关闭
       </button>
       <button v-else type="button" class="queue-panel__action" @click="openAddPanel">
-        添加固定
+        添加
       </button>
     </div>
     <div v-if="showAddPanel" class="queue-add-panel">
@@ -165,7 +166,7 @@ const handleAddKeywordInput = (event: Event) => {
               :disabled="Boolean(item.isPinned) || isHomePinnedLimitReached"
               @click="handlePinCandidate(item)"
             >
-              {{ item.isPinned ? '已固定' : (isHomePinnedLimitReached ? '首页固定已满' : '固定') }}
+              {{ item.isPinned ? '已添加' : (isHomePinnedLimitReached ? '快速启动已满' : '添加') }}
             </n-button>
           </article>
         </div>
@@ -183,7 +184,7 @@ const handleAddKeywordInput = (event: Event) => {
       >
         ‹
       </button>
-      <div class="queue-panel__dots" aria-label="首页固定分页">
+      <div class="queue-panel__dots" aria-label="快速启动分页">
         <button
           v-for="pageIndex in props.homePinnedPageDots"
           :key="pageIndex"
@@ -206,7 +207,7 @@ const handleAddKeywordInput = (event: Event) => {
     </div>
     <article v-if="!showAddPanel && props.homePinnedLoading && !props.homePinnedCards.length" class="queue-item queue-item--empty">
       <strong>读取中</strong>
-      <span>正在整理首页固定内容</span>
+      <span>正在整理快速启动内容</span>
     </article>
     <div v-else-if="!showAddPanel && !props.homePinnedCards.length" class="queue-empty-state">
       <div class="queue-empty-state__icon" aria-hidden="true">
@@ -215,8 +216,8 @@ const handleAddKeywordInput = (event: Event) => {
         <span class="queue-empty-state__icon-dot"></span>
         <span class="queue-empty-state__icon-dot"></span>
       </div>
-      <strong>还没有固定资源</strong>
-      <p>把常用的游戏、音声或网站固定到首页，之后打开应用就能更快使用它们。</p>
+      <strong>还没有快速启动资源</strong>
+      <p>把常用的游戏、音声或网站添加到快速启动，之后打开应用就能更快使用它们。</p>
       <button type="button" class="queue-empty-state__action" @click="openAddPanel">
         添加第一个资源
       </button>
@@ -259,7 +260,7 @@ const handleAddKeywordInput = (event: Event) => {
               type="primary"
               secondary
               :loading="props.homePinnedLaunchingId === item.id"
-              :disabled="props.homePinnedDeletingId === item.id"
+              :disabled="props.homePinnedDeletingId === item.id || Boolean(item.missingStatus)"
               @click.stop="emit('launch', item)"
               @keydown.stop
             >

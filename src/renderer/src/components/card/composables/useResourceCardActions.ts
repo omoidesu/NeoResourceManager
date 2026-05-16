@@ -49,12 +49,17 @@ export const useResourceCardActions = (params: {
       return false
     }
 
+    if (resource.value?.missingStatus) {
+      return false
+    }
+
     if (isWebsiteCategory.value) {
       return Boolean(resource.value?.websiteMeta?.url || resource.value?.websiteMeta?.website || resource.value?.meta?.website || resource.value?.website)
     }
 
     return Boolean(resource.value?.basePath) && !resource.value?.missingStatus && !isRunning.value
   })
+  const launchButtonHidden = computed(() => Boolean(resource.value?.missingStatus))
 
   const canStop = computed(() => {
     return !selectionMode.value && Boolean(resource.value?.isRunning)
@@ -72,7 +77,7 @@ export const useResourceCardActions = (params: {
   }
 
   const handleLaunch = () => {
-    if (!canLaunch.value) {
+    if (launchButtonHidden.value) {
       return
     }
 
@@ -163,6 +168,7 @@ export const useResourceCardActions = (params: {
     showStopConfirm,
     launchButtonStyle,
     canLaunch,
+    launchButtonHidden,
     canStop,
     stopNeedsConfirm,
     canToggleFavorite,

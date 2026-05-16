@@ -128,6 +128,10 @@ const videoCoverFrameLoading = ref(false)
 const formData = ref<any>({name: '', meta: {}})
 const editingResourceId = ref('')
 const editInitialFormData = ref<any | null>(null)
+const addResourceDuplicateChecking = ref(false)
+const addResourceDuplicateMessage = ref('')
+const addResourceDuplicateTitle = ref('')
+let addResourceDuplicateCheckToken = 0
 const batchImportItems = ref<any[]>([])
 const isBatchImportSubmitting = ref(false)
 const batchImportFetchInfoEnabled = ref(true)
@@ -1758,6 +1762,9 @@ const getWebsiteResourceUrl = (resource: any) =>
   normalizeWebsiteUrl(resource?.websiteMeta?.url ?? resource?.meta?.website ?? resource?.website ?? '')
 const detailCanLaunch = computed(() => {
   const resource = selectedDetailResource.value
+  if (resource?.missingStatus) {
+    return false
+  }
   if (categoryProfile.value.flags.isWebsite) {
     return Boolean(getWebsiteResourceUrl(resource))
   }
@@ -2162,6 +2169,74 @@ const getBasePathValidationMessage = () => {
   return `请选择合法的${categoryName.value}文件，仅支持 ${allowedExtensions.join(', ')}`
 }
 
+const resetAddResourceDuplicateState = () => {
+  addResourceDuplicateCheckToken += 1
+  addResourceDuplicateChecking.value = false
+  addResourceDuplicateMessage.value = ''
+  addResourceDuplicateTitle.value = ''
+}
+
+const syncAddResourceDuplicateState = async (basePathInput: string) => {
+  const basePath = String(basePathInput ?? '').trim()
+  const commandLineArgs = String(formData.value?.meta?.commandLineArgs ?? '').trim()
+  const isSoftwareDuplicateCheck = String(categorySettings.value.extendTable ?? '').trim() === 'software_meta'
+  const requestToken = ++addResourceDuplicateCheckToken
+
+  if (!showModal.value || showEditModal.value || editingResourceId.value) {
+    resetAddResourceDuplicateState()
+    return
+  }
+
+  if (!basePath || !validateBasePathExtension(basePath)) {
+    addResourceDuplicateChecking.value = false
+    addResourceDuplicateMessage.value = ''
+    addResourceDuplicateTitle.value = ''
+    return
+  }
+
+  addResourceDuplicateChecking.value = true
+  addResourceDuplicateMessage.value = ''
+  addResourceDuplicateTitle.value = ''
+
+  try {
+    const result = await window.api.service.checkResourceExistsByPath(basePath)
+    if (requestToken !== addResourceDuplicateCheckToken) {
+      return
+    }
+
+    if (result?.type === 'error') {
+      addResourceDuplicateChecking.value = false
+      addResourceDuplicateMessage.value = ''
+      addResourceDuplicateTitle.value = ''
+      return
+    }
+
+    const existingResource = result?.data ?? null
+    const existingCommandLineArgs = String(existingResource?.softwareMeta?.commandLineArgs ?? '').trim()
+    const isDuplicate = result?.exists && (
+      !isSoftwareDuplicateCheck
+      || existingCommandLineArgs === commandLineArgs
+    )
+    addResourceDuplicateChecking.value = false
+    addResourceDuplicateTitle.value = String(existingResource?.title ?? '').trim()
+    addResourceDuplicateMessage.value = isDuplicate
+      ? `该资源已存在${addResourceDuplicateTitle.value ? `：${addResourceDuplicateTitle.value}` : ''}`
+      : ''
+    await nextTick()
+    await basePathFormItemRef.value?.validate?.({ trigger: 'change' })
+  } catch {
+    if (requestToken !== addResourceDuplicateCheckToken) {
+      return
+    }
+
+    addResourceDuplicateChecking.value = false
+    addResourceDuplicateMessage.value = ''
+    addResourceDuplicateTitle.value = ''
+    await nextTick()
+    await basePathFormItemRef.value?.validate?.({ trigger: 'change' })
+  }
+}
+
 const getResourceNameFromBasePath = (basePath: string) => {
   const normalizedPath = basePath.replace(/\\/g, '/')
   const pathSegments = normalizedPath.split('/').filter(Boolean)
@@ -2348,6 +2423,10 @@ const addResourceRule = computed(() => ({
         return new Error(getBasePathValidationMessage())
       }
 
+      if (showModal.value && !editingResourceId.value && addResourceDuplicateMessage.value) {
+        return new Error(addResourceDuplicateMessage.value)
+      }
+
       return true
     }
   },
@@ -2494,6 +2573,26 @@ watch(showComicReader, (visible, previousVisible) => {
   void stopComicReadingSession()
 })
 
+watch(
+  () => [
+    showModal.value,
+    showEditModal.value,
+    editingResourceId.value,
+    String(formData.value?.basePath ?? '').trim(),
+    String(formData.value?.meta?.commandLineArgs ?? '').trim(),
+    String(categorySettings.value.extendTable ?? '').trim()
+  ] as const,
+  ([isAddVisible, isEditVisible, editingId, basePath]) => {
+    if (!isAddVisible || isEditVisible || editingId) {
+      resetAddResourceDuplicateState()
+      return
+    }
+
+    void syncAddResourceDuplicateState(basePath)
+  },
+  { immediate: true }
+)
+
 watch(showTextReader, (visible, previousVisible) => {
   if (visible || !previousVisible) {
     return
@@ -2566,7 +2665,9 @@ const resourceEditor = useCategoryResourceEditor({
   applyAudioCoverAnalysis,
   applyGamePathAnalysis,
   applyNovelFileAnalysis,
-  applyMultiImageDirectoryAnalysis
+  applyMultiImageDirectoryAnalysis,
+  duplicateResourceChecking: addResourceDuplicateChecking,
+  duplicateResourceMessage: addResourceDuplicateMessage
 })
 const handleAddResource = resourceEditor.handleAddResource
 const handleCloseModal = resourceEditor.handleCloseModal
@@ -3537,14 +3638,14 @@ const handleToggleHomePin = async (resource: any) => {
     const resultType = result?.type ?? 'info'
     const resultMessage = result?.message ?? '操作完成'
 
-    showNotifyByType(resultType, nextValue ? '固定到首页' : '取消首页固定', resultMessage)
+    showNotifyByType(resultType, nextValue ? '添加至快速启动' : '取消快速启动', resultMessage)
 
     if (resultType !== 'error') {
       resource.homePinnedAt = nextValue ? Date.now() : null
       await fetchData()
     }
   } catch (error) {
-    showNotifyByType('error', '固定到首页', error instanceof Error ? error.message : '更新首页固定状态失败')
+    showNotifyByType('error', '快速启动', error instanceof Error ? error.message : '更新快速启动状态失败')
   }
 }
 
@@ -4440,6 +4541,9 @@ const handleToggleCompleted = async (resource: any) => {
       :has-base-path="hasBasePath"
       :has-cover-path="hasCoverPath"
       :editing-resource-id="editingResourceId"
+      :duplicate-resource-checking="addResourceDuplicateChecking"
+      :duplicate-resource-message="addResourceDuplicateMessage"
+      :duplicate-resource-title="addResourceDuplicateTitle"
       @update:show="showModal = $event"
       @open-software-script="handleOpenSoftwareScriptModal"
       @select-base-path="handleSelectBasePath"

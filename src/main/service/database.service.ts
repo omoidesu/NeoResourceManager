@@ -11,11 +11,14 @@ import {
   typeResource,
   resourceType, dictType, author, authorWork, storeWork,
   actor, gameMeta, softwareMeta, singleImageMeta, multiImageMeta, videoMeta, mediaSub, asmrMeta, audioMeta, novelMeta, websiteMeta, homePin,
+  resourceIssueIgnore,
 } from '../db/schema'
 import {and, asc, count, desc, eq, inArray, not, or, sql} from 'drizzle-orm'
 import {generateId} from '../util/id-generator'
 import { ResourceLogSpecialTime, SettingDetail, Settings } from "../../common/constants";
 import { createLogger } from '../util/logger'
+import path from 'path'
+import fs from 'fs-extra'
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0]
 type DbExecutor = typeof db | DbTransaction
@@ -37,6 +40,41 @@ type ResourceQueryParams = {
   sortBy?: string
 }
 
+type GovernanceIssueType = 'brokenPath' | 'missingCover' | 'longUnvisited'
+type BrokenPathSubtypeKey = 'directoryMissing' | 'launchFileMissing'
+
+type GovernanceIssueQuery = {
+  issueType?: GovernanceIssueType | 'ignored' | 'all'
+  brokenPathSubtype?: BrokenPathSubtypeKey | 'all'
+  keyword?: string
+  category?: string
+  tag?: string
+  status?: 'all' | '待处理' | '已忽略'
+  rating?: 'all' | '4+' | '3+' | '0-3'
+  onlyFavorite?: boolean
+  onlyRecent?: boolean
+  sortBy?: 'priority' | 'recent' | 'created'
+}
+
+type GovernanceBaseResourceRow = {
+  id: string
+  title: string
+  categoryId: string
+  categoryName: string
+  categoryEmoji: string | null
+  categoryPillColor: string | null
+  coverPath: string | null
+  description: string | null
+  basePath: string
+  fileName: string | null
+  favorite: boolean | null
+  rating: number | null
+  missingStatus: boolean | null
+  createTime: Date | null
+  lastAccessTime: Date | null
+  tagsText: string | null
+}
+
 const MIN_LONG_UNVISITED_DAYS = 30
 const MAX_LONG_UNVISITED_DAYS = 365
 
@@ -56,7 +94,9 @@ const DEFAULT_CATEGORY_PILL_COLORS: Record<string, string> = {
 export class DatabaseService {
   private static categoryPillColorColumnReady = false
   private static resourceTopAndHomePinSchemaReady = false
+  private static mediaSubSchemaReady = false
   private static resourceSearchTextColumnReady = false
+  private static resourceIssueIgnoreSchemaReady = false
   private static logger = createLogger('database-service')
 
   private static logCategoryQueryDuration(label: string, categoryId: string, startedAt: number, extra?: Record<string, any>) {
@@ -111,6 +151,90 @@ export class DatabaseService {
     `)
 
     this.resourceTopAndHomePinSchemaReady = true
+  }
+
+  private static async ensureMediaSubSchema() {
+    if (this.mediaSubSchemaReady) {
+      return
+    }
+
+    await db.run(sql`
+      CREATE TABLE IF NOT EXISTS media_sub (
+        id text PRIMARY KEY NOT NULL,
+        resource_id text NOT NULL,
+        file_name text NOT NULL,
+        relative_path text NOT NULL,
+        kind text NOT NULL DEFAULT 'video',
+        cover_path text,
+        sort_order integer DEFAULT 0,
+        is_visible integer DEFAULT 1,
+        has_subtitle integer DEFAULT 0,
+        duration integer,
+        bitrate integer,
+        sample_rate integer,
+        frame_rate real,
+        audio_bitrate integer,
+        audio_sample_rate integer,
+        width integer,
+        height integer,
+        metadata_updated_at integer,
+        FOREIGN KEY (resource_id) REFERENCES resource(id)
+      )
+    `)
+
+    const legacyVideoSubTable = await db.get<{ name?: string }>(sql`
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'table' AND name = 'video_sub'
+      LIMIT 1
+    `)
+
+    if (String(legacyVideoSubTable?.name ?? '').trim() === 'video_sub') {
+      await db.run(sql`
+        INSERT OR IGNORE INTO media_sub (
+          id,
+          resource_id,
+          file_name,
+          relative_path,
+          kind,
+          cover_path,
+          sort_order,
+          is_visible,
+          has_subtitle,
+          duration,
+          bitrate,
+          sample_rate,
+          frame_rate,
+          audio_bitrate,
+          audio_sample_rate,
+          width,
+          height,
+          metadata_updated_at
+        )
+        SELECT
+          id,
+          resource_id,
+          file_name,
+          relative_path,
+          'video',
+          cover_path,
+          COALESCE(sort_order, 0),
+          COALESCE(is_visible, 1),
+          0,
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          NULL
+        FROM video_sub
+      `)
+    }
+
+    this.mediaSubSchemaReady = true
   }
 
   private static buildResourceSearchTextExpr() {
@@ -194,6 +318,104 @@ export class DatabaseService {
     this.resourceSearchTextColumnReady = true
   }
 
+  private static async ensureResourceIssueIgnoreSchema() {
+    if (this.resourceIssueIgnoreSchemaReady) {
+      return
+    }
+
+    await db.run(sql`
+      CREATE TABLE IF NOT EXISTS resource_issue_ignore (
+        resource_id text NOT NULL,
+        issue_type text NOT NULL,
+        ignored_at integer DEFAULT (strftime('%s', 'now')),
+        PRIMARY KEY (resource_id, issue_type),
+        FOREIGN KEY (resource_id) REFERENCES resource(id)
+      )
+    `)
+
+    this.resourceIssueIgnoreSchemaReady = true
+  }
+
+  private static buildGovernanceIssueDetail(issueType: GovernanceIssueType, row: GovernanceBaseResourceRow, thresholdDays: number) {
+    if (issueType === 'brokenPath') {
+      const pathLabel = String(row.fileName ?? '').trim() || String(row.basePath ?? '').trim() || '目标路径'
+      return `启动路径或资源目录当前不可用，建议重新扫描或重定位。当前记录：${pathLabel}`
+    }
+
+    if (issueType === 'missingCover') {
+      return '当前资源缺少封面，无法在封面墙与最近添加等依赖封面的场景中正常展示。'
+    }
+
+    const anchorTime = row.lastAccessTime ?? row.createTime
+    const elapsedDays = anchorTime
+      ? Math.max(0, Math.floor((Date.now() - anchorTime.getTime()) / (24 * 60 * 60 * 1000)))
+      : thresholdDays
+    return `已超过 ${thresholdDays} 天未访问，当前约 ${elapsedDays} 天未使用，建议判断是否归档或移出主视图。`
+  }
+
+  private static buildGovernanceIssueActions(issueType: GovernanceIssueType, ignored: boolean) {
+    const restoreActions = ignored
+      ? [{ label: '恢复待处理', tone: 'primary' as const }]
+      : [{ label: '忽略', tone: 'default' as const }]
+
+    if (issueType === 'brokenPath') {
+      return [
+        { label: '查看详情', tone: 'default' as const },
+        { label: '重新扫描', tone: 'primary' as const },
+        { label: '重定位资源', tone: 'warning' as const },
+        ...restoreActions
+      ]
+    }
+
+    if (issueType === 'missingCover') {
+      return [
+        { label: '手动选择封面', tone: 'primary' as const },
+        { label: '查看详情', tone: 'default' as const },
+        ...restoreActions
+      ]
+    }
+
+    return [
+      { label: '查看详情', tone: 'default' as const },
+      { label: '归档并删除本地资源', tone: 'warning' as const },
+      { label: '移除资源', tone: 'error' as const },
+      ...restoreActions
+    ]
+  }
+
+  private static getGovernanceIssueCoverKind(issueType: GovernanceIssueType, ignored: boolean) {
+    if (ignored) return 'ignored'
+    if (issueType === 'brokenPath') return 'broken'
+    if (issueType === 'missingCover') return 'missing'
+    return 'idle'
+  }
+
+  private static async resolveBrokenPathSubtype(row: GovernanceBaseResourceRow): Promise<BrokenPathSubtypeKey> {
+    const normalizedBasePath = String(row.basePath ?? '').trim()
+    const normalizedFileName = String(row.fileName ?? '').trim()
+
+    if (!normalizedBasePath) {
+      return 'directoryMissing'
+    }
+
+    try {
+      const basePathExists = await fs.pathExists(normalizedBasePath)
+      if (!basePathExists) {
+        return 'directoryMissing'
+      }
+
+      if (!normalizedFileName) {
+        return 'directoryMissing'
+      }
+
+      const launchPath = path.join(normalizedBasePath, normalizedFileName)
+      const launchFileExists = await fs.pathExists(launchPath)
+      return launchFileExists ? 'directoryMissing' : 'launchFileMissing'
+    } catch {
+      return normalizedFileName ? 'launchFileMissing' : 'directoryMissing'
+    }
+  }
+
   static async refreshResourceSearchText(resourceId: string, tx?: DbExecutor) {
     const normalizedResourceId = String(resourceId ?? '').trim()
     if (!normalizedResourceId) {
@@ -209,6 +431,10 @@ export class DatabaseService {
       SET ${searchTextColumn} = ${searchTextExpr}
       WHERE ${resource.id} = ${normalizedResourceId}
     `)
+  }
+
+  static async transaction<T>(callback: (tx: DbTransaction) => Promise<T>) {
+    return db.transaction(callback)
   }
 
   private static isMissingCategoryPillColorError(error: unknown) {
@@ -430,6 +656,7 @@ export class DatabaseService {
 
   static async getResourceByCategoryId(categoryId: string, query: ResourceQueryParams = {}) {
     await this.ensureResourceTopAndHomePinSchema()
+    await this.ensureMediaSubSchema()
 
     const startedAt = Date.now()
     const page = Math.max(1, Number(query.page ?? 1))
@@ -796,6 +1023,7 @@ export class DatabaseService {
       coverPath: resource.coverPath,
       basePath: resource.basePath,
       fileName: resource.fileName,
+      missingStatus: resource.missingStatus,
       ifFavorite: resource.ifFavorite,
       rating: resource.rating,
       createTime: resource.createTime,
@@ -970,11 +1198,11 @@ export class DatabaseService {
     ]
   }
 
-  static async getHomePinnedResources(limit = 20) {
+  static async getHomePinnedResources(limit = 12) {
     await this.ensureResourceTopAndHomePinSchema()
     await this.ensureCategoryPillColorColumn()
 
-    const normalizedLimit = Math.max(1, Math.min(20, Math.floor(Number(limit) || 20)))
+    const normalizedLimit = Math.max(1, Math.min(12, Math.floor(Number(limit) || 12)))
 
     return await db
       .select({
@@ -987,6 +1215,7 @@ export class DatabaseService {
         coverPath: resource.coverPath,
         basePath: resource.basePath,
         fileName: resource.fileName,
+        missingStatus: resource.missingStatus,
         pinnedAt: homePin.pinnedAt,
         createTime: resource.createTime,
         accessCount: sql<number>`coalesce(${resourceStat.accessCount}, 0)`,
@@ -1552,6 +1781,364 @@ export class DatabaseService {
     return results
   }
 
+  static async getGovernanceIssueWorkbench(query: GovernanceIssueQuery = {}) {
+    await Promise.all([
+      this.ensureCategoryPillColorColumn(),
+      this.ensureResourceIssueIgnoreSchema(),
+    ])
+
+    const longUnvisitedSetting = await this.getSetting(Settings.DASHBOARD_LONG_UNVISITED_DAYS)
+    const thresholdDays = Math.max(
+      MIN_LONG_UNVISITED_DAYS,
+      Math.min(
+        MAX_LONG_UNVISITED_DAYS,
+        Math.floor(Number(longUnvisitedSetting?.value ?? Settings.DASHBOARD_LONG_UNVISITED_DAYS.default) || MIN_LONG_UNVISITED_DAYS)
+      )
+    )
+
+    const formatDateTime = (value: Date | null) => {
+      if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+        return '暂无'
+      }
+      const year = value.getFullYear()
+      const month = String(value.getMonth() + 1).padStart(2, '0')
+      const day = String(value.getDate()).padStart(2, '0')
+      const hour = String(value.getHours()).padStart(2, '0')
+      const minute = String(value.getMinutes()).padStart(2, '0')
+      return `${year}-${month}-${day} ${hour}:${minute}`
+    }
+
+    const formatDate = (value: Date | null) => {
+      if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+        return '暂无'
+      }
+      const year = value.getFullYear()
+      const month = String(value.getMonth() + 1).padStart(2, '0')
+      const day = String(value.getDate()).padStart(2, '0')
+      return `${year}-${month}-${day}`
+    }
+
+    const isLongUnvisited = (lastAccessTime: Date | null, createdAt: Date | null) => {
+      const anchor = lastAccessTime ?? createdAt
+      if (!(anchor instanceof Date) || Number.isNaN(anchor.getTime())) {
+        return false
+      }
+
+      const elapsedMs = Date.now() - anchor.getTime()
+      return elapsedMs >= thresholdDays * 24 * 60 * 60 * 1000
+    }
+
+    const [
+      baseRows,
+      ignoredRows,
+      totalTagRows,
+      totalCategoryRows,
+    ] = await Promise.all([
+      db
+        .select({
+          id: resource.id,
+          title: resource.title,
+          categoryId: resource.categoryId,
+          categoryName: category.name,
+          categoryEmoji: category.emoji,
+          categoryPillColor: category.pillColor,
+          coverPath: resource.coverPath,
+          description: resource.description,
+          basePath: resource.basePath,
+          fileName: resource.fileName,
+          favorite: resource.ifFavorite,
+          rating: resource.rating,
+          missingStatus: resource.missingStatus,
+          createTime: resource.createTime,
+          lastAccessTime: resourceStat.lastAccessTime,
+          tagsText: sql<string>`(
+            select group_concat(${tag.name}, '||')
+            from ${tagResource}
+            inner join ${tag} on ${tag.id} = ${tagResource.tagId}
+            where ${tagResource.resourceId} = ${resource.id}
+              and coalesce(${tag.isDeleted}, 0) = 0
+          )`
+        })
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
+        .where(and(
+          eq(resource.isDeleted, false),
+          eq(category.isDeleted, false)
+        )),
+      db
+        .select({
+          resourceId: resourceIssueIgnore.resourceId,
+          issueType: resourceIssueIgnore.issueType,
+          ignoredAt: resourceIssueIgnore.ignoredAt
+        })
+        .from(resourceIssueIgnore),
+      db
+        .select({ total: count(tag.id) })
+        .from(tag)
+        .where(eq(tag.isDeleted, false)),
+      db
+        .select({ total: count(category.id) })
+        .from(category)
+        .where(eq(category.isDeleted, false))
+    ])
+
+    const ignoredSet = new Set(
+      ignoredRows
+        .map((item) => {
+          const resourceId = String(item.resourceId ?? '').trim()
+          const issueType = String(item.issueType ?? '').trim()
+          return resourceId && issueType ? `${resourceId}:${issueType}` : ''
+        })
+        .filter(Boolean)
+    )
+
+    const issueEntries = (await Promise.all(baseRows.map(async (row) => {
+      const tags = String(row.tagsText ?? '')
+        .split('||')
+        .map((item) => item.trim())
+        .filter(Boolean)
+
+      const activeIssueTypes: GovernanceIssueType[] = []
+      if (Boolean(row.missingStatus)) {
+        activeIssueTypes.push('brokenPath')
+      }
+      if (!String(row.coverPath ?? '').trim()) {
+        activeIssueTypes.push('missingCover')
+      }
+      if (isLongUnvisited(row.lastAccessTime, row.createTime)) {
+        activeIssueTypes.push('longUnvisited')
+      }
+
+      return await Promise.all(activeIssueTypes.map(async (issueType) => {
+        const ignored = ignoredSet.has(`${row.id}:${issueType}`)
+        const numericRating = Number(row.rating ?? -1)
+        const normalizedRating = Number.isFinite(numericRating) && numericRating >= 0 ? numericRating : 0
+        const issueSubType = issueType === 'brokenPath'
+          ? await this.resolveBrokenPathSubtype(row)
+          : null
+        const issueSubTypeLabel = issueSubType === 'directoryMissing'
+          ? '目录失效'
+          : issueSubType === 'launchFileMissing'
+            ? '启动文件丢失'
+            : ''
+
+        return {
+          id: `${row.id}:${issueType}`,
+          resourceId: String(row.id ?? '').trim(),
+          title: String(row.title ?? '').trim() || '未命名资源',
+          category: String(row.categoryName ?? '').trim() || '未分类',
+          categoryId: String(row.categoryId ?? '').trim(),
+          categoryEmoji: String(row.categoryEmoji ?? '').trim(),
+          categoryColor: String(row.categoryPillColor ?? '').trim() || '#737373',
+          coverPath: String(row.coverPath ?? '').trim(),
+          tags,
+          issueType,
+          issueSubType,
+          issueSubTypeLabel,
+          issueTypeLabel: issueType === 'brokenPath'
+            ? '路径失效'
+            : issueType === 'missingCover'
+              ? '无封面'
+              : '长期未访问',
+          issueDetail: this.buildGovernanceIssueDetail(issueType, row, thresholdDays),
+          recentAccess: formatDateTime(row.lastAccessTime),
+          createdAt: formatDate(row.createTime),
+          status: ignored ? '已忽略' : '待处理',
+          coverKind: this.getGovernanceIssueCoverKind(issueType, ignored),
+          coverLabel: ignored
+            ? '已忽略'
+            : issueType === 'brokenPath'
+              ? '失效'
+              : issueType === 'missingCover'
+                ? '无封面'
+                : '沉睡',
+          rating: normalizedRating.toFixed(1),
+          ratingValue: normalizedRating,
+          favorite: Boolean(row.favorite),
+          lastAccessTimestamp: row.lastAccessTime?.getTime?.() ?? 0,
+          createdTimestamp: row.createTime?.getTime?.() ?? 0,
+          actions: this.buildGovernanceIssueActions(issueType, ignored)
+        }
+      }))
+    }))).flat()
+
+    const tabCounts = {
+      all: issueEntries.length,
+      brokenPath: issueEntries.filter((item) => item.issueType === 'brokenPath').length,
+      missingCover: issueEntries.filter((item) => item.issueType === 'missingCover').length,
+      longUnvisited: issueEntries.filter((item) => item.issueType === 'longUnvisited').length,
+      ignored: issueEntries.filter((item) => item.status === '已忽略').length
+    }
+
+    const brokenPathSubCounts = {
+      all: issueEntries.filter((item) => item.issueType === 'brokenPath').length,
+      directoryMissing: issueEntries.filter((item) => item.issueType === 'brokenPath' && item.issueSubType === 'directoryMissing').length,
+      launchFileMissing: issueEntries.filter((item) => item.issueType === 'brokenPath' && item.issueSubType === 'launchFileMissing').length
+    }
+
+    const normalizedIssueType = query.issueType ?? 'all'
+    const normalizedBrokenPathSubtype = query.brokenPathSubtype ?? 'all'
+    const filteredItems = issueEntries
+      .filter((item) => {
+        const keyword = String(query.keyword ?? '').trim().toLowerCase()
+        const normalizedCategory = String(query.category ?? 'all').trim()
+        const normalizedTag = String(query.tag ?? 'all').trim()
+        const normalizedStatus = String(query.status ?? 'all').trim()
+        const normalizedRating = String(query.rating ?? 'all').trim()
+
+        const matchesTab = normalizedIssueType === 'all'
+          ? true
+          : normalizedIssueType === 'ignored'
+            ? item.status === '已忽略'
+            : item.issueType === normalizedIssueType
+        const matchesBrokenPathSubtype = normalizedIssueType !== 'brokenPath'
+          || normalizedBrokenPathSubtype === 'all'
+          || item.issueSubType === normalizedBrokenPathSubtype
+
+        const matchesKeyword = !keyword || [
+          item.title,
+          item.category,
+          item.issueTypeLabel,
+          item.issueDetail,
+          ...item.tags
+        ].join(' ').toLowerCase().includes(keyword)
+
+        const matchesCategory = normalizedCategory === 'all' || item.category === normalizedCategory
+        const matchesTag = normalizedTag === 'all' || item.tags.includes(normalizedTag)
+        const matchesStatus = normalizedStatus === 'all' || item.status === normalizedStatus
+        const matchesRating = normalizedRating === 'all'
+          || (normalizedRating === '4+' && item.ratingValue >= 4)
+          || (normalizedRating === '3+' && item.ratingValue >= 3)
+          || (normalizedRating === '0-3' && item.ratingValue < 3)
+        const matchesFavorite = !query.onlyFavorite || item.favorite
+        const matchesRecent = !query.onlyRecent || item.issueType === 'longUnvisited'
+
+        return matchesTab
+          && matchesBrokenPathSubtype
+          && matchesKeyword
+          && matchesCategory
+          && matchesTag
+          && matchesStatus
+          && matchesRating
+          && matchesFavorite
+          && matchesRecent
+      })
+      .sort((left, right) => {
+        if (query.sortBy === 'recent') {
+          return right.lastAccessTimestamp - left.lastAccessTimestamp
+        }
+
+        if (query.sortBy === 'created') {
+          return right.createdTimestamp - left.createdTimestamp
+        }
+
+        if (left.status !== right.status) {
+          return left.status === '待处理' ? -1 : 1
+        }
+
+        if (left.favorite !== right.favorite) {
+          return left.favorite ? -1 : 1
+        }
+
+        if (left.ratingValue !== right.ratingValue) {
+          return right.ratingValue - left.ratingValue
+        }
+
+        return right.createdTimestamp - left.createdTimestamp
+      })
+
+    const categoryOrderRows = await db
+      .select({
+        name: category.name,
+        sort: category.sort
+      })
+      .from(category)
+      .where(eq(category.isDeleted, false))
+      .orderBy(asc(category.sort), asc(category.name))
+
+    const visibleCategoryNames = new Set(
+      issueEntries
+        .map((item) => String(item.category ?? '').trim())
+        .filter(Boolean)
+    )
+    const orderedCategoryNames = categoryOrderRows
+      .map((item) => String(item.name ?? '').trim())
+      .filter((name) => name && visibleCategoryNames.has(name))
+    const missingCategoryNames = Array.from(visibleCategoryNames)
+      .filter((name) => !orderedCategoryNames.includes(name))
+      .sort((left, right) => left.localeCompare(right, 'zh-Hans-CN'))
+    const categoryOptions = [...orderedCategoryNames, ...missingCategoryNames]
+      .map((name) => ({ label: name, value: name }))
+
+    const tagOptions = Array.from(new Set(issueEntries.flatMap((item) => item.tags)))
+      .filter(Boolean)
+      .sort((left, right) => left.localeCompare(right, 'zh-Hans-CN'))
+      .map((name) => ({ label: name, value: name }))
+
+    return {
+      summary: {
+        allIssueCount: tabCounts.all,
+        brokenPathCount: tabCounts.brokenPath,
+        missingCoverCount: tabCounts.missingCover,
+        longUnvisitedCount: tabCounts.longUnvisited,
+        ignoredCount: tabCounts.ignored,
+        totalTagCount: Number(totalTagRows[0]?.total ?? 0),
+        totalCategoryCount: Number(totalCategoryRows[0]?.total ?? 0),
+        archiveCandidateCount: tabCounts.longUnvisited
+      },
+      tabs: [
+        { key: 'all', label: '全部', count: tabCounts.all },
+        { key: 'brokenPath', label: '路径失效', count: tabCounts.brokenPath },
+        { key: 'missingCover', label: '无封面', count: tabCounts.missingCover },
+        { key: 'longUnvisited', label: '长期未访问', count: tabCounts.longUnvisited },
+        { key: 'ignored', label: '已忽略问题', count: tabCounts.ignored }
+      ],
+      brokenPathSubTabs: [
+        { key: 'all', label: '全部', count: brokenPathSubCounts.all },
+        { key: 'directoryMissing', label: '目录失效', count: brokenPathSubCounts.directoryMissing },
+        { key: 'launchFileMissing', label: '启动文件丢失', count: brokenPathSubCounts.launchFileMissing }
+      ],
+      filters: {
+        categories: [{ label: '全部分类', value: 'all' }, ...categoryOptions],
+        tags: [{ label: '全部标签', value: 'all' }, ...tagOptions]
+      },
+      items: filteredItems
+    }
+  }
+
+  static async setGovernanceIssueIgnored(resourceId: string, issueType: GovernanceIssueType, ignored: boolean, tx?: DbExecutor) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    if (!normalizedResourceId) {
+      return
+    }
+
+    await this.ensureResourceIssueIgnoreSchema()
+    const executor = tx ?? db
+
+    if (ignored) {
+      await executor
+        .insert(resourceIssueIgnore)
+        .values({
+          resourceId: normalizedResourceId,
+          issueType,
+          ignoredAt: new Date()
+        })
+        .onConflictDoUpdate({
+          target: [resourceIssueIgnore.resourceId, resourceIssueIgnore.issueType],
+          set: { ignoredAt: new Date() }
+        })
+      return
+    }
+
+    await executor
+      .delete(resourceIssueIgnore)
+      .where(and(
+        eq(resourceIssueIgnore.resourceId, normalizedResourceId),
+        eq(resourceIssueIgnore.issueType, issueType)
+      ))
+  }
+
   static async getDashboardAddedTrend(days = 14) {
     const normalizedDays = Math.max(7, Math.min(30, Math.floor(Number(days) || 14)))
     const rows = await db
@@ -1609,6 +2196,7 @@ export class DatabaseService {
         categoryName: category.name,
         categoryEmoji: category.emoji,
         categoryPillColor: category.pillColor,
+        missingStatus: resource.missingStatus,
         startTime: resourceLog.startTime,
         endTime: resourceLog.endTime,
         duration: resourceLog.duration,
@@ -2532,12 +3120,16 @@ export class DatabaseService {
     }
 
     return await db.query.resource.findFirst({
-      where: and(...conditions)
+      where: and(...conditions),
+      with: {
+        softwareMeta: true
+      }
     })
   }
 
   static async getResourceDetailById(resourceId: string) {
     await this.ensureResourceTopAndHomePinSchema()
+    await this.ensureMediaSubSchema()
 
     const item = await db.query.resource.findFirst({
       where: and(

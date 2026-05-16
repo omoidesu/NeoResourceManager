@@ -4,16 +4,45 @@ directories:
   buildResources: build
 afterPack: scripts/after-pack-prune-media-binaries.cjs
 files:
+  - package.json
+  - out/**
+  - node_modules/**
   - '!**/.vscode/*'
+  - '!.codex{,/**}'
+  - '!.gemini{,/**}'
+  - '!.playwright-mcp{,/**}'
+  - '!doc{,/**}'
+  - '!dist{,/**}'
+  - '!log{,/**}'
   - '!plugin{,/**}'
   - '!cache{,/**}'
   - '!data.db'
+  - '!data.game.db'
   - '!tmp-*'
   - '!src/*'
+  - '!out/pencil-export{,/**}'
+  - '!out/pencil-export-test{,/**}'
+  - '!out/pencil-export-test2{,/**}'
+  - '!out/pencil-export-test4{,/**}'
   - '!electron.vite.config.{js,ts,mjs,cjs}'
-  - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md,package-lock.json}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - '!node_modules/**/{test,tests,__tests__,__mocks__,coverage,docs,doc,example,examples,demo,demos,benchmark,benchmarks,.github}/**'
+  - '!node_modules/**/*.spec.*'
+  - '!node_modules/**/*.test.*'
+  - '!node_modules/**/*.md'
+  - '!node_modules/**/*.markdown'
+  - '!node_modules/**/.npmignore'
+  - '!node_modules/**/.editorconfig'
+  - '!node_modules/**/.prettierrc*'
+  - '!node_modules/**/.eslintrc*'
+  - '!node_modules/**/tsconfig*.json'
+  - '!node_modules/**/vite.config.*'
+  - '!node_modules/**/vitest.config.*'
+  - '!node_modules/**/jest.config.*'
+  - '!node_modules/**/webpack.config.*'
+  - '!node_modules/**/*.map'
 asarUnpack:
   - resources/**
 extraResources:

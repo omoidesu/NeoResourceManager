@@ -80,12 +80,12 @@ const coverWallContextMenuOptions = computed(() => {
   const isPinned = Boolean(item?.isPinned)
   const isPinning = String(props.homePinnedAddingId ?? '').trim() === String(item?.id ?? '').trim()
   const pinnedCount = Math.max(0, Number(props.homePinnedCount ?? 0))
-  const pinnedMaxCount = Math.max(1, Number(props.homePinnedMaxCount ?? 20))
+  const pinnedMaxCount = Math.max(1, Number(props.homePinnedMaxCount ?? 12))
   const isPinnedLimitReached = !isPinned && pinnedCount >= pinnedMaxCount
   return [
     {
       key: 'pin-home',
-      label: isPinned ? '已固定' : (isPinning ? '固定中' : (isPinnedLimitReached ? '首页固定已满' : '固定到首页')),
+      label: isPinned ? '已添加' : (isPinning ? '添加中' : (isPinnedLimitReached ? '快速启动已满' : '添加至快速启动')),
       disabled: isPinned || isPinning || isPinnedLimitReached || !String(item?.id ?? '').trim()
     }
   ]
@@ -228,6 +228,7 @@ onBeforeUnmount(() => {
         >
           <div class="cover-card__art" :class="{ 'is-fallback': !item.coverUrl }">
             <span class="cover-card__chip">{{ item.categoryEmoji }} {{ item.categoryName }}</span>
+            <span v-if="item.missingStatus" class="cover-card__invalid-badge" aria-label="资源失效" title="资源失效">🚫</span>
             <span v-if="!item.coverUrl" class="cover-card__fallback-title">{{ item.title }}</span>
           </div>
         </button>
@@ -591,6 +592,25 @@ button.soft-chip:focus-visible {
   color: var(--home-overlay-text-strong);
   font-size: 11px;
   font-weight: 800;
+  backdrop-filter: blur(10px);
+}
+
+.cover-card__invalid-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--home-overlay-border);
+  border-radius: 999px;
+  background: var(--home-overlay-bg);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
+  font-size: 16px;
+  line-height: 1;
   backdrop-filter: blur(10px);
 }
 

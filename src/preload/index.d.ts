@@ -79,6 +79,7 @@ declare global {
         getFavoriteResourceCountByCategoryId: (categoryId: string) => Promise<number>,
         getCompletedResourceCountByCategoryId: (categoryId: string) => Promise<number>,
         getRunningResourceCountByCategoryId: (categoryId: string) => Promise<number>,
+        getGovernanceIssueWorkbench: (query?: any) => Promise<any>,
         getTypeByCategoryId: (categoryId: string) => Promise<any>,
         getTagByCategoryId: (categoryId: string) => Promise<any>,
         getSelectDictData: (dictType: string) => Promise<any>,
@@ -196,6 +197,11 @@ declare global {
         updateResourceCompleted: (resourceId: string, completed: boolean) => Promise<any>,
         updateResourceTop: (resourceId: string, top: boolean) => Promise<any>,
         updateResourceHomePin: (resourceId: string, pinned: boolean) => Promise<any>,
+        setGovernanceIssueIgnored: (resourceId: string, issueType: 'brokenPath' | 'missingCover' | 'longUnvisited', ignored: boolean) => Promise<any>,
+        batchSetGovernanceIssueIgnored: (
+          items: Array<{ resourceId: string; issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' }>,
+          ignored: boolean
+        ) => Promise<any>,
         startBackgroundServices: (reason?: string, delayMs?: number) => Promise<boolean>,
         startNotificationPush: () => Promise<boolean>,
         onNotificationPush: (listener: (message: AppNotificationMessage) => void) => () => void,

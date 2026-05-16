@@ -10,6 +10,7 @@ import { parseFile } from 'music-metadata'
 import { DatabaseService } from './database.service'
 import { Settings } from '../../common/constants'
 const ffprobeStatic = require('ffprobe-static') as { path?: string }
+const ffmpegPath = require('ffmpeg-static') as string | null
 
 const LOCAL_FILE_PROTOCOL = 'neo-resource-file'
 const AUDIO_TRANSCODE_PROTOCOL = 'neo-resource-audio'
@@ -89,6 +90,96 @@ async function readVideoDurationWithFfprobe(filePath: string) {
   } catch {
     return 0
   }
+}
+
+type VideoCodecProbeResult = {
+  videoCodec: string
+  audioCodec: string
+}
+
+async function readVideoCodecsWithFfprobe(filePath: string): Promise<VideoCodecProbeResult> {
+  const ffprobePath = String(ffprobeStatic?.path ?? '').trim()
+  if (!ffprobePath || !fs.existsSync(ffprobePath)) {
+    return {
+      videoCodec: '',
+      audioCodec: ''
+    }
+  }
+
+  try {
+    const output = await execFileText(
+      ffprobePath,
+      [
+        '-v',
+        'error',
+        '-show_entries',
+        'stream=codec_type,codec_name',
+        '-of',
+        'json',
+        filePath
+      ]
+    )
+    const parsed = JSON.parse(String(output ?? '{}')) as {
+      streams?: Array<{ codec_type?: string; codec_name?: string }>
+    }
+    const streams = Array.isArray(parsed?.streams) ? parsed.streams : []
+    const videoCodec = String(
+      streams.find((stream) => String(stream?.codec_type ?? '') === 'video')?.codec_name ?? ''
+    ).trim().toLowerCase()
+    const audioCodec = String(
+      streams.find((stream) => String(stream?.codec_type ?? '') === 'audio')?.codec_name ?? ''
+    ).trim().toLowerCase()
+
+    return {
+      videoCodec,
+      audioCodec
+    }
+  } catch {
+    return {
+      videoCodec: '',
+      audioCodec: ''
+    }
+  }
+}
+
+function canPlayVideoNativelyByContainerAndCodec(filePath: string, codecProbe: VideoCodecProbeResult) {
+  const extension = path.extname(String(filePath ?? '').trim()).toLowerCase()
+  const videoCodec = String(codecProbe.videoCodec ?? '').trim().toLowerCase()
+  const audioCodec = String(codecProbe.audioCodec ?? '').trim().toLowerCase()
+
+  if (extension !== '.mkv') {
+    return false
+  }
+
+  const supportedVideoCodecs = new Set(['h264', 'avc1', 'vp8', 'vp9', 'av1'])
+  const supportedAudioCodecs = new Set(['aac', 'mp3', 'vorbis', 'opus'])
+
+  if (!supportedVideoCodecs.has(videoCodec)) {
+    return false
+  }
+
+  if (!audioCodec) {
+    return true
+  }
+
+  return supportedAudioCodecs.has(audioCodec)
+}
+
+function canRemuxVideoToMp4(codecProbe: VideoCodecProbeResult) {
+  const videoCodec = String(codecProbe.videoCodec ?? '').trim().toLowerCase()
+  const audioCodec = String(codecProbe.audioCodec ?? '').trim().toLowerCase()
+  const supportedVideoCodecs = new Set(['h264', 'avc1'])
+  const supportedAudioCodecs = new Set(['aac', 'mp3'])
+
+  if (!supportedVideoCodecs.has(videoCodec)) {
+    return false
+  }
+
+  if (!audioCodec) {
+    return true
+  }
+
+  return supportedAudioCodecs.has(audioCodec)
 }
 
 function isHugeImageProbe(probe: Awaited<ReturnType<typeof readImageProbe>>) {
@@ -639,12 +730,27 @@ export class DialogService {
     const mediaMeta = await this.readMediaMetadata(normalizedPath, true)
     const sourceDuration = await readVideoDurationWithFfprobe(normalizedPath)
       || Math.max(0, Number(mediaMeta.duration ?? 0))
-    if (!this.VIDEO_TRANSCODE_EXTENSIONS.has(extension)) {
+    const codecProbe = await readVideoCodecsWithFfprobe(normalizedPath)
+    const shouldPlayNatively = !this.VIDEO_TRANSCODE_EXTENSIONS.has(extension)
+      || canPlayVideoNativelyByContainerAndCodec(normalizedPath, codecProbe)
+
+    if (shouldPlayNatively) {
       return {
         url: toLocalFileProtocolUrl(normalizedPath),
         transcoded: false,
         sourcePath: normalizedPath,
         playbackPath: normalizedPath,
+        duration: sourceDuration
+      }
+    }
+
+    const cachedPlaybackPath = await this.ensureVideoTranscodeCache(normalizedPath, codecProbe)
+    if (cachedPlaybackPath && fs.existsSync(cachedPlaybackPath)) {
+      return {
+        url: toLocalFileProtocolUrl(cachedPlaybackPath),
+        transcoded: false,
+        sourcePath: normalizedPath,
+        playbackPath: cachedPlaybackPath,
         duration: sourceDuration
       }
     }
@@ -1163,6 +1269,88 @@ export class DialogService {
 
   private static async getAudioTranscodeCacheRoot() {
     return path.join(await this.getCacheRoot(), 'audio-transcodes')
+  }
+
+  private static async getVideoTranscodeCacheRoot() {
+    return path.join(await this.getCacheRoot(), 'video-transcodes')
+  }
+
+  private static async getVideoTranscodeCachePath(filePath: string, codecProbe: VideoCodecProbeResult) {
+    const fileStat = await fs.promises.stat(filePath)
+    const cacheRoot = await this.getVideoTranscodeCacheRoot()
+    const cacheKey = createHash('sha1')
+      .update(JSON.stringify({
+        filePath: path.normalize(filePath).toLowerCase(),
+        size: fileStat.size,
+        mtimeMs: Math.trunc(fileStat.mtimeMs),
+        videoCodec: codecProbe.videoCodec,
+        audioCodec: codecProbe.audioCodec,
+        format: canRemuxVideoToMp4(codecProbe) ? 'mp4-remux' : 'mp4-transcode'
+      }))
+      .digest('hex')
+
+    return path.join(cacheRoot, `${cacheKey}.mp4`)
+  }
+
+  private static async ensureVideoTranscodeCache(filePath: string, codecProbe: VideoCodecProbeResult) {
+    const normalizedPath = path.normalize(String(filePath ?? '').trim())
+    const resolvedFfmpegPath = String(ffmpegPath ?? '').trim()
+    if (!normalizedPath || !fs.existsSync(normalizedPath) || !resolvedFfmpegPath || !fs.existsSync(resolvedFfmpegPath)) {
+      return null
+    }
+
+    const cacheFilePath = await this.getVideoTranscodeCachePath(normalizedPath, codecProbe)
+    if (fs.existsSync(cacheFilePath)) {
+      return cacheFilePath
+    }
+
+    await fs.promises.mkdir(path.dirname(cacheFilePath), { recursive: true })
+
+    const ffmpegArgs = canRemuxVideoToMp4(codecProbe)
+      ? [
+          '-y',
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-i',
+          normalizedPath,
+          '-map_metadata',
+          '0',
+          '-c',
+          'copy',
+          '-movflags',
+          '+faststart',
+          cacheFilePath
+        ]
+      : [
+          '-y',
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-i',
+          normalizedPath,
+          '-map_metadata',
+          '0',
+          '-c:v',
+          'libx264',
+          '-preset',
+          'veryfast',
+          '-crf',
+          '23',
+          '-pix_fmt',
+          'yuv420p',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '192k',
+          '-movflags',
+          '+faststart',
+          cacheFilePath
+        ]
+
+    await execFileText(resolvedFfmpegPath, ffmpegArgs, 10 * 60 * 1000)
+
+    return fs.existsSync(cacheFilePath) ? cacheFilePath : null
   }
 
   private static async getCacheRoot() {

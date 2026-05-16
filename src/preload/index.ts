@@ -87,6 +87,7 @@ const api = {
     getFavoriteResourceCountByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-favorite-resource-count-by-category-id', categoryId),
     getCompletedResourceCountByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-completed-resource-count-by-category-id', categoryId),
     getRunningResourceCountByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-running-resource-count-by-category-id', categoryId),
+    getGovernanceIssueWorkbench: (query?: any) => ipcRenderer.invoke('db:get-governance-issue-workbench', query),
 
     // type
     getTypeByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-type-by-category-id', categoryId),
@@ -223,6 +224,12 @@ const api = {
       ipcRenderer.invoke('service:update-resource-top', resourceId, top),
     updateResourceHomePin: (resourceId: string, pinned: boolean) =>
       ipcRenderer.invoke('service:update-resource-home-pin', resourceId, pinned),
+    setGovernanceIssueIgnored: (resourceId: string, issueType: 'brokenPath' | 'missingCover' | 'longUnvisited', ignored: boolean) =>
+      ipcRenderer.invoke('service:set-governance-issue-ignored', resourceId, issueType, ignored),
+    batchSetGovernanceIssueIgnored: (
+      items: Array<{ resourceId: string; issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' }>,
+      ignored: boolean
+    ) => ipcRenderer.invoke('service:batch-set-governance-issue-ignored', items, ignored),
     startBackgroundServices: (reason?: string, delayMs?: number) =>
       ipcRenderer.invoke('service:start-background-services', reason, delayMs),
     startNotificationPush: () => ipcRenderer.invoke('service:start-notification-push'),

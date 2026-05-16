@@ -77,6 +77,7 @@ type NextPlayCard = {
   rating: number
   createTime: number
   accessCount: number
+  missingStatus?: boolean
 }
 type HomePinnedCard = {
   id: string
@@ -93,6 +94,7 @@ type HomePinnedCard = {
   lastAccessTime: number | null
   accessCount: number
   meta: string
+  missingStatus?: boolean
 }
 type HomePinnedAddCandidate = {
   id: string
@@ -119,6 +121,7 @@ type ContinueCard = {
   note: string
   action: string
   tone: Tone
+  missingStatus?: boolean
 }
 type DashboardCoverWallRuntimeExpose = {
   refreshCoverWallResource?: (resourceId: string) => Promise<void> | void
@@ -381,7 +384,7 @@ const homePinnedLaunchingId = ref('')
 const homePinnedDeletingId = ref('')
 const homePinnedAddingId = ref('')
 const coverWallLaunchingId = ref('')
-const homePinnedMaxCount = 20
+const homePinnedMaxCount = 12
 const homePinnedAddCandidates = ref<HomePinnedAddCandidate[]>([])
 const homePinnedAddCandidatesLoading = ref(false)
 const homePinnedAddKeyword = ref('')
@@ -768,7 +771,7 @@ const loadHomePinnedAddCandidates = async (keyword = '') => {
   } catch (error) {
     homePinnedAddCandidates.value = []
     homePinnedAddTotal.value = 0
-    notify('error', '添加首页固定', error instanceof Error ? error.message : '读取候选资源失败')
+    notify('error', '添加快速启动', error instanceof Error ? error.message : '读取候选资源失败')
   } finally {
     homePinnedAddCandidatesLoading.value = false
   }
@@ -904,9 +907,10 @@ const hydrateNextPlayCards = async (rows: any[]) => {
       basePath: String(item?.basePath ?? ''),
       fileName: String(item?.fileName ?? ''),
       favorite: Boolean(item?.ifFavorite),
-        rating: Number.isFinite(ratingValue) ? ratingValue : -1,
-        createTime: Number.isFinite(createTimeValue) ? createTimeValue : 0,
-        accessCount: Number.isFinite(accessCountValue) ? accessCountValue : 0
+      missingStatus: Boolean(item?.missingStatus),
+      rating: Number.isFinite(ratingValue) ? ratingValue : -1,
+      createTime: Number.isFinite(createTimeValue) ? createTimeValue : 0,
+      accessCount: Number.isFinite(accessCountValue) ? accessCountValue : 0
     }
     items.push(candidate)
   }
@@ -934,7 +938,8 @@ const loadNextPlayCards = async (forceRefresh = false) => {
         ...item,
         order: Math.max(1, Number(item?.order ?? index + 1)),
         categoryName: String(item?.categoryName ?? '').trim() || '未分类',
-        categoryEmoji: String(item?.categoryEmoji ?? '').trim() || '📁'
+        categoryEmoji: String(item?.categoryEmoji ?? '').trim() || '📁',
+        missingStatus: Boolean(item?.missingStatus)
       }))
     buildNextPlayVisible()
     return
@@ -1008,6 +1013,10 @@ const launchNextPlayResource = async (item: NextPlayCard | null) => {
   const resourceId = String(item?.id ?? '').trim()
   const categoryId = String(item?.categoryId ?? '').trim()
   if (!resourceId || !categoryId || nextPlayLaunchingId.value === resourceId) {
+    return
+  }
+  if (item?.missingStatus) {
+    notify('warning', '接下来看看', '该资源已失效，无法启动')
     return
   }
 
@@ -2175,6 +2184,10 @@ const launchContinueCard = async (card: ContinueCard) => {
   if (!resourceId || continueLaunchingId.value === resourceId) {
     return
   }
+  if (card?.missingStatus) {
+    notify('warning', '继续使用', '该资源已失效，无法启动')
+    return
+  }
 
   continueLaunchingId.value = resourceId
   try {
@@ -2709,6 +2722,10 @@ const launchHomePinnedResource = async (item: HomePinnedCard) => {
   if (!resourceId || !categoryId || homePinnedLaunchingId.value === resourceId) {
     return
   }
+  if (item?.missingStatus) {
+    notify('warning', '快速启动', '该资源已失效，无法启动')
+    return
+  }
 
   homePinnedLaunchingId.value = resourceId
   try {
@@ -2721,7 +2738,7 @@ const launchHomePinnedResource = async (item: HomePinnedCard) => {
 
     const resource = detailResult?.data ?? detailResult
     if (!resource) {
-      notify('error', '首页固定', '未能读取资源详情')
+      notify('error', '快速启动', '未能读取资源详情')
       return
     }
 
@@ -2729,7 +2746,7 @@ const launchHomePinnedResource = async (item: HomePinnedCard) => {
     const categoryProfile = resolveCategoryProfile(categoryInfo)
     await openHomeResourceByCategoryProfile(resource, categoryProfile)
   } catch (error) {
-    notify('error', '首页固定', error instanceof Error ? error.message : '打开资源失败')
+    notify('error', '快速启动', error instanceof Error ? error.message : '打开资源失败')
   } finally {
     homePinnedLaunchingId.value = ''
   }
@@ -2778,7 +2795,7 @@ const handleRemoveHomePin = async (item: HomePinnedCard) => {
     const result = await window.api.service.updateResourceHomePin(resourceId, false)
     const resultType = result?.type ?? 'info'
     const resultMessage = result?.message ?? '操作完成'
-    notify(resultType, '取消首页固定', resultMessage)
+    notify(resultType, '取消快速启动', resultMessage)
 
     if (resultType !== 'error') {
       coverWallRuntimeRef.value?.updateCoverWallPinnedState?.(resourceId, false)
@@ -2787,7 +2804,7 @@ const handleRemoveHomePin = async (item: HomePinnedCard) => {
       await refreshCoverWallResource(resourceId)
     }
   } catch (error) {
-    notify('error', '取消首页固定', error instanceof Error ? error.message : '移除失败')
+    notify('error', '取消快速启动', error instanceof Error ? error.message : '移除失败')
   } finally {
     homePinnedDeletingId.value = ''
   }
@@ -2819,12 +2836,12 @@ const handleAddHomePin = async (item: HomePinnedAddCandidate) => {
   const pinnedLimitReached = !alreadyPinned && homePinnedCards.value.length >= homePinnedMaxCount
   if (!resourceId || homePinnedAddingId.value === resourceId || alreadyPinned) {
     if (alreadyPinned) {
-      notify('info', '固定到首页', '该资源已经固定到首页')
+      notify('info', '快速启动', '该资源已经添加到快速启动')
     }
     return
   }
   if (pinnedLimitReached) {
-    notify('warning', '固定到首页', `首页固定最多支持 ${homePinnedMaxCount} 个资源，请先移除部分固定项`)
+    notify('warning', '快速启动', `快速启动最多支持 ${homePinnedMaxCount} 个资源，请先移除部分资源`)
     return
   }
 
@@ -2833,7 +2850,7 @@ const handleAddHomePin = async (item: HomePinnedAddCandidate) => {
     const result = await window.api.service.updateResourceHomePin(resourceId, true)
     const resultType = result?.type ?? 'info'
     const resultMessage = result?.message ?? '操作完成'
-    notify(resultType, '固定到首页', resultMessage)
+    notify(resultType, '添加至快速启动', resultMessage)
 
     if (resultType !== 'error') {
       coverWallRuntimeRef.value?.updateCoverWallPinnedState?.(resourceId, true)
@@ -2842,7 +2859,7 @@ const handleAddHomePin = async (item: HomePinnedAddCandidate) => {
       await refreshCoverWallResource(resourceId)
     }
   } catch (error) {
-    notify('error', '固定到首页', error instanceof Error ? error.message : '固定失败')
+    notify('error', '快速启动', error instanceof Error ? error.message : '添加失败')
   } finally {
     homePinnedAddingId.value = ''
   }
@@ -2946,6 +2963,7 @@ useDashboardDeferredTasks({
                     :color="getContinueCardColor(card)"
                     class="continue-card__action-button"
                     :loading="continueLaunchingId === card.id"
+                    :disabled="Boolean(card.missingStatus)"
                     @click.stop="launchContinueCard(card)"
                   >
                     {{ card.action }}

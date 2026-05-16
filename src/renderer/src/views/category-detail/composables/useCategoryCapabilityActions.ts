@@ -89,6 +89,11 @@ export const useCategoryCapabilityActions = (options: UseCategoryCapabilityActio
       return
     }
 
+    if (resource?.missingStatus) {
+      options.showNotifyByType('warning', '启动失败', '当前资源已失效，无法启动')
+      return
+    }
+
     if (options.getWebsiteResourceUrl(resource)) {
       await handleOpenWebsiteResource(resource)
       return

@@ -18,6 +18,7 @@ type HomePinnedCardLike = {
   lastAccessTime: number | null
   accessCount: number
   meta: string
+  missingStatus?: boolean
 }
 
 type ContinueCardLike = {
@@ -35,6 +36,7 @@ type ContinueCardLike = {
   note: string
   action: string
   tone: Tone
+  missingStatus?: boolean
 }
 
 type MeasureDashboardTask = (
@@ -112,14 +114,14 @@ export const useDashboardPinnedContinue = ({
       return `${categoryName} · ${pinnedAt}固定`
     }
 
-    return `${categoryName} · 已固定到首页`
+    return `${categoryName} · 已添加至快速启动`
   }
 
   const loadHomePinnedCards = async () => {
     homePinnedLoading.value = true
     try {
       await measureDashboardTask('loadHomePinnedCards', async () => {
-        const items = await window.api.db.getHomePinnedResources(20)
+        const items = await window.api.db.getHomePinnedResources(12)
         homePinnedCards.value = Array.isArray(items)
           ? await Promise.all(items.map(async (item: any) => {
             const coverPath = String(item?.coverPath ?? '').trim()
@@ -144,6 +146,7 @@ export const useDashboardPinnedContinue = ({
               coverUrl,
               basePath: String(item?.basePath ?? ''),
               fileName: String(item?.fileName ?? ''),
+              missingStatus: Boolean(item?.missingStatus),
               pinnedAt: normalizeDateValue(item?.pinnedAt)?.getTime() ?? null,
               createTime: normalizeDateValue(item?.createTime)?.getTime() ?? null,
               lastAccessTime: normalizeDateValue(item?.lastAccessTime)?.getTime() ?? null,
@@ -227,7 +230,8 @@ export const useDashboardPinnedContinue = ({
             state: isRunning ? '正在运行' : `运行 ${formatRuntime(duration)}`,
             note: isRunning ? '当前还没有结束记录' : formatLogTime(item?.endTime),
             action: getContinueActionLabel(categoryName),
-            tone: getCategoryTone(categoryName, baseIndex + index)
+            tone: getCategoryTone(categoryName, baseIndex + index),
+            missingStatus: Boolean(item?.missingStatus)
           }
         })
 
