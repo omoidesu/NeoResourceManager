@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, onMounted, ref } from 'vue'
 import type { ComputedRef } from 'vue'
-import { NButton, NCard, NForm, NFormItem, NGrid, NGi, NInput, NInputNumber, NScrollbar, NSelect, NSpace, NSwitch } from 'naive-ui'
+import { NButton, NCard, NForm, NFormItem, NGrid, NGi, NInput, NInputNumber, NSelect, NSpace, NSwitch } from 'naive-ui'
 import { notify } from '../../utils/notification'
 import { PanicMode, PictureReadScrollMode, Settings } from '../../../../common/constants'
 
@@ -268,7 +268,7 @@ onMounted(() => {
       </n-space>
     </div>
 
-    <n-scrollbar class="settings-page__scrollbar">
+    <AppScrollbar class="settings-page__scrollbar">
       <div class="settings-page__content">
         <n-grid :cols="2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
           <n-gi v-for="section in groupedSections" :key="section.title" span="2 m:2 l:1">
@@ -334,7 +334,7 @@ onMounted(() => {
           </n-gi>
         </n-grid>
       </div>
-    </n-scrollbar>
+    </AppScrollbar>
   </div>
 </template>
 

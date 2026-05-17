@@ -34,6 +34,19 @@ type SubtitleCue = {
   text: string
 }
 
+type OsuVisibleTrackEntry = {
+  track: AudioTrack
+  index: number
+  distance: number
+  stackOrder: number
+}
+
+type PlayerLayoutMode = 'classic' | 'osu'
+type AppScrollbarPublicInstance = ComponentPublicInstance & {
+  containerRef?: HTMLElement | null
+  scrollTo?: (options: ScrollToOptions) => void
+}
+
 const props = withDefaults(defineProps<{
   show: boolean
   resourceId?: string
@@ -61,7 +74,60 @@ const emit = defineEmits<{
   (event: 'update:show', value: boolean): void
 }>()
 const AUDIO_PLAYER_ONGOING_ID = 'audio-player:ongoing'
+const AUDIO_PLAYER_LAYOUT_MODE_STORAGE_KEY = 'neo-resource:audio-player-layout-mode'
+const AUDIO_PLAYER_OSU_UNLOCKED_STORAGE_KEY = 'neo-resource:audio-player-osu-unlocked'
 const logger = createLogger('audio-player')
+
+const readStoredPlayerLayoutMode = (): PlayerLayoutMode => {
+  if (typeof window === 'undefined') {
+    return 'classic'
+  }
+
+  try {
+    const storedMode = window.localStorage.getItem(AUDIO_PLAYER_LAYOUT_MODE_STORAGE_KEY)
+    return storedMode === 'osu' ? 'osu' : 'classic'
+  } catch (error) {
+    logger.warn('读取音频播放器布局偏好失败', error)
+    return 'classic'
+  }
+}
+
+const readStoredOsuUnlockedState = (): boolean => {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  try {
+    return window.localStorage.getItem(AUDIO_PLAYER_OSU_UNLOCKED_STORAGE_KEY) === '1'
+  } catch (error) {
+    logger.warn('读取 osu 播放器彩蛋状态失败', error)
+    return false
+  }
+}
+
+const persistPlayerLayoutMode = (mode: PlayerLayoutMode): void => {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(AUDIO_PLAYER_LAYOUT_MODE_STORAGE_KEY, mode)
+  } catch (error) {
+    logger.warn('保存音频播放器布局偏好失败', error)
+  }
+}
+
+const persistOsuUnlockedState = (unlocked: boolean): void => {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(AUDIO_PLAYER_OSU_UNLOCKED_STORAGE_KEY, unlocked ? '1' : '0')
+  } catch (error) {
+    logger.warn('保存 osu 播放器彩蛋状态失败', error)
+  }
+}
 
 const audioRef = ref<HTMLAudioElement | null>(null)
 const isPlaying = ref(false)
@@ -71,18 +137,30 @@ const volume = ref(85)
 const audioUrlMap = ref<Record<string, string>>({})
 const audioObjectUrlMap = ref<Record<string, string>>({})
 const trackDurationMap = ref<Record<string, number>>({})
+const trackCoverPreviewSrcMap = ref<Record<string, string>>({})
 const subtitleCueList = ref<SubtitleCue[]>([])
 const subtitleLoadState = ref<'idle' | 'loading' | 'ready' | 'empty'>('idle')
 const lyricLineRefs = ref<Array<HTMLElement | null>>([])
+const classicPlaylistScrollRef = ref<AppScrollbarPublicInstance | null>(null)
+const classicPlaylistTrackRefs = ref<Array<HTMLElement | null>>([])
 const MAX_SUBTITLE_FILE_BYTES = 2 * 1024 * 1024
 const currentCoverPreviewSrc = ref('')
 const isLyricScrollPreviewing = ref(false)
+const playerLayoutMode = ref<PlayerLayoutMode>(readStoredPlayerLayoutMode())
+const osuEasterEggInput = ref('')
+const osuEasterEggUnlocked = ref(readStoredOsuUnlockedState())
+const osuPlaylistFocusIndex = ref(0)
+const osuPlayedTrackPathSet = ref<Set<string>>(new Set())
 const pendingAutoplay = ref(false)
 const pendingSeekTime = ref(0)
 const playbackError = ref('')
 const stopPlaybackTask = ref<Promise<void> | null>(null)
 let lyricScrollPreviewTimer: ReturnType<typeof setTimeout> | null = null
+let osuPlaylistWheelTimer: ReturnType<typeof setTimeout> | null = null
+let classicPlaylistCenterFrame: number | null = null
+let classicPlaylistCenterTimers: Array<ReturnType<typeof setTimeout>> = []
 let playlistDurationLoadToken = 0
+let playlistCoverLoadToken = 0
 
 const {
   orderedPlaylist,
@@ -117,7 +195,45 @@ const resourceTitleText = computed(() => String(currentTrack.value?.resourceTitl
 const artistText = computed(() => String(currentTrack.value?.artist ?? props.artist ?? '').trim())
 const currentCoverSrc = computed(() => currentCoverPreviewSrc.value)
 const isMusicDisplayMode = computed(() => props.displayMode === 'music')
+const isOsuLayout = computed(() => isMusicDisplayMode.value && playerLayoutMode.value === 'osu')
+const isOsuLayoutToggleVisible = computed(() => isMusicDisplayMode.value && (osuEasterEggUnlocked.value || isOsuLayout.value))
 const toolbarTitleText = computed(() => String(currentTrack.value?.label ?? '').trim() || resourceTitleText.value)
+const playerLayoutToggleText = computed(() => (isOsuLayout.value ? '经典' : 'osu!'))
+const currentTrackOrdinal = computed(() => Math.max(0, currentIndex.value) + 1)
+const osuVisibleTrackEntries = computed<OsuVisibleTrackEntry[]>(() => {
+  const playlist = orderedPlaylist.value
+  if (!playlist.length) {
+    return []
+  }
+
+  const activeIndex = Math.max(0, Math.min(osuPlaylistFocusIndex.value, playlist.length - 1))
+  const maxVisibleTracks = 9
+  let startIndex = Math.max(0, activeIndex - 4)
+  const endIndex = Math.min(playlist.length, startIndex + maxVisibleTracks)
+
+  if (endIndex - startIndex < maxVisibleTracks) {
+    startIndex = Math.max(0, endIndex - maxVisibleTracks)
+  }
+
+  return playlist.slice(startIndex, endIndex).map((track, offset) => {
+    const index = startIndex + offset
+    return {
+      track,
+      index,
+      distance: Math.min(Math.abs(index - activeIndex), 6),
+      stackOrder: offset
+    }
+  })
+})
+const osuBackdropStyle = computed(() => {
+  if (!currentCoverSrc.value) {
+    return {}
+  }
+
+  return {
+    backgroundImage: `url("${currentCoverSrc.value.replace(/"/g, '\\"')}")`
+  }
+})
 const fullPlayerPrimaryText = computed(() => {
   if (isMusicDisplayMode.value) {
     return resourceTitleText.value
@@ -172,6 +288,53 @@ const playbackModeLabel = computed(() => {
 
   return '顺序播放'
 })
+const togglePlayerLayoutMode = (): void => {
+  playerLayoutMode.value = isOsuLayout.value ? 'classic' : 'osu'
+}
+
+const handleOsuEasterEggKey = (event: KeyboardEvent): void => {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.key.length !== 1) {
+    return
+  }
+
+  if (!isMusicDisplayMode.value || !isPlaying.value || !currentTrack.value) {
+    osuEasterEggInput.value = ''
+    return
+  }
+
+  const nextInput = `${osuEasterEggInput.value}${event.key.toLowerCase()}`.slice(-3)
+  osuEasterEggInput.value = nextInput
+
+  if (nextInput === 'osu') {
+    osuEasterEggUnlocked.value = true
+    playerLayoutMode.value = 'osu'
+    osuEasterEggInput.value = ''
+  }
+}
+
+const getOsuTrackStyle = (distance: number, isCurrentTrack: boolean, stackOrder: number): Record<string, string> => {
+  return {
+    '--osu-track-distance': String(distance),
+    '--osu-track-max-width': isCurrentTrack ? '820px' : '760px',
+    '--osu-track-width-reduction': isCurrentTrack ? '-24px' : `${distance * 18}px`,
+    '--osu-track-z-index': String(20 + stackOrder)
+  }
+}
+const getOsuTrackToneClass = (track: AudioTrack, index: number): string => {
+  if (index === currentIndex.value) {
+    return 'audio-player__osu-track--current'
+  }
+
+  if (osuPlayedTrackPathSet.value.has(String(track.path ?? '').trim())) {
+    return 'audio-player__osu-track--played'
+  }
+
+  return 'audio-player__osu-track--pending'
+}
+const getOsuTrackCoverSrc = (track: AudioTrack): string => {
+  const trackPath = String(track.path ?? '').trim()
+  return String(track.coverSrc || trackCoverPreviewSrcMap.value[trackPath] || '').trim()
+}
 const currentSubtitleText = computed(() => {
   const activeCue = subtitleCueList.value.find((cue) => currentTime.value >= cue.start && currentTime.value <= cue.end)
   return activeCue?.text ?? ''
@@ -235,6 +398,81 @@ const setLyricLineRef = (element: Element | ComponentPublicInstance | null, inde
   }
 
   lyricLineRefs.value[index] = ('$el' in element ? element.$el : element) as HTMLElement
+}
+
+const setClassicPlaylistTrackRef = (element: Element | ComponentPublicInstance | null, index: number) => {
+  if (!element) {
+    classicPlaylistTrackRefs.value[index] = null
+    return
+  }
+
+  classicPlaylistTrackRefs.value[index] = ('$el' in element ? element.$el : element) as HTMLElement
+}
+
+const clearClassicPlaylistCenterTasks = () => {
+  if (classicPlaylistCenterFrame !== null) {
+    window.cancelAnimationFrame(classicPlaylistCenterFrame)
+    classicPlaylistCenterFrame = null
+  }
+
+  classicPlaylistCenterTimers.forEach((timer) => clearTimeout(timer))
+  classicPlaylistCenterTimers = []
+}
+
+const centerClassicPlaylistOnCurrentTrack = async (behavior: ScrollBehavior = 'smooth') => {
+  if (!props.show || isOsuLayout.value || currentIndex.value < 0) {
+    return
+  }
+
+  await nextTick()
+
+  const activeElement = classicPlaylistTrackRefs.value[currentIndex.value]
+    ?? (classicPlaylistScrollRef.value?.containerRef?.querySelector('.audio-player__track--active') as HTMLElement | null)
+  const scrollContainer = classicPlaylistScrollRef.value?.containerRef ?? null
+
+  if (!activeElement) {
+    return
+  }
+
+  if (!scrollContainer) {
+    activeElement.scrollIntoView({ block: 'center', inline: 'nearest', behavior })
+    return
+  }
+
+  const activeRect = activeElement.getBoundingClientRect()
+  const containerRect = scrollContainer.getBoundingClientRect()
+  const targetTop = Math.max(
+    0,
+    Math.min(
+      scrollContainer.scrollHeight - scrollContainer.clientHeight,
+      scrollContainer.scrollTop
+      + activeRect.top
+      - containerRect.top
+      - (containerRect.height - activeRect.height) / 2
+    )
+  )
+
+  classicPlaylistScrollRef.value?.scrollTo?.({ top: targetTop, behavior })
+  scrollContainer.scrollTop = targetTop
+}
+
+const scheduleClassicPlaylistCenter = (behavior: ScrollBehavior = 'smooth') => {
+  if (!props.show || isOsuLayout.value || currentIndex.value < 0) {
+    return
+  }
+
+  clearClassicPlaylistCenterTasks()
+
+  classicPlaylistCenterFrame = window.requestAnimationFrame(() => {
+    classicPlaylistCenterFrame = null
+    void centerClassicPlaylistOnCurrentTrack(behavior)
+  })
+
+  classicPlaylistCenterTimers = [80, 220, 420].map((delay) =>
+    setTimeout(() => {
+      void centerClassicPlaylistOnCurrentTrack(behavior)
+    }, delay)
+  )
 }
 
 const scrollToActiveLyric = (behavior: ScrollBehavior = 'smooth') => {
@@ -454,6 +692,11 @@ const stopPlayback = async () => {
   }
 
   stopPlaybackTask.value = (async () => {
+    const stoppingTrackPath = String(currentTrack.value?.path ?? '').trim()
+    if (stoppingTrackPath) {
+      osuPlayedTrackPathSet.value = new Set([...osuPlayedTrackPathSet.value, stoppingTrackPath])
+    }
+
     audioRef.value?.pause()
 
     await finalizePlaybackSession(currentResourceId.value, String(currentTrack.value?.path ?? ''))
@@ -593,6 +836,42 @@ const preloadMissingPlaylistDurations = async () => {
         filePath: trackPath,
         error: error instanceof Error ? error.message : String(error)
       })
+    }
+  }
+}
+
+const preloadPlaylistCoverPreviews = async () => {
+  const loadToken = ++playlistCoverLoadToken
+  const tracks = orderedPlaylist.value
+    .map((track) => ({
+      trackPath: String(track?.path ?? '').trim(),
+      coverPath: String(track?.coverPath ?? '').trim(),
+      coverSrc: String(track?.coverSrc ?? '').trim()
+    }))
+    .filter((track) => track.trackPath && track.coverPath && !track.coverSrc)
+    .slice(0, 80)
+
+  if (!tracks.length) {
+    return
+  }
+
+  for (const track of tracks) {
+    if (loadToken !== playlistCoverLoadToken || !props.show) {
+      return
+    }
+
+    if (trackCoverPreviewSrcMap.value[track.trackPath]) {
+      continue
+    }
+
+    const previewSrc = await resolveCoverPreviewSource(track.coverPath)
+    if (!previewSrc) {
+      continue
+    }
+
+    trackCoverPreviewSrcMap.value = {
+      ...trackCoverPreviewSrcMap.value,
+      [track.trackPath]: previewSrc
     }
   }
 }
@@ -738,6 +1017,7 @@ const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
   const nextTrackPath = String(orderedPlaylist.value[nextIndex]?.path ?? '').trim()
 
   if (previousTrackPath && previousTrackPath !== nextTrackPath) {
+    osuPlayedTrackPathSet.value = new Set([...osuPlayedTrackPathSet.value, previousTrackPath])
     await finalizePlaybackSession(previousResourceId, previousTrackPath)
   }
 
@@ -810,6 +1090,30 @@ const goPrevious = () => {
 const goNext = () => {
   const nextIndex = resolveNextTrackIndex('next')
   void syncTrack(nextIndex, true)
+}
+
+const handleOsuPlaylistWheel = (event: WheelEvent) => {
+  if (!isOsuLayout.value || orderedPlaylist.value.length <= 1) {
+    return
+  }
+
+  event.preventDefault()
+
+  if (osuPlaylistWheelTimer) {
+    return
+  }
+
+  const wheelDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
+  if (Math.abs(wheelDelta) < 1) {
+    return
+  }
+
+  const direction = wheelDelta > 0 ? 1 : -1
+  osuPlaylistFocusIndex.value = clampIndex(osuPlaylistFocusIndex.value + direction)
+
+  osuPlaylistWheelTimer = setTimeout(() => {
+    osuPlaylistWheelTimer = null
+  }, 150)
 }
 
 const handleAudioEnded = () => {
@@ -939,6 +1243,8 @@ const handleKeydown = (event: KeyboardEvent) => {
     return
   }
 
+  handleOsuEasterEggKey(event)
+
   if (event.key === 'Escape') {
     closePlayer()
     return
@@ -967,15 +1273,18 @@ watch(() => props.show, async (visible) => {
 
   if (!visible) {
     playlistDurationLoadToken += 1
+    osuEasterEggInput.value = ''
     return
   }
 
   if (canReuseCurrentPlayback()) {
+    scheduleClassicPlaylistCenter('auto')
     return
   }
 
   const initialIndex = orderedPlaylist.value.findIndex((track) => track.path === props.initialPath)
   await syncTrack(initialIndex >= 0 ? initialIndex : 0, true, props.initialTime)
+  scheduleClassicPlaylistCenter('auto')
 })
 
 watch(() => props.initialPath, async (filePath) => {
@@ -1032,6 +1341,22 @@ watch(
   { immediate: true }
 )
 
+watch(
+  () => [
+    props.show,
+    orderedPlaylist.value.map((track) => `${String(track?.path ?? '').trim()}:${String(track?.coverSrc ?? '').trim()}:${String(track?.coverPath ?? '').trim()}`).join('|')
+  ] as const,
+  ([visible]) => {
+    if (!visible) {
+      playlistCoverLoadToken += 1
+      return
+    }
+
+    void preloadPlaylistCoverPreviews()
+  },
+  { immediate: true }
+)
+
 watch(() => props.initialTime, (nextTime) => {
   if (!props.show) {
     return
@@ -1080,6 +1405,7 @@ watch(() => [props.title, props.artist, props.displayMode, props.coverSrc, props
     coverSrc: nextCoverSrc,
     playlist: nextPlaylist
   })
+  void preloadPlaylistCoverPreviews()
 }, { deep: true, immediate: true })
 
 watch(() => [currentTrack.value, currentTime.value, duration.value, isPlaying.value] as const, ([track, time, totalDuration, playing]) => {
@@ -1124,6 +1450,48 @@ watch(playbackMode, (mode) => {
     playbackMode: mode
   })
 })
+
+watch(isMusicDisplayMode, (musicMode) => {
+  if (musicMode) {
+    return
+  }
+
+  osuEasterEggInput.value = ''
+})
+
+watch(playerLayoutMode, (mode) => {
+  persistPlayerLayoutMode(mode)
+})
+
+watch(osuEasterEggUnlocked, (unlocked) => {
+  persistOsuUnlockedState(unlocked)
+})
+
+watch(isPlaying, (playing) => {
+  if (!playing) {
+    osuEasterEggInput.value = ''
+  }
+})
+
+watch(currentIndex, (index) => {
+  if (index >= 0) {
+    osuPlaylistFocusIndex.value = index
+  }
+}, { immediate: true })
+
+watch(
+  () => [props.show, isOsuLayout.value, currentIndex.value, orderedPlaylist.value.length] as const,
+  ([visible, osuLayout], previousState) => {
+    if (!visible || osuLayout) {
+      clearClassicPlaylistCenterTasks()
+      return
+    }
+
+    const wasVisible = Boolean(previousState?.[0])
+    scheduleClassicPlaylistCenter(wasVisible ? 'smooth' : 'auto')
+  },
+  { flush: 'post', immediate: true }
+)
 
 watch(volume, (nextVolume) => {
   if (audioRef.value) {
@@ -1179,6 +1547,14 @@ watch(() => props.show, async (visible) => {
   scrollToActiveLyric('auto')
 })
 
+watch(() => [isOsuLayout.value, props.show] as const, ([osuLayout, visible]) => {
+  if (!visible || !osuLayout) {
+    return
+  }
+
+  void preloadPlaylistCoverPreviews()
+})
+
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown)
   registerAudioPlayerControls({
@@ -1206,6 +1582,11 @@ onBeforeUnmount(() => {
     clearTimeout(lyricScrollPreviewTimer)
     lyricScrollPreviewTimer = null
   }
+  if (osuPlaylistWheelTimer) {
+    clearTimeout(osuPlaylistWheelTimer)
+    osuPlaylistWheelTimer = null
+  }
+  clearClassicPlaylistCenterTasks()
 })
 </script>
 
@@ -1213,7 +1594,7 @@ onBeforeUnmount(() => {
   <n-modal
     :show="show"
     preset="card"
-    class="audio-player"
+    :class="['audio-player', { 'audio-player--osu': isOsuLayout }]"
     :show-icon="false"
     :bordered="false"
     :closable="false"
@@ -1225,6 +1606,18 @@ onBeforeUnmount(() => {
       <div class="audio-player__toolbar" @click.stop>
         <div class="audio-player__toolbar-title">{{ toolbarTitleText }}</div>
         <div class="audio-player__toolbar-actions">
+          <n-button
+            v-if="isOsuLayoutToggleVisible"
+            tertiary
+            size="small"
+            class="audio-player__skin-toggle"
+            @click="togglePlayerLayoutMode"
+          >
+            <template #icon>
+              <n-icon :component="SwapHorizontal" />
+            </template>
+            {{ playerLayoutToggleText }}
+          </n-button>
           <n-button quaternary circle @click="stopPlayback">
             <template #icon>
               <n-icon :component="Square" />
@@ -1238,7 +1631,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div class="audio-player__layout">
+      <div v-if="!isOsuLayout" class="audio-player__layout">
         <div class="audio-player__main">
           <div
             class="audio-player__hero"
@@ -1356,7 +1749,7 @@ onBeforeUnmount(() => {
 
         <div class="audio-player__playlist">
           <div class="audio-player__playlist-title">播放列表</div>
-          <n-scrollbar class="audio-player__playlist-scroll">
+          <AppScrollbar ref="classicPlaylistScrollRef" class="audio-player__playlist-scroll">
             <div class="audio-player__playlist-list">
               <button
                 v-for="(track, index) in orderedPlaylist"
@@ -1369,6 +1762,7 @@ onBeforeUnmount(() => {
                   'audio-player__track--drop-before': index === dragOverTrackIndex && dragOverPosition === 'before' && index !== draggingTrackIndex,
                   'audio-player__track--drop-after': index === dragOverTrackIndex && dragOverPosition === 'after' && index !== draggingTrackIndex
                 }"
+                :ref="(element) => setClassicPlaylistTrackRef(element, index)"
                 draggable="true"
                 @click="syncTrack(index, true)"
                 @dragstart="handleTrackDragStart(index, $event)"
@@ -1386,7 +1780,153 @@ onBeforeUnmount(() => {
                 <div class="audio-player__track-duration">{{ formatTime(getTrackDisplayDuration(track, index)) }}</div>
               </button>
             </div>
-          </n-scrollbar>
+          </AppScrollbar>
+        </div>
+      </div>
+
+      <div v-else class="audio-player__osu">
+        <div v-if="currentCoverSrc" class="audio-player__osu-backdrop" :style="osuBackdropStyle"></div>
+        <div class="audio-player__osu-shade"></div>
+
+        <div class="audio-player__osu-topline">
+          <div class="audio-player__osu-song-info">
+            <div class="audio-player__osu-kicker">{{ artistText || 'Unknown Artist' }}</div>
+            <div class="audio-player__osu-title">{{ fullPlayerPrimaryText }}</div>
+            <div class="audio-player__osu-subtitle">{{ fullPlayerSecondaryText }}</div>
+          </div>
+          <div class="audio-player__osu-stats">
+            <div>
+              <span>长度</span>
+              <strong>{{ formatTime(duration || currentTrack?.duration) }}</strong>
+            </div>
+            <div>
+              <span>曲目</span>
+              <strong>{{ currentTrackOrdinal }} / {{ orderedPlaylist.length || 1 }}</strong>
+            </div>
+            <div>
+              <span>模式</span>
+              <strong>{{ playbackModeLabel }}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div class="audio-player__osu-stage">
+          <section class="audio-player__osu-now">
+            <div class="audio-player__osu-record">
+              <div class="audio-player__osu-record-mark">#{{ currentTrackOrdinal }}</div>
+              <div class="audio-player__osu-record-text">
+                <strong>{{ currentSubtitleText || (isPlaying ? 'Now playing' : 'Ready') }}</strong>
+                <span>{{ getTrackDirectoryLabel(currentTrack?.path ?? '') || resourceTitleText }}</span>
+              </div>
+            </div>
+            <div class="audio-player__osu-lyrics" @wheel.passive="previewLyricsWhileScrolling">
+              <template v-if="subtitleCueList.length">
+                <button
+                  v-for="(cue, index) in subtitleCueList.slice(Math.max(activeSubtitleIndex - 2, 0), Math.max(activeSubtitleIndex - 2, 0) + 5)"
+                  :key="`${cue.start}-${index}`"
+                  type="button"
+                  class="audio-player__osu-lyric"
+                  :class="{ 'audio-player__osu-lyric--active': cue.text === currentSubtitleText }"
+                  @click="handleLyricJump(cue)"
+                >
+                  {{ cue.text }}
+                </button>
+              </template>
+              <div v-else class="audio-player__osu-empty">{{ subtitleLoadState === 'loading' ? '正在读取歌词' : '暂无歌词' }}</div>
+            </div>
+          </section>
+
+          <aside class="audio-player__osu-list" @wheel="handleOsuPlaylistWheel">
+            <div class="audio-player__osu-scroll">
+              <TransitionGroup name="audio-player__osu-track-motion" tag="div" class="audio-player__osu-track-list">
+                <button
+                  v-for="entry in osuVisibleTrackEntries"
+                  :key="entry.track.path"
+                  type="button"
+                  class="audio-player__osu-track"
+                  :class="{
+                    'audio-player__osu-track--active': entry.index === currentIndex,
+                    [getOsuTrackToneClass(entry.track, entry.index)]: true,
+                    'audio-player__osu-track--dragging': entry.index === draggingTrackIndex,
+                    'audio-player__osu-track--drop-before': entry.index === dragOverTrackIndex && dragOverPosition === 'before' && entry.index !== draggingTrackIndex,
+                    'audio-player__osu-track--drop-after': entry.index === dragOverTrackIndex && dragOverPosition === 'after' && entry.index !== draggingTrackIndex
+                  }"
+                  :style="getOsuTrackStyle(entry.distance, entry.index === currentIndex, entry.stackOrder)"
+                  draggable="true"
+                  @click="syncTrack(entry.index, true)"
+                  @dragstart="handleTrackDragStart(entry.index, $event)"
+                  @dragover="handleTrackDragOver(entry.index, $event)"
+                  @drop="handleTrackDrop(entry.index, $event)"
+                  @dragend="handleTrackDragEnd"
+                >
+                  <span class="audio-player__osu-track-index">
+                    <img
+                      v-if="getOsuTrackCoverSrc(entry.track)"
+                      :src="getOsuTrackCoverSrc(entry.track)"
+                      alt=""
+                    />
+                    <span class="audio-player__osu-track-number">{{ String(entry.index + 1).padStart(2, '0') }}</span>
+                  </span>
+                  <span class="audio-player__osu-track-main">
+                    <strong>{{ entry.track.label }}</strong>
+                    <span>{{ getTrackDirectoryLabel(entry.track.path) || entry.track.artist || resourceTitleText }}</span>
+                  </span>
+                  <span class="audio-player__osu-track-duration">{{ formatTime(getTrackDisplayDuration(entry.track, entry.index)) }}</span>
+                </button>
+              </TransitionGroup>
+            </div>
+          </aside>
+        </div>
+
+        <div class="audio-player__osu-bottom">
+          <button type="button" class="audio-player__osu-back" @click="closePlayer">返回</button>
+          <div class="audio-player__osu-timeline">
+            <span>{{ formatTime(currentTime) }}</span>
+            <n-slider
+              :value="currentTime"
+              :max="Math.max(duration, Number(currentTrack?.duration ?? 0), 1)"
+              :step="0.1"
+              :format-tooltip="(value: number) => formatTime(value)"
+              @update:value="handleSeek"
+            />
+            <span>{{ formatTime(duration || currentTrack?.duration) }}</span>
+          </div>
+          <div class="audio-player__osu-controls">
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <n-button circle secondary @click="cyclePlaybackMode">
+                  <template #icon>
+                    <n-icon :component="playbackModeIcon" />
+                  </template>
+                </n-button>
+              </template>
+              {{ playbackModeLabel }}
+            </n-tooltip>
+            <n-button circle secondary @click="goPrevious">
+              <template #icon>
+                <n-icon :component="ChevronBackOutline" />
+              </template>
+            </n-button>
+            <n-button circle type="primary" class="audio-player__osu-play" @click="togglePlayback">
+              <template #icon>
+                <n-icon :component="isPlaying ? Pause : Play" />
+              </template>
+            </n-button>
+            <n-button circle secondary @click="stopPlayback">
+              <template #icon>
+                <n-icon :component="Square" />
+              </template>
+            </n-button>
+            <n-button circle secondary @click="goNext">
+              <template #icon>
+                <n-icon :component="ChevronForwardOutline" />
+              </template>
+            </n-button>
+          </div>
+          <div class="audio-player__osu-volume">
+            <n-icon :component="volume <= 0 ? VolumeMuteOutline : VolumeHighOutline" />
+            <n-slider :value="volume" :max="100" @update:value="handleVolumeChange" />
+          </div>
         </div>
       </div>
     </div>
@@ -1451,6 +1991,11 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+.audio-player__skin-toggle {
+  min-width: 82px;
+  font-weight: 700;
 }
 
 .audio-player__layout {
@@ -1740,6 +2285,10 @@ onBeforeUnmount(() => {
 .audio-player__playlist-scroll {
   flex: 1 1 auto;
   min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: rgba(99, 226, 183, 0.46) rgba(255, 255, 255, 0.06);
+  scrollbar-width: thin;
 }
 
 .audio-player__playlist-list {
@@ -1847,6 +2396,444 @@ onBeforeUnmount(() => {
   font-variant-numeric: tabular-nums;
 }
 
+.audio-player__osu {
+  position: relative;
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  background: #05070d;
+  isolation: isolate;
+}
+
+.audio-player__osu-backdrop,
+.audio-player__osu-shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.audio-player__osu-backdrop {
+  z-index: -3;
+  background-position: center;
+  background-size: cover;
+  filter: saturate(1.24) contrast(1.04);
+  transform: scale(1.03);
+}
+
+.audio-player__osu-shade {
+  z-index: -2;
+  background:
+    linear-gradient(90deg, rgba(0, 0, 0, 0.62) 0%, rgba(0, 0, 0, 0.34) 42%, rgba(0, 0, 0, 0.78) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.86) 0%, rgba(0, 0, 0, 0.16) 35%, rgba(0, 0, 0, 0.84) 100%);
+}
+
+.audio-player__osu-topline {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: start;
+  padding: 2px 28px 8px;
+  color: rgba(255, 255, 255, 0.95);
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.72);
+}
+
+.audio-player__osu-song-info {
+  min-width: 0;
+}
+
+.audio-player__osu-kicker {
+  font-size: 13px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.68);
+}
+
+.audio-player__osu-title {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 29px;
+  font-weight: 800;
+  line-height: 1.18;
+}
+
+.audio-player__osu-subtitle {
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.audio-player__osu-stats {
+  display: grid;
+  grid-template-columns: repeat(3, auto);
+  gap: 16px;
+  padding-top: 4px;
+}
+
+.audio-player__osu-stats > div {
+  display: grid;
+  gap: 2px;
+  text-align: right;
+}
+
+.audio-player__osu-stats span {
+  font-size: 12px;
+  color: rgba(178, 224, 255, 0.72);
+}
+
+.audio-player__osu-stats strong {
+  font-size: 18px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.audio-player__osu-stage {
+  position: relative;
+  z-index: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(300px, 0.82fr) minmax(420px, 0.98fr);
+  gap: 28px;
+  align-items: stretch;
+  padding: 0 22px 10px 28px;
+}
+
+.audio-player__osu-now {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(160px, 1fr);
+  gap: 16px;
+  align-items: center;
+  padding: 40px 0 0;
+}
+
+.audio-player__osu-record {
+  justify-self: start;
+  width: min(480px, 100%);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  background: rgba(0, 0, 0, 0.78);
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.44);
+}
+
+.audio-player__osu-record-mark {
+  display: grid;
+  place-items: center;
+  min-width: 44px;
+  height: 34px;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.audio-player__osu-record-text {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.audio-player__osu-record-text strong,
+.audio-player__osu-record-text span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-player__osu-record-text strong {
+  color: #21e7ff;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.audio-player__osu-record-text span {
+  color: rgba(255, 255, 255, 0.64);
+  font-size: 12px;
+}
+
+.audio-player__osu-lyrics {
+  align-self: stretch;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  overflow: hidden;
+  padding: 8px 0 16px;
+}
+
+.audio-player__osu-lyric {
+  border: none;
+  border-radius: 0;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.36);
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 15px;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.18s ease, color 0.18s ease, background-color 0.18s ease;
+}
+
+.audio-player__osu-lyric:hover,
+.audio-player__osu-lyric--active {
+  transform: translateX(8px);
+  background: rgba(0, 167, 236, 0.72);
+  color: rgba(255, 255, 255, 0.96);
+}
+
+.audio-player__osu-empty {
+  color: rgba(255, 255, 255, 0.54);
+  font-size: 14px;
+}
+
+.audio-player__osu-list {
+  min-width: 0;
+  min-height: 0;
+  padding: 8px 0 8px;
+  overflow: hidden;
+}
+
+.audio-player__osu-scroll {
+  height: 100%;
+  overflow-y: hidden;
+  overflow-x: hidden;
+}
+
+.audio-player__osu-track-list {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0;
+  align-items: flex-end;
+  padding: 10px 36px 14px 48px;
+}
+
+.audio-player__osu-track {
+  position: relative;
+  z-index: var(--osu-track-z-index);
+  width: clamp(330px, calc(100% - var(--osu-track-width-reduction)), var(--osu-track-max-width, 760px));
+  min-height: 74px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  margin-right: 0;
+  padding: 9px 18px 9px 116px;
+  border: 1px solid rgba(0, 0, 0, 0.38);
+  border-radius: 4px;
+  overflow: visible;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--osu-track-accent) 88%, rgba(0, 0, 0, 0.18)), color-mix(in srgb, var(--osu-track-accent) 58%, rgba(0, 0, 0, 0.3))),
+    rgba(0, 0, 0, 0.66);
+  color: #fff;
+  cursor: pointer;
+  text-align: left;
+  transform-origin: right center;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  transition:
+    width 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    background 0.24s ease,
+    box-shadow 0.24s ease,
+    filter 0.24s ease,
+    opacity 0.24s ease;
+}
+
+.audio-player__osu-track + .audio-player__osu-track {
+  margin-top: -8px;
+}
+
+.audio-player__osu-track--pending {
+  --osu-track-accent: #ef2c91;
+}
+
+.audio-player__osu-track--played {
+  --osu-track-accent: #df7100;
+}
+
+.audio-player__osu-track--current {
+  --osu-track-accent: #0799cb;
+}
+
+.audio-player__osu-track:hover,
+.audio-player__osu-track--active {
+  transform: translateX(0) scaleX(1.01);
+  filter: saturate(1.16) brightness(1.08);
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.5), 0 0 0 2px rgba(255, 255, 255, 0.88), inset 0 1px 0 rgba(255, 255, 255, 0.24);
+}
+
+.audio-player__osu-track--dragging {
+  opacity: 0.5;
+}
+
+.audio-player__osu-track--drop-before,
+.audio-player__osu-track--drop-after {
+  outline: 2px solid rgba(255, 255, 255, 0.88);
+  outline-offset: 3px;
+}
+
+.audio-player__osu-track-index {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 104px;
+  height: 66px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--osu-track-accent) 72%, rgba(0, 0, 0, 0.28));
+  font-size: 18px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--osu-track-accent) 65%, rgba(255, 255, 255, 0.18)), 0 10px 22px rgba(0, 0, 0, 0.38);
+}
+
+.audio-player__osu-track-index img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: saturate(1.08) brightness(0.88);
+}
+
+.audio-player__osu-track-index::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0.58));
+}
+
+.audio-player__osu-track-number {
+  position: relative;
+  z-index: 1;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.72);
+}
+
+.audio-player__osu-track-main {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.audio-player__osu-track-main strong,
+.audio-player__osu-track-main span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-player__osu-track-main strong {
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 1.15;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.48);
+}
+
+.audio-player__osu-track-main span {
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 12px;
+}
+
+.audio-player__osu-track-duration {
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.audio-player__osu-track-motion-move,
+.audio-player__osu-track-motion-enter-active,
+.audio-player__osu-track-motion-leave-active {
+  transition:
+    transform 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.24s ease;
+}
+
+.audio-player__osu-track-motion-enter-from,
+.audio-player__osu-track-motion-leave-to {
+  opacity: 0;
+  transform: translateY(20px) translateX(40px);
+}
+
+.audio-player__osu-track-motion-leave-active {
+  position: absolute;
+}
+
+.audio-player__osu-bottom {
+  position: relative;
+  z-index: 3;
+  min-height: 112px;
+  display: grid;
+  grid-template-columns: 150px minmax(200px, 1fr) auto minmax(150px, 220px);
+  gap: 18px;
+  align-items: center;
+  padding: 12px 24px 18px;
+  background: rgba(0, 0, 0, 0.88);
+  border-top: 4px solid;
+  border-image: linear-gradient(90deg, #f5338c, #8647ff, #00a7ec, #90d900, #ffcc00) 1;
+}
+
+.audio-player__osu-back {
+  height: 48px;
+  border: none;
+  border-radius: 4px;
+  background: linear-gradient(180deg, #ff4eb4, #df1683);
+  color: #fff;
+  font-size: 20px;
+  font-weight: 900;
+  cursor: pointer;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.32);
+}
+
+.audio-player__osu-timeline {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.audio-player__osu-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.audio-player__osu-play {
+  transform: scale(1.18);
+}
+
+.audio-player__osu-volume {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  color: rgba(255, 255, 255, 0.72);
+}
+
 @media (max-width: 960px) {
   :global(.n-card.n-modal.audio-player) {
     width: 94vw !important;
@@ -1910,6 +2897,92 @@ onBeforeUnmount(() => {
   .audio-player__volume {
     margin-left: 0;
     width: 100%;
+  }
+
+  .audio-player__osu {
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .audio-player__osu-topline {
+    grid-template-columns: 1fr;
+    padding: 2px 18px 8px;
+  }
+
+  .audio-player__osu-title {
+    white-space: normal;
+    font-size: 22px;
+  }
+
+  .audio-player__osu-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .audio-player__osu-stats > div {
+    text-align: left;
+  }
+
+  .audio-player__osu-stage {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    padding: 0 14px 8px;
+    overflow: hidden;
+  }
+
+  .audio-player__osu-now {
+    grid-template-rows: auto;
+    gap: 12px;
+  }
+
+  .audio-player__osu-lyrics {
+    display: none;
+  }
+
+  .audio-player__osu-list {
+    min-height: 230px;
+  }
+
+  .audio-player__osu-track-list {
+    padding: 24vh 6px 24vh 28px;
+  }
+
+  .audio-player__osu-track {
+    width: 100%;
+    min-height: 66px;
+    grid-template-columns: 42px minmax(0, 1fr) auto;
+    gap: 10px;
+    margin-right: 0;
+    padding: 8px 12px 8px 48px;
+  }
+
+  .audio-player__osu-track:hover,
+  .audio-player__osu-track--active {
+    transform: none;
+  }
+
+  .audio-player__osu-track-index {
+    width: 34px;
+    height: 34px;
+    font-size: 13px;
+  }
+
+  .audio-player__osu-track-main strong {
+    font-size: 15px;
+  }
+
+  .audio-player__osu-bottom {
+    grid-template-columns: 1fr;
+    min-height: auto;
+    gap: 12px;
+    padding: 12px 16px 16px;
+  }
+
+  .audio-player__osu-back {
+    height: 42px;
+    font-size: 16px;
+  }
+
+  .audio-player__osu-controls {
+    justify-content: center;
   }
 }
 </style>

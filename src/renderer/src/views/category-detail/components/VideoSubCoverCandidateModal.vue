@@ -37,7 +37,7 @@ const emit = defineEmits<{
       <n-alert type="info" :show-icon="false">
         已为番剧目录中的每个视频生成 3 张随机帧候选。点击任意一张后，将只更新当前番剧主封面，用于卡片和详情展示。
       </n-alert>
-      <n-scrollbar style="max-height: 70vh;">
+      <AppScrollbar style="max-height: 70vh;">
         <div class="video-sub-cover-candidate-list">
           <div
             v-for="item in items"
@@ -67,7 +67,7 @@ const emit = defineEmits<{
             </div>
           </div>
         </div>
-      </n-scrollbar>
+      </AppScrollbar>
       <div class="audio-cover-candidate__footer">
         <n-space justify="end">
           <n-button @click="emit('update:show', false)">取消</n-button>

@@ -773,7 +773,7 @@ onMounted(() => {
       </div>
 
       <div class="comic-reader__body">
-        <n-scrollbar class="comic-reader__sidebar">
+        <AppScrollbar class="comic-reader__sidebar">
           <div class="comic-reader__thumbs">
             <button
               v-for="(imagePath, index) in imagePaths"
@@ -796,7 +796,7 @@ onMounted(() => {
               <div class="comic-reader__thumb-index">{{ index + 1 }}</div>
             </button>
           </div>
-        </n-scrollbar>
+        </AppScrollbar>
 
         <div ref="viewerRef" class="comic-reader__viewer">
           <div

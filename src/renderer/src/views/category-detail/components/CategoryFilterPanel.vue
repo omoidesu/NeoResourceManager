@@ -163,12 +163,14 @@ const selectedEngineListModel = computed({
             clearable
           />
           <n-checkbox-group v-model:value="selectedAuthorListModel" class="filter-group">
-            <n-flex vertical class="filter-list">
+            <AppScrollbar class="filter-list">
+              <n-flex vertical class="filter-list__content">
               <n-checkbox v-for="author in filteredAuthorList" :key="author.id" :value="author.id">
                 {{ author.name }}
                 <n-tag type="primary" :bordered="false" round size="small">{{ author.count }}</n-tag>
               </n-checkbox>
-            </n-flex>
+              </n-flex>
+            </AppScrollbar>
           </n-checkbox-group>
         </div>
         <div v-if="showActorFilter" class="filter-section">
@@ -180,12 +182,14 @@ const selectedEngineListModel = computed({
             clearable
           />
           <n-checkbox-group v-model:value="selectedActorListModel" class="filter-group">
-            <n-flex vertical class="filter-list">
+            <AppScrollbar class="filter-list">
+              <n-flex vertical class="filter-list__content">
               <n-checkbox v-for="actor in filteredActorList" :key="actor.id" :value="actor.id">
                 {{ actor.name }}
                 <n-tag type="success" :bordered="false" round size="small">{{ actor.count }}</n-tag>
               </n-checkbox>
-            </n-flex>
+              </n-flex>
+            </AppScrollbar>
           </n-checkbox-group>
         </div>
         <div v-if="isAudioCategory" class="filter-section">
@@ -197,42 +201,49 @@ const selectedEngineListModel = computed({
             clearable
           />
           <n-checkbox-group v-model:value="selectedAlbumListModel" class="filter-group">
-            <n-flex vertical class="filter-list">
+            <AppScrollbar class="filter-list">
+              <n-flex vertical class="filter-list__content">
               <n-checkbox v-for="album in filteredAlbumList" :key="album.name" :value="album.name">
                 {{ album.name }}
                 <n-tag type="success" :bordered="false" round size="small">{{ album.count }}</n-tag>
               </n-checkbox>
-            </n-flex>
+              </n-flex>
+            </AppScrollbar>
           </n-checkbox-group>
         </div>
         <div class="filter-section">
           <n-divider title-placement="left" style="margin-bottom: 5px;">标签筛选</n-divider>
           <n-input v-model:value="tagSearchModel" placeholder="请输入标签名称" class="tag-search" clearable />
           <n-checkbox-group v-model:value="selectedTagListModel" class="filter-group">
-            <n-flex vertical class="filter-list">
+            <AppScrollbar class="filter-list">
+              <n-flex vertical class="filter-list__content">
               <n-checkbox v-for="tag in filteredTagList" :key="tag.id" :value="tag.id">
                 {{ tag.name }}
                 <n-tag type="info" :bordered="false" round size="small">{{ tag.count }}</n-tag>
               </n-checkbox>
-            </n-flex>
+              </n-flex>
+            </AppScrollbar>
           </n-checkbox-group>
         </div>
         <div v-if="!detailIsAsmr" class="filter-section">
           <n-divider title-placement="left" style="margin-bottom: 5px;">分类筛选</n-divider>
           <n-input v-model:value="typeSearchModel" placeholder="请输入分类名称" class="type-search" clearable />
           <n-checkbox-group v-model:value="selectedTypeListModel" class="filter-group">
-            <n-flex vertical class="filter-list">
+            <AppScrollbar class="filter-list">
+              <n-flex vertical class="filter-list__content">
               <n-checkbox v-for="type in filteredTypeList" :key="type.id" :value="type.id">
                 {{ type.name }}
                 <n-tag type="warning" :bordered="false" round size="small">{{ type.count }}</n-tag>
               </n-checkbox>
-            </n-flex>
+              </n-flex>
+            </AppScrollbar>
           </n-checkbox-group>
         </div>
         <div v-if="showEngineFilter" class="filter-section">
           <n-divider title-placement="left" style="margin-bottom: 5px;">引擎筛选</n-divider>
           <n-checkbox-group v-model:value="selectedEngineListModel" class="filter-group">
-            <n-flex vertical class="filter-list">
+            <AppScrollbar class="filter-list">
+              <n-flex vertical class="filter-list__content">
               <n-checkbox v-for="engine in filteredEngineList" :key="engine.id" :value="engine.id">
                 <span v-if="engine.icon" class="filter-engine-option">
                   <img :src="engine.icon" :alt="engine.name" class="filter-engine-option__icon" />
@@ -241,7 +252,8 @@ const selectedEngineListModel = computed({
                 <span v-else>{{ engine.name }}</span>
                 <n-tag type="success" :bordered="false" round size="small">{{ engine.count }}</n-tag>
               </n-checkbox>
-            </n-flex>
+              </n-flex>
+            </AppScrollbar>
           </n-checkbox-group>
         </div>
       </div>
@@ -362,12 +374,13 @@ const selectedEngineListModel = computed({
 .filter-list {
   height: 100%;
   min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
+}
+
+.filter-list__content {
   flex-wrap: nowrap;
 }
 
-.filter-list :deep(.n-checkbox) {
+.filter-list__content :deep(.n-checkbox) {
   flex: none;
 }
 

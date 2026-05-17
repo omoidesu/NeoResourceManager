@@ -156,7 +156,10 @@ const handleOpenVideoOrderDialogSafe = (resource: typeof props.selectedDetailRes
         </div>
       </template>
       <div class="detail-drawer__resize-handle" @mousedown.prevent="props.handleDetailDrawerResizeStart" />
-      <n-scrollbar style="max-height: 100%;">
+      <AppScrollbar
+        :content-style="{ paddingRight: '16px' }"
+        style="max-height: 100%;"
+      >
         <div
           v-if="props.selectedDetailResource"
           class="detail-drawer"
@@ -368,14 +371,14 @@ const handleOpenVideoOrderDialogSafe = (resource: typeof props.selectedDetailRes
             <div class="detail-drawer__section-title">描述</div>
             <div class="detail-drawer__item detail-drawer__item--full">
               <div class="detail-drawer__description-box" :style="props.detailDescriptionBoxStyle">
-                <n-scrollbar class="detail-drawer__description-scrollbar">
+                <AppScrollbar class="detail-drawer__description-scrollbar">
                   <slot name="description-content">
                     <div
                       class="detail-drawer__value detail-drawer__value--description detail-drawer__value--rich rich-markdown-content"
                       v-html="selectedDetailDescriptionHtml"
                     />
                   </slot>
-                </n-scrollbar>
+                </AppScrollbar>
               </div>
             </div>
           </div>
@@ -615,7 +618,7 @@ const handleOpenVideoOrderDialogSafe = (resource: typeof props.selectedDetailRes
             </n-icon>
           </n-float-button>
         </div>
-      </n-scrollbar>
+      </AppScrollbar>
       <template #footer>
         <div class="detail-drawer__footer">
           <n-space justify="start">
@@ -851,14 +854,7 @@ const handleOpenVideoOrderDialogSafe = (resource: typeof props.selectedDetailRes
   width: 100%;
   height: 100%;
   max-height: 100%;
-}
-
-.detail-drawer__description-scrollbar :deep(.n-scrollbar) {
-  height: 100%;
-}
-
-.detail-drawer__description-scrollbar :deep(.n-scrollbar-container) {
-  height: 100%;
+  box-sizing: border-box;
   padding-right: 6px;
 }
 

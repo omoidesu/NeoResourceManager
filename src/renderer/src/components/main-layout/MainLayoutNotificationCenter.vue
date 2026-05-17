@@ -154,7 +154,7 @@ const handleClearAllNotifications = () => {
 <template>
   <n-drawer v-model:show="drawerVisible" placement="right" :width="500">
     <n-drawer-content title="通知中心" closable>
-      <n-scrollbar style="max-height: 100%;">
+      <AppScrollbar style="max-height: 100%;">
         <div class="notification-center">
           <div v-if="hasOngoingItems" class="notification-center__section">
             <div class="notification-center__section-header">
@@ -301,7 +301,7 @@ const handleClearAllNotifications = () => {
             <n-empty v-else description="暂无通知" />
           </div>
         </div>
-      </n-scrollbar>
+      </AppScrollbar>
     </n-drawer-content>
   </n-drawer>
 </template>

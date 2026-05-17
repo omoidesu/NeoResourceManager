@@ -287,7 +287,7 @@ const props = defineProps({
             已选择 {{ selectedBatchImportCount }} / {{ selectableBatchImportCount }} 个可导入目录
           </div>
         </div>
-        <n-scrollbar class="batch-import-modal__scrollbar">
+        <AppScrollbar class="batch-import-modal__scrollbar">
           <div class="batch-import-modal__list">
             <div
               v-for="(item, index) in batchImportItems"
@@ -380,7 +380,7 @@ const props = defineProps({
               </div>
             </div>
           </div>
-        </n-scrollbar>
+        </AppScrollbar>
       </div>
     </template>
     <template #footer>
@@ -640,10 +640,6 @@ const props = defineProps({
 .batch-import-modal__scrollbar {
   height: 100%;
   min-height: 0;
-}
-
-.batch-import-modal__scrollbar :deep(.n-scrollbar-container) {
-  height: 100%;
 }
 
 .batch-import-modal__list {

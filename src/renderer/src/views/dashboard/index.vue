@@ -3263,7 +3263,7 @@ useDashboardDeferredTasks({
             按文件名排序
           </n-button>
         </div>
-        <n-scrollbar class="video-order-modal__scrollbar">
+        <AppScrollbar class="video-order-modal__scrollbar">
           <div class="video-order-modal__list">
             <div
               v-for="(item, index) in homeVideoOrderItems"
@@ -3324,7 +3324,7 @@ useDashboardDeferredTasks({
               </div>
             </div>
           </div>
-        </n-scrollbar>
+        </AppScrollbar>
         <div class="batch-label-modal__footer">
           <n-space justify="end">
             <n-button @click="showHomeVideoOrderModal = false">取消</n-button>

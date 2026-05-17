@@ -207,7 +207,6 @@ body {
   flex: 1;
   min-height: 0;
   padding: 0 2px 0 0;
-  overflow: hidden;
 }
 
 .app-menu {

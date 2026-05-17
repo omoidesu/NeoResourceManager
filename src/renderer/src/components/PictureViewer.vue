@@ -718,7 +718,7 @@ onBeforeUnmount(() => {
         <div class="picture-viewer__path">{{ currentImagePath }}</div>
       </div>
 
-      <n-scrollbar x-scrollable class="picture-viewer__thumbs-scrollbar" @wheel="handleThumbWheel">
+      <AppScrollbar x-scrollable class="picture-viewer__thumbs-scrollbar" @wheel="handleThumbWheel">
         <div class="picture-viewer__thumbs" @click.stop>
           <div
             v-for="(imagePath, index) in imagePaths"
@@ -732,7 +732,7 @@ onBeforeUnmount(() => {
             <div v-else class="picture-viewer__thumb-placeholder">加载中</div>
           </div>
         </div>
-      </n-scrollbar>
+      </AppScrollbar>
     </div>
   </n-modal>
 </template>

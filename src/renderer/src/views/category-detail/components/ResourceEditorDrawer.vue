@@ -99,7 +99,7 @@ const showDuplicateResourceHint = computed(() =>
     :style="modalStyle"
   >
     <template #default>
-      <n-scrollbar v-if="isEditMode" style="max-height: 100%;">
+      <AppScrollbar v-if="isEditMode" style="max-height: 100%;">
         <div class="edit-drawer">
           <n-form :ref="setFormRef ?? undefined" :model="formData" label-placement="left" label-width="100" :rules="formRules">
             <n-form-item :label="`${categoryName}名`" path="name">
@@ -275,7 +275,7 @@ const showDuplicateResourceHint = computed(() =>
             </n-form-item>
           </n-form>
         </div>
-      </n-scrollbar>
+      </AppScrollbar>
 
       <n-form v-else :ref="setFormRef ?? undefined" :model="formData" label-placement="left" label-width="100" :rules="formRules">
         <n-form-item :label="`${categoryName}名`" path="name">

@@ -834,7 +834,7 @@ onMounted(() => {
           {{ errorMessage }}
         </div>
         <div v-show="state === 'ready'" class="pdf-reader__reading-area">
-          <n-scrollbar class="pdf-reader__sidebar">
+          <AppScrollbar scrollbar-hidden class="pdf-reader__sidebar">
             <div class="pdf-reader__thumbs">
               <button
                 v-for="pageNumber in pageCount"
@@ -852,7 +852,7 @@ onMounted(() => {
                 <div class="pdf-reader__thumb-index">{{ pageNumber }}</div>
               </button>
             </div>
-          </n-scrollbar>
+          </AppScrollbar>
           <div ref="viewportRef" class="pdf-reader__viewport" @scroll="scheduleProgressSave">
             <div ref="pagesRef" class="pdf-reader__pages" />
           </div>
@@ -979,21 +979,6 @@ onMounted(() => {
 .pdf-reader__sidebar {
   min-height: 0;
   border-right: 1px solid var(--reader-border-subtle-color);
-}
-
-.pdf-reader__sidebar :deep(.n-scrollbar-rail) {
-  display: none;
-}
-
-.pdf-reader__sidebar :deep(.n-scrollbar-container) {
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.pdf-reader__sidebar :deep(.n-scrollbar-container::-webkit-scrollbar) {
-  display: none;
-  width: 0;
-  height: 0;
 }
 
 .pdf-reader__thumbs {

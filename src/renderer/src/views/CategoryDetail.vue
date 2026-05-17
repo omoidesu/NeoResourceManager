@@ -3932,7 +3932,7 @@ const handleToggleCompleted = async (resource: any) => {
         </div>
 
         <div class="detail-content">
-          <n-scrollbar class="detail-scrollbar">
+          <AppScrollbar class="detail-scrollbar">
             <div class="detail-content__inner">
               <n-empty v-if="resourceList.length === 0" :description="`暂无${categoryName || ''}资源，点击按钮添加吧！`">
                 <template #extra>
@@ -3989,7 +3989,7 @@ const handleToggleCompleted = async (resource: any) => {
                 />
               </div>
             </div>
-          </n-scrollbar>
+          </AppScrollbar>
         </div>
 
         <div class="detail-footer" :style="footerStyle">
@@ -4280,7 +4280,7 @@ const handleToggleCompleted = async (resource: any) => {
             按文件名排序
           </n-button>
         </div>
-        <n-scrollbar class="video-order-modal__scrollbar">
+        <AppScrollbar class="video-order-modal__scrollbar">
           <div class="video-order-modal__list">
             <div
               v-for="(item, index) in videoOrderItems"
@@ -4340,7 +4340,7 @@ const handleToggleCompleted = async (resource: any) => {
               </div>
             </div>
           </div>
-        </n-scrollbar>
+        </AppScrollbar>
         <div class="batch-label-modal__footer">
           <n-space justify="end">
             <n-button @click="showVideoOrderModal = false">取消</n-button>
@@ -4728,10 +4728,6 @@ const handleToggleCompleted = async (resource: any) => {
 .detail-scrollbar {
   height: 100%;
   max-height: 100%;
-}
-
-.detail-scrollbar :deep(.n-scrollbar-container) {
-  height: 100%;
 }
 
 .detail-content__inner {
@@ -5260,14 +5256,7 @@ const handleToggleCompleted = async (resource: any) => {
   width: 100%;
   height: 100%;
   max-height: 100%;
-}
-
-.detail-drawer__description-scrollbar :deep(.n-scrollbar) {
-  height: 100%;
-}
-
-.detail-drawer__description-scrollbar :deep(.n-scrollbar-container) {
-  height: 100%;
+  box-sizing: border-box;
   padding-right: 6px;
 }
 

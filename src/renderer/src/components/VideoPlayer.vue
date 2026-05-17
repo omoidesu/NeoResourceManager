@@ -826,7 +826,7 @@ onBeforeUnmount(() => {
 
         <aside v-if="showPlaylist" class="video-player__playlist">
           <div class="video-player__playlist-title">播放列表</div>
-          <n-scrollbar class="video-player__playlist-scroll">
+          <AppScrollbar class="video-player__playlist-scroll">
             <button
               v-for="(track, index) in normalizedPlaylist"
               :key="track.path"
@@ -852,7 +852,7 @@ onBeforeUnmount(() => {
                 <div class="video-player__track-path">{{ getTrackFileName(track) }}</div>
               </div>
             </button>
-          </n-scrollbar>
+          </AppScrollbar>
         </aside>
       </div>
 

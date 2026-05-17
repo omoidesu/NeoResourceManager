@@ -144,7 +144,7 @@ const handleAddKeywordInput = (event: Event) => {
         </template>
       </div>
       <div v-if="props.homePinnedAddCandidatesLoading" class="queue-add-panel__empty">正在查找可固定资源</div>
-      <n-scrollbar v-else-if="props.homePinnedAddCandidates.length" class="queue-add-panel__scroll">
+      <AppScrollbar v-else-if="props.homePinnedAddCandidates.length" class="queue-add-panel__scroll">
         <div class="queue-add-panel__list">
           <article
             v-for="item in props.homePinnedAddCandidates"
@@ -170,7 +170,7 @@ const handleAddKeywordInput = (event: Event) => {
             </n-button>
           </article>
         </div>
-      </n-scrollbar>
+      </AppScrollbar>
       <div v-else class="queue-add-panel__empty">
         {{ isSearchingAddCandidates ? '没有找到匹配的资源' : '最近没有可固定的资源' }}
       </div>
