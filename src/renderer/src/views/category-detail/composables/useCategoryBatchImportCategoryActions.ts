@@ -450,6 +450,97 @@ export const useCategoryBatchImportCategoryActions = (options: UseCategoryBatchI
     }
   }
 
+  const analyzeWebsiteBookmarkSource = async (
+    targetCategoryId: string,
+    sourceLabel: string,
+    analyzer: () => Promise<any>
+  ) => {
+    const currentState = options.ensureBatchImportState(targetCategoryId)
+    if (currentState.analyzeRunning || currentState.importRunning) {
+      options.patchBatchImportState(targetCategoryId, {
+        analyzeInBackground: false,
+        analyzeToastDismissed: false,
+        showLoading: true
+      })
+      options.syncBatchImportOngoingCenter(targetCategoryId)
+      return
+    }
+
+    try {
+      options.patchBatchImportState(targetCategoryId, {
+        items: [],
+        fetchInfoEnabled: true,
+        analyzeTotal: 1,
+        analyzeCurrent: 0,
+        analyzeMessage: `正在读取网站书签\n${sourceLabel || '书签源'}`,
+        analyzeCancelled: false,
+        analyzeInBackground: false,
+        analyzeToastDismissed: false,
+        analyzeRunning: true,
+        importRunning: false,
+        showLoading: true,
+        showPreview: false
+      })
+      options.syncBatchImportOngoingCenter(targetCategoryId)
+
+      const result = await analyzer()
+      const items = Array.isArray(result?.data?.items) ? result.data.items : []
+      options.patchBatchImportState(targetCategoryId, {
+        items,
+        analyzeCurrent: 1,
+        analyzeTotal: Math.max(1, items.length),
+        analyzeMessage: result?.message ?? '网站书签分析完成',
+        showPreview: items.length > 0,
+        showLoading: false
+      })
+
+      if (result?.type === 'error') {
+        options.showNotifyByType('error', '批量导入网站', String(result?.message ?? '解析网站书签失败'))
+      } else if (!items.length) {
+        options.showNotifyByType('warning', '批量导入网站', String(result?.message ?? '未找到可导入的网站书签'))
+      }
+    } catch (error) {
+      options.showNotifyByType('error', '批量导入网站', error instanceof Error ? error.message : '分析网站书签失败')
+    } finally {
+      options.patchBatchImportState(targetCategoryId, {
+        analyzeRunning: false,
+        analyzeInBackground: false,
+        showLoading: false,
+        analyzeToastDismissed: false
+      })
+      options.clearBatchImportOngoingCenter(targetCategoryId)
+    }
+  }
+
+  const handleBatchImportWebsiteBookmarkFile = async () => {
+    const targetCategoryId = String(options.categoryId.value ?? '').trim()
+    const bookmarkFilePath = await window.api.dialog.selectBookmarkFile()
+    if (!bookmarkFilePath) {
+      return
+    }
+
+    await analyzeWebsiteBookmarkSource(
+      targetCategoryId,
+      options.getFileName(bookmarkFilePath),
+      () => window.api.service.analyzeWebsiteBookmarkFile(bookmarkFilePath)
+    )
+  }
+
+  const handleBatchImportWebsiteBrowserSource = async (sourceId: string, sourceLabel?: string) => {
+    const targetCategoryId = String(options.categoryId.value ?? '').trim()
+    const normalizedSourceId = String(sourceId ?? '').trim()
+    if (!normalizedSourceId) {
+      options.showNotifyByType('warning', '批量导入网站', '请选择浏览器书签来源')
+      return
+    }
+
+    await analyzeWebsiteBookmarkSource(
+      targetCategoryId,
+      sourceLabel || '浏览器书签',
+      () => window.api.service.analyzeWebsiteBookmarksFromBrowser(normalizedSourceId)
+    )
+  }
+
   const buildBatchNovelResourcePayload = (targetCategoryId: string, filePath: string, analysis: any) => {
     const fileStem = options.getFileNameWithoutExtension(filePath)
     const novelMetaBase = createEmptyMetaByType('novel_meta') as Record<string, unknown>
@@ -1143,6 +1234,8 @@ export const useCategoryBatchImportCategoryActions = (options: UseCategoryBatchI
     handleBatchImportComics,
     handleBatchImportAsmrs,
     handleBatchImportImages,
+    handleBatchImportWebsiteBookmarkFile,
+    handleBatchImportWebsiteBrowserSource,
     handleBatchImportNovelFiles,
     handleBatchImportVideoFiles,
     handleBatchImportAnimeDirectories,

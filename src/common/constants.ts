@@ -28,6 +28,46 @@ export const Settings = {
     description: '缓存路径',
     default: '__CACHE_PATH__'
   },
+  ARCHIVE_PATH: {
+    name: 'archivePath',
+    description: '资源归档路径',
+    default: ''
+  },
+  ARCHIVE_FORMAT: {
+    name: 'archiveFormat',
+    description: '压缩格式',
+    default: '7z'
+  },
+  ARCHIVE_LEVEL: {
+    name: 'archiveLevel',
+    description: '压缩等级',
+    default: '9'
+  },
+  ARCHIVE_PASSWORD: {
+    name: 'archivePassword',
+    description: '压缩包密码',
+    default: ''
+  },
+  ARCHIVE_SPLIT_SIZE: {
+    name: 'archiveSplitSize',
+    description: '分卷大小',
+    default: 'none'
+  },
+  ARCHIVE_SPLIT_SIZE_CUSTOM_MB: {
+    name: 'archiveSplitSizeCustomMb',
+    description: '自定义分卷大小（MB）',
+    default: '100'
+  },
+  ARCHIVE_ENABLE_MULTITHREAD: {
+    name: 'archiveEnableMultithread',
+    description: '开启多线程压缩',
+    default: '0'
+  },
+  ARCHIVE_THREAD_COUNT: {
+    name: 'archiveThreadCount',
+    description: '压缩线程数',
+    default: '16'
+  },
   USE_EVERYTHING_HTTP: {
     name: 'useEverythingHttp',
     description: '使用 Everything HTTP服务器，启用方式：工具 -> 选项 -> HTTP 服务器 -> 启用 HTTP 服务器',
@@ -132,6 +172,11 @@ export const Settings = {
     name: 'videoPlaybackResumeRestartThreshold',
     description: '电影续播完成阈值（百分比）',
     default: '95'
+  },
+  API_PORT: {
+    name: 'apiPort',
+    description: '本地 API 服务端口',
+    default: '14518'
   },
   DASHBOARD_LONG_UNVISITED_DAYS: {
     name: 'dashboardLongUnvisitedDays',

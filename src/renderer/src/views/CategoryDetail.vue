@@ -123,6 +123,7 @@ const showAudioCoverCandidateModal = ref(false)
 const showVideoCoverCandidateModal = ref(false)
 const showVideoSubCoverCandidateModal = ref(false)
 const showVideoOrderModal = ref(false)
+const showBatchArchivePackageNameModal = ref(false)
 const fetchResourceInfoLoading = ref(false)
 const videoCoverFrameLoading = ref(false)
 const formData = ref<any>({name: '', meta: {}})
@@ -134,6 +135,7 @@ const addResourceDuplicateTitle = ref('')
 let addResourceDuplicateCheckToken = 0
 const batchImportItems = ref<any[]>([])
 const isBatchImportSubmitting = ref(false)
+const isExportingWebsiteBookmarks = ref(false)
 const batchImportFetchInfoEnabled = ref(true)
 const batchAnalyzeCurrent = ref(0)
 const batchAnalyzeTotal = ref(0)
@@ -143,8 +145,15 @@ const batchImportRunning = ref(false)
 const batchAnalyzeCancelled = ref(false)
 const batchAnalyzeInBackground = ref(false)
 const batchAnalyzeToastDismissed = ref(false)
+const batchArchivePackageName = ref('')
+const showWebsiteBatchImportSourceModal = ref(false)
+const websiteBrowserSources = ref<any[]>([])
+const websiteBrowserSourcesLoading = ref(false)
+const websiteBrowserSourcesMessage = ref('')
 const formRef = ref()
 const basePathFormItemRef = ref()
+const detailHeaderRef = ref<HTMLElement | null>(null)
+const detailSelectionBarRef = ref<HTMLElement | null>(null)
 const audioCoverCandidates = ref<Array<{
   label: string
   coverPath: string
@@ -408,8 +417,12 @@ const renderWebsiteOptionLabel = (icon: string, rawLabel: string) =>
 const categorySettings = computed(() => categoryInfo.value?.meta?.extra ?? {
   extendTable: '',
   resourcePathType: null,
+  archiveEnabled: false,
+  archiveMode: 'none',
   addFirst: '个'
 })
+
+const categoryArchiveEnabled = computed(() => Boolean(categorySettings.value.archiveEnabled))
 
 const modelComponent = computed(() => {
   return resolveMetaFormComponent(String(categorySettings.value.extendTable ?? ''))
@@ -698,6 +711,8 @@ const selectedTypeList = ref<string[]>([])
 const selectedResourceIds = ref<string[]>([])
 const selectionModeManuallyEnabled = ref(false)
 const isBatchDeleting = ref(false)
+const isBatchArchiving = ref(false)
+const isBatchPackageArchiving = ref(false)
 const isBatchFetchingAlbumCover = ref(false)
 const isBatchLabelSubmitting = ref(false)
 const batchLabelField = ref<'tags' | 'types' | 'authors' | 'actors' | 'album'>('tags')
@@ -712,6 +727,9 @@ const sortBy = ref('createTime-desc')
 const localeEmulatorPath = ref('')
 const mtoolPath = ref('')
 const suppressAutoFetch = ref(false)
+const detailHeaderHeight = ref(56)
+const detailSelectionBarHeight = ref(0)
+let detailLayoutResizeObserver: ResizeObserver | null = null
 
 const categoryProfile = computed(() => resolveCategoryProfile({
   extendTable: String(categorySettings.value.extendTable ?? ''),
@@ -739,6 +757,10 @@ const showBatchImportProgressToast = computed(() =>
   batchProgressRunning.value && batchAnalyzeInBackground.value && !batchAnalyzeToastDismissed.value
 )
 const isBatchImportItemImportable = (item: any) => {
+  if (isWebsiteCategory.value) {
+    return Boolean(String(item?.url ?? '').trim())
+  }
+
   if (detailIsManga.value) {
     return Number(item?.imageCount ?? 0) > 0
   }
@@ -1922,6 +1944,38 @@ const titleMetaStyle = computed(() => ({
   color: injectedIsDark.value ? 'rgba(235, 235, 245, 0.6)' : 'rgba(31, 35, 41, 0.62)'
 }))
 
+const updateDetailLayoutHeights = () => {
+  detailHeaderHeight.value = detailHeaderRef.value?.offsetHeight || 56
+  detailSelectionBarHeight.value = resourceSelectionMode.value
+    ? (detailSelectionBarRef.value?.offsetHeight || 0)
+    : 0
+}
+
+const bindDetailLayoutResizeObserver = () => {
+  detailLayoutResizeObserver?.disconnect()
+  if (typeof ResizeObserver === 'undefined') {
+    return
+  }
+  detailLayoutResizeObserver = new ResizeObserver(() => {
+    updateDetailLayoutHeights()
+  })
+  if (detailHeaderRef.value) {
+    detailLayoutResizeObserver.observe(detailHeaderRef.value)
+  }
+  if (resourceSelectionMode.value && detailSelectionBarRef.value) {
+    detailLayoutResizeObserver.observe(detailSelectionBarRef.value)
+  }
+}
+
+const detailSelectionBarStyle = computed(() => ({
+  ...headerStyle.value,
+  top: `${detailHeaderHeight.value}px`
+}))
+
+const detailContentStyle = computed(() => ({
+  top: `${detailHeaderHeight.value + (resourceSelectionMode.value ? detailSelectionBarHeight.value : 0)}px`
+}))
+
 const footerStyle = computed(() => ({
   backgroundColor: injectedIsDark.value ? 'rgba(255, 255, 255, 0.02)' : 'rgba(255, 255, 255, 0.76)',
   borderTop: injectedIsDark.value ? '1px solid rgba(255, 255, 255, 0.08)' : '1px solid rgba(15, 23, 42, 0.08)'
@@ -2124,8 +2178,7 @@ const getRatingComment = (rating: number | null | undefined) => {
   if (normalizedRating >= 3.1) return '顶级'
   if (normalizedRating >= 2.1) return '人上人'
   if (normalizedRating >= 1.1) return 'NPC'
-  if (normalizedRating >= 0.6) return '拉'
-  if (normalizedRating > 0) return '拉完了'
+  if (normalizedRating >= 0.6) return '拉完了'
   return '区'
 }
 
@@ -2459,10 +2512,13 @@ onMounted(() => {
   void loadPlaybackResumeRestartThresholds()
   window.addEventListener('click', closeDetailAudioContextMenu)
   window.addEventListener('resize', closeDetailAudioContextMenu)
+  window.addEventListener('resize', updateDetailLayoutHeights)
   window.addEventListener('mousemove', handleDetailDrawerResizeMove)
   window.addEventListener('mouseup', handleDetailDrawerResizeEnd)
   reportCategoryRoutePerf('category-mounted')
   void nextTick(() => {
+    bindDetailLayoutResizeObserver()
+    updateDetailLayoutHeights()
     requestAnimationFrame(() => {
       reportCategoryRoutePerf('category-mounted-frame')
     })
@@ -2507,6 +2563,7 @@ const updateDetailDescriptionHeight = async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('click', closeDetailAudioContextMenu)
   window.removeEventListener('resize', closeDetailAudioContextMenu)
+  window.removeEventListener('resize', updateDetailLayoutHeights)
   if (showComicReader.value) {
     void stopComicReadingSession()
   }
@@ -2521,6 +2578,7 @@ onBeforeUnmount(() => {
   }
   window.removeEventListener('mousemove', handleDetailDrawerResizeMove)
   window.removeEventListener('mouseup', handleDetailDrawerResizeEnd)
+  detailLayoutResizeObserver?.disconnect()
   document.body.style.userSelect = ''
 })
 
@@ -2555,6 +2613,17 @@ watch(
   () => {
     updateDetailDescriptionHeight()
   }
+)
+
+watch(
+  () => [resourceSelectionMode.value, detailHeaderRef.value, detailSelectionBarRef.value] as const,
+  () => {
+    void nextTick(() => {
+      bindDetailLayoutResizeObserver()
+      updateDetailLayoutHeights()
+    })
+  },
+  { immediate: true, flush: 'post' }
 )
 
 watch(showPictureViewer, (visible, previousVisible) => {
@@ -2716,6 +2785,55 @@ const handleBatchImportAudioFiles = batchImportCategoryActions.handleBatchImport
 const handleBatchImportNovelFiles = batchImportCategoryActions.handleBatchImportNovelFiles
 const handleBatchImportVideoFiles = batchImportCategoryActions.handleBatchImportVideoFiles
 const handleBatchImportAnimeDirectories = batchImportCategoryActions.handleBatchImportAnimeDirectories
+const handleBatchImportWebsiteBookmarkFile = batchImportCategoryActions.handleBatchImportWebsiteBookmarkFile
+const handleBatchImportWebsiteBrowserSource = batchImportCategoryActions.handleBatchImportWebsiteBrowserSource
+
+const normalizedWebsiteBrowserSources = computed(() =>
+  websiteBrowserSources.value.map((source: any) => ({
+    ...source,
+    label: `${String(source?.browserName ?? '').trim() || '浏览器'} / ${String(source?.profileName ?? '').trim() || '默认配置'}`
+  }))
+)
+
+const handleOpenWebsiteBatchImportSourceModal = async () => {
+  showWebsiteBatchImportSourceModal.value = true
+  if (!websiteBrowserSources.value.length && !websiteBrowserSourcesMessage.value) {
+    await handleLoadWebsiteBrowserSources()
+  }
+}
+
+const handleLoadWebsiteBrowserSources = async () => {
+  try {
+    websiteBrowserSourcesLoading.value = true
+    websiteBrowserSourcesMessage.value = ''
+    const result = await window.api.service.listBrowserBookmarkSources()
+    websiteBrowserSources.value = Array.isArray(result?.data) ? result.data : []
+    if (!websiteBrowserSources.value.length) {
+      websiteBrowserSourcesMessage.value = String(result?.message ?? '未找到可直接导入的浏览器书签')
+    }
+  } catch (error) {
+    websiteBrowserSources.value = []
+    websiteBrowserSourcesMessage.value = error instanceof Error ? error.message : '检测浏览器书签失败'
+  } finally {
+    websiteBrowserSourcesLoading.value = false
+  }
+}
+
+const handleWebsiteBatchImportFromFile = async () => {
+  showWebsiteBatchImportSourceModal.value = false
+  await handleBatchImportWebsiteBookmarkFile()
+}
+
+const handleWebsiteBatchImportFromBrowser = async (source: any) => {
+  const sourceId = String(source?.id ?? '').trim()
+  if (!sourceId) {
+    showNotifyByType('warning', '批量导入网站', '请选择浏览器书签来源')
+    return
+  }
+
+  showWebsiteBatchImportSourceModal.value = false
+  await handleBatchImportWebsiteBrowserSource(sourceId, `${source.browserName ?? '浏览器'} / ${source.profileName ?? '默认配置'}`)
+}
 
 const batchImportWorkflow = useCategoryBatchImportWorkflow({
   categoryId,
@@ -2730,6 +2848,7 @@ const batchImportWorkflow = useCategoryBatchImportWorkflow({
   isNovelCategory,
   isVideoCategory,
   isVideoFolderCategory,
+  isWebsiteCategory,
   batchImportItems,
   batchImportFetchInfoEnabled,
   isBatchImportSubmitting,
@@ -2754,6 +2873,7 @@ const batchImportWorkflow = useCategoryBatchImportWorkflow({
   handleBatchImportNovelFiles,
   handleBatchImportVideoFiles,
   handleBatchImportAnimeDirectories,
+  handleBatchImportWebsites: handleOpenWebsiteBatchImportSourceModal,
   BATCH_ANALYZE_CONCURRENCY
 })
 const handleBatchImportClick = batchImportWorkflow.handleBatchImportClick
@@ -2773,6 +2893,53 @@ const handleBatchImportPreviewShowUpdate = (value: boolean) => {
 }
 const handleBatchImportFetchInfoEnabledUpdate = (value: boolean) => {
   batchImportFetchInfoEnabled.value = Boolean(value)
+}
+const handleExportBatchImportBookmarks = () => {
+  void (async () => {
+    if (!isWebsiteCategory.value) {
+      showNotifyByType('warning', '导出书签', '当前分类不是网站分类')
+      return
+    }
+
+    isExportingWebsiteBookmarks.value = true
+
+    try {
+      const allResources = await loadAllCategoryResources()
+      const exportItems = (allResources ?? [])
+        .map((resource) => {
+          const url = String(resource?.websiteMeta?.url ?? resource?.basePath ?? '').trim()
+          const folder = (resource?.types ?? [])
+            .map((item: any) => String(item?.type?.name ?? item?.name ?? '').trim())
+            .filter(Boolean)
+            .join(' / ')
+
+          return {
+            title: String(resource?.title ?? '').trim(),
+            url,
+            folder,
+            favicon: String(resource?.websiteMeta?.favicon ?? '').trim()
+          }
+        })
+        .filter((item) => item.url)
+
+      if (!exportItems.length) {
+        showNotifyByType('warning', '导出书签', '没有可导出的书签')
+        return
+      }
+
+      const result = await window.api.dialog.exportBookmarkHtmlFile(exportItems)
+      const resultType = String(result?.type ?? 'info')
+      if (resultType === 'info') {
+        return
+      }
+
+      showNotifyByType(resultType, '导出书签', String(result?.message ?? '导出完成'))
+    } catch (error) {
+      showNotifyByType('error', '导出书签', error instanceof Error ? error.message : '导出书签失败')
+    } finally {
+      isExportingWebsiteBookmarks.value = false
+    }
+  })()
 }
 const handleBatchImportItemCheckedChange = (index: number, value: boolean) => {
   if (!batchImportItems.value[index]) {
@@ -3264,7 +3431,7 @@ const handleDeleteResource = (resource: any) => {
     const resourceTitle = resource?.title ?? categoryName.value
     const confirmed = await confirmDialog(
       `删除${categoryName.value}`,
-      `确认删除“${resourceTitle}”吗？\n\n这只会删除数据库记录，不会删除本地文件。\n\n此操作仍然有风险，是否继续？`
+      `你确定要删除这个记录吗？\n“${resourceTitle}”将会消失！`
     )
 
     if (!confirmed) {
@@ -3290,10 +3457,9 @@ const handleDeleteResource = (resource: any) => {
 const handleDeleteResourceFiles = (resource: any) => {
   void (async () => {
     const resourceTitle = resource?.title ?? categoryName.value
-    const targetDirectory = String(resource?.basePath ?? '').trim()
     const confirmed = await confirmDialog(
       `删除${categoryName.value}文件`,
-      `高危操作：将会删除“${resourceTitle}”对应目录下的所有文件，并同步删除数据库记录。\n\n目标目录：${targetDirectory || '未知'}\n\n此操作不可恢复，请确认目录无误后再继续。`
+      `你确定要删除这个记录吗？\n“${resourceTitle}”将会永久消失！（真的很久！）`
     )
 
     if (!confirmed) {
@@ -3313,6 +3479,204 @@ const handleDeleteResourceFiles = (resource: any) => {
       showNotifyByType('error', `删除${categoryName.value}文件`, error instanceof Error ? error.message : '删除失败')
     }
   })()
+}
+
+const handleArchiveResource = async (resource: any) => {
+  const resourceId = String(resource?.id ?? '').trim()
+  if (!resourceId) {
+    showNotifyByType('warning', '归档资源', '资源ID无效')
+    return
+  }
+
+  if (!categoryArchiveEnabled.value) {
+    showNotifyByType('warning', '归档资源', '当前资源类型不支持归档')
+    return
+  }
+
+  try {
+    const archivePathSetting = await window.api.db.getSetting(Settings.ARCHIVE_PATH)
+    const archivePath = String(archivePathSetting?.value ?? Settings.ARCHIVE_PATH.default ?? '').trim()
+    if (!archivePath) {
+      showNotifyByType('warning', '归档资源', '请先在设置中配置资源归档路径')
+      return
+    }
+
+    const result = await window.api.service.archiveResource(resourceId)
+    const resultType = result?.type ?? 'info'
+    const resultMessage = result?.message ?? '已加入归档队列'
+    showNotifyByType(resultType, '归档资源', resultMessage)
+  } catch (error) {
+    showNotifyByType('error', '归档资源', error instanceof Error ? error.message : '归档失败')
+  }
+}
+
+const canArchiveCategoryResource = (resource: any) => {
+  if (!categoryArchiveEnabled.value) {
+    return false
+  }
+
+  const resourceId = String(resource?.id ?? '').trim()
+  const basePath = String(resource?.basePath ?? '').trim()
+  return Boolean(resourceId)
+    && Boolean(basePath)
+    && !Boolean(resource?.missingStatus)
+}
+
+const handleBatchArchiveResources = async () => {
+  if (!selectedResourceIds.value.length) {
+    return
+  }
+
+  try {
+    isBatchArchiving.value = true
+
+    const archivePathSetting = await window.api.db.getSetting(Settings.ARCHIVE_PATH)
+    const archivePath = String(archivePathSetting?.value ?? Settings.ARCHIVE_PATH.default ?? '').trim()
+    if (!archivePath) {
+      showNotifyByType('warning', '批量归档资源', '请先在设置中配置资源归档路径')
+      return
+    }
+
+    const selectedResources = resourceList.value.filter((item) =>
+      selectedResourceIds.value.includes(String(item?.id ?? ''))
+    )
+    const eligibleResources = selectedResources.filter(canArchiveCategoryResource)
+    if (!eligibleResources.length) {
+      showNotifyByType('warning', '批量归档资源', '当前选中的资源中没有可归档项')
+      return
+    }
+
+    const queueResult = await window.api.service.listArchiveQueueItems()
+    const activeQueuedResourceIds = new Set(
+      Array.isArray(queueResult?.data)
+        ? queueResult.data
+          .filter((item: any) => ['queued', 'running'].includes(String(item?.status ?? '').trim()))
+          .map((item: any) => String(item?.resourceId ?? '').trim())
+          .filter(Boolean)
+        : []
+    )
+    const pendingResources = eligibleResources.filter((item) =>
+      !activeQueuedResourceIds.has(String(item?.id ?? '').trim())
+    )
+
+    if (!pendingResources.length) {
+      showNotifyByType('warning', '批量归档资源', '选中的资源已在归档队列中，请勿重复添加')
+      return
+    }
+
+    const skippedCount = selectedResources.length - pendingResources.length
+    const result = await window.api.service.archiveResources(
+      pendingResources.map((item) => String(item?.id ?? '').trim()).filter(Boolean)
+    )
+    const resultType = result?.type ?? 'info'
+    const successIds = new Set(
+      Array.isArray(result?.data?.results)
+        ? result.data.results
+          .filter((item: any) => item?.type === 'success')
+          .map((item: any) => String(item?.resourceId ?? '').trim())
+          .filter(Boolean)
+        : []
+    )
+
+    let resultMessage = result?.message ?? '已加入归档队列'
+    if (skippedCount > 0) {
+      resultMessage += `，已跳过 ${skippedCount} 项不可归档或已在队列中的资源`
+    }
+    showNotifyByType(resultType, '批量归档资源', resultMessage)
+
+    if (successIds.size > 0) {
+      selectedResourceIds.value = selectedResourceIds.value.filter((id) => !successIds.has(String(id ?? '').trim()))
+      if (!selectedResourceIds.value.length) {
+        selectionModeManuallyEnabled.value = false
+      }
+    }
+  } catch (error) {
+    showNotifyByType('error', '批量归档资源', error instanceof Error ? error.message : '批量归档失败')
+  } finally {
+    isBatchArchiving.value = false
+  }
+}
+
+const buildDefaultBatchArchivePackageName = () =>
+  `${String(categoryName.value ?? '资源').trim() || '资源'}（${selectedResourceCount.value} 项）`
+
+const openBatchArchiveResourcesAsPackageModal = async () => {
+  if (selectedResourceIds.value.length < 2) {
+    return
+  }
+
+  try {
+    const archivePathSetting = await window.api.db.getSetting(Settings.ARCHIVE_PATH)
+    const archivePath = String(archivePathSetting?.value ?? Settings.ARCHIVE_PATH.default ?? '').trim()
+    if (!archivePath) {
+      showNotifyByType('warning', '合包归档资源', '请先在设置中配置资源归档路径')
+      return
+    }
+
+    const selectedResources = resourceList.value.filter((item) =>
+      selectedResourceIds.value.includes(String(item?.id ?? ''))
+    )
+    const eligibleResources = selectedResources.filter(canArchiveCategoryResource)
+    if (eligibleResources.length < 2) {
+      showNotifyByType('warning', '合包归档资源', '请至少选择 2 个可归档资源')
+      return
+    }
+
+    batchArchivePackageName.value = buildDefaultBatchArchivePackageName()
+    showBatchArchivePackageNameModal.value = true
+  } catch (error) {
+    showNotifyByType('error', '合包归档资源', error instanceof Error ? error.message : '合包归档失败')
+  }
+}
+
+const closeBatchArchiveResourcesAsPackageModal = () => {
+  showBatchArchivePackageNameModal.value = false
+  batchArchivePackageName.value = ''
+}
+
+const handleBatchArchiveResourcesAsPackage = async () => {
+  if (selectedResourceIds.value.length < 2) {
+    return
+  }
+
+  try {
+    isBatchPackageArchiving.value = true
+
+    const archivePathSetting = await window.api.db.getSetting(Settings.ARCHIVE_PATH)
+    const archivePath = String(archivePathSetting?.value ?? Settings.ARCHIVE_PATH.default ?? '').trim()
+    if (!archivePath) {
+      showNotifyByType('warning', '合包归档资源', '请先在设置中配置资源归档路径')
+      return
+    }
+
+    const selectedResources = resourceList.value.filter((item) =>
+      selectedResourceIds.value.includes(String(item?.id ?? ''))
+    )
+    const eligibleResources = selectedResources.filter(canArchiveCategoryResource)
+    if (eligibleResources.length < 2) {
+      showNotifyByType('warning', '合包归档资源', '请至少选择 2 个可归档资源')
+      return
+    }
+
+    const packageTitle = String(batchArchivePackageName.value ?? '').trim() || buildDefaultBatchArchivePackageName()
+    const result = await window.api.service.archiveResourcesAsPackage(
+      eligibleResources.map((item) => String(item?.id ?? '').trim()).filter(Boolean),
+      packageTitle
+    )
+    const resultType = result?.type ?? 'info'
+    const resultMessage = result?.message ?? '已加入合包归档队列'
+    showNotifyByType(resultType, '合包归档资源', resultMessage)
+
+    if (resultType === 'success') {
+      closeBatchArchiveResourcesAsPackageModal()
+      selectedResourceIds.value = []
+      selectionModeManuallyEnabled.value = false
+    }
+  } catch (error) {
+    showNotifyByType('error', '合包归档资源', error instanceof Error ? error.message : '合包归档失败')
+  } finally {
+    isBatchPackageArchiving.value = false
+  }
 }
 
 const handleAdminLaunchResource = async (resource: any) => {
@@ -3383,6 +3747,7 @@ const batchActions = useCategoryBatchActions({
   showNotifyByType,
   confirmDialog,
   fetchData,
+  loadAllCategoryResources,
   cloneFormData,
   mapResourceDetailToFormData,
   syncAudioAuthorFields,
@@ -3394,6 +3759,7 @@ const batchActions = useCategoryBatchActions({
   logger
 })
 const batchLabelIsSingleValue = batchActions.batchLabelIsSingleValue
+const isSelectingAllPages = batchActions.isSelectingAllPages
 const batchLabelOptions = batchActions.batchLabelOptions
 const batchLabelTitle = batchActions.batchLabelTitle
 const batchLabelPlaceholder = batchActions.batchLabelPlaceholder
@@ -3409,6 +3775,7 @@ const handleBatchLabelInputKeydown = batchActions.handleBatchLabelInputKeydown
 const createSelectOption = batchActions.createSelectOption
 const handleBatchLabelSearch = batchActions.handleBatchLabelSearch
 const handleSubmitBatchLabelAction = batchActions.handleSubmitBatchLabelAction
+const handleSelectAllPagesResources = batchActions.handleSelectAllPagesResources
 const handleSelectAllResources = batchActions.handleSelectAllResources
 const handleDeselectAllResources = batchActions.handleDeselectAllResources
 const handleInvertSelectedResources = batchActions.handleInvertSelectedResources
@@ -3832,7 +4199,7 @@ const handleToggleCompleted = async (resource: any) => {
       />
 
       <div class="detail-main" :style="pageStyle">
-        <div class="detail-header" :style="headerStyle">
+        <div ref="detailHeaderRef" class="detail-header" :style="headerStyle">
           <div class="detail-header__info">
             <div class="detail-header__title">{{ categoryName ?? '分类详情' }}</div>
             <div class="detail-header__subtitle" :style="titleMetaStyle">当前共 {{ totalResources }} 条资源</div>
@@ -3859,6 +4226,13 @@ const handleToggleCompleted = async (resource: any) => {
               <n-button v-if="showBatchImportButton" @click="handleBatchImportClick">
                 批量导入
               </n-button>
+              <n-button
+                v-if="showBatchImportButton && detailIsWebsite"
+                :loading="isExportingWebsiteBookmarks"
+                @click="handleExportBatchImportBookmarks"
+              >
+                导出书签
+              </n-button>
               <n-button type="primary" :disabled="currentCategoryBatchInBackground" @click="handleAddResource">
                 添加{{ categoryName ?? '资源' }}
               </n-button>
@@ -3867,14 +4241,18 @@ const handleToggleCompleted = async (resource: any) => {
         </div>
 
         <div
+          ref="detailSelectionBarRef"
           v-if="resourceSelectionMode"
           class="detail-selection-bar"
-          :style="headerStyle"
+          :style="detailSelectionBarStyle"
         >
           <div class="detail-selection-bar__meta" :style="titleMetaStyle">
             已选择 {{ selectedResourceCount }} 个{{ categoryName ?? '资源' }}
           </div>
-          <n-space class="detail-selection-bar__actions" :size="12">
+          <n-space class="detail-selection-bar__actions" :size="12" justify="end">
+            <n-button :loading="isSelectingAllPages" @click="handleSelectAllPagesResources">
+              全量选择
+            </n-button>
             <n-button @click="handleSelectAllResources">
               全选
             </n-button>
@@ -3922,6 +4300,24 @@ const handleToggleCompleted = async (resource: any) => {
               获取封面
             </n-button>
             <n-button
+              v-if="categoryArchiveEnabled"
+              type="warning"
+              :loading="isBatchArchiving"
+              @click="handleBatchArchiveResources"
+            >
+              {{ `批量归档（${selectedResourceCount}）` }}
+            </n-button>
+            <n-button
+              v-if="categoryArchiveEnabled"
+              type="warning"
+              ghost
+              :loading="isBatchPackageArchiving"
+              :disabled="selectedResourceCount < 2"
+              @click="openBatchArchiveResourcesAsPackageModal"
+            >
+              {{ `合包归档（${selectedResourceCount}）` }}
+            </n-button>
+            <n-button
               type="error"
               :loading="isBatchDeleting"
               @click="handleBatchSelectionAction"
@@ -3931,7 +4327,7 @@ const handleToggleCompleted = async (resource: any) => {
           </n-space>
         </div>
 
-        <div class="detail-content">
+        <div class="detail-content" :style="detailContentStyle">
           <AppScrollbar class="detail-scrollbar">
             <div class="detail-content__inner">
               <n-empty v-if="resourceList.length === 0" :description="`暂无${categoryName || ''}资源，点击按钮添加吧！`">
@@ -3967,6 +4363,7 @@ const handleToggleCompleted = async (resource: any) => {
                   :show-default-app-play="showCardDefaultAppOpen"
                   default-app-action-text="使用默认应用打开"
                   :show-add-to-playlist="isAudioCategory"
+                  :archive-enabled="categoryArchiveEnabled"
                   @launch="handleLaunchResource"
                   @admin-launch="handleAdminLaunchResource"
                   @mtool-launch="handleMtoolLaunchResource"
@@ -3983,6 +4380,7 @@ const handleToggleCompleted = async (resource: any) => {
                   @toggle-top="handleToggleTop"
                   @toggle-home-pin="handleToggleHomePin"
                   @toggle-select="handleToggleSelectResource"
+                  @archive="handleArchiveResource"
                   @delete="handleDeleteResource"
                   @delete-files="handleDeleteResourceFiles"
                   @modify-order="handleOpenVideoOrderDialog"
@@ -4125,6 +4523,56 @@ const handleToggleCompleted = async (resource: any) => {
       </template>
     </ResourceDetailDrawer>
 
+    <n-modal
+      v-model:show="showWebsiteBatchImportSourceModal"
+      preset="card"
+      title="批量导入网站"
+      :style="{ width: '640px' }"
+      :auto-focus="false"
+    >
+      <div class="website-import-source">
+        <button class="website-import-source__option" type="button" @click="handleWebsiteBatchImportFromFile">
+          <span class="website-import-source__title">选择 Chrome 导出文件</span>
+          <span class="website-import-source__desc">支持 Chrome 导出的 HTML 书签文件，也可选择 Chromium 书签 JSON 文件。</span>
+        </button>
+        <div class="website-import-source__browser">
+          <div class="website-import-source__browser-head">
+            <div>
+              <div class="website-import-source__title">从浏览器直接导入</div>
+              <div class="website-import-source__desc">读取本机 Chrome、Edge、Brave、Chromium 等浏览器的书签文件。</div>
+            </div>
+            <n-button size="small" :loading="websiteBrowserSourcesLoading" @click="handleLoadWebsiteBrowserSources">
+              刷新
+            </n-button>
+          </div>
+          <n-spin :show="websiteBrowserSourcesLoading">
+            <div v-if="normalizedWebsiteBrowserSources.length" class="website-import-source__browser-list">
+              <button
+                v-for="source in normalizedWebsiteBrowserSources"
+                :key="source.id"
+                class="website-import-source__browser-item"
+                type="button"
+                @click="handleWebsiteBatchImportFromBrowser(source)"
+              >
+                <span class="website-import-source__browser-label">{{ source.label }}</span>
+                <span class="website-import-source__browser-path">{{ source.filePath }}</span>
+              </button>
+            </div>
+            <n-empty
+              v-else
+              size="small"
+              :description="websiteBrowserSourcesMessage || '暂未检测到可直接导入的浏览器书签'"
+            />
+          </n-spin>
+        </div>
+      </div>
+      <template #footer>
+        <div class="modal-footer">
+          <n-button @click="showWebsiteBatchImportSourceModal = false">取消</n-button>
+        </div>
+      </template>
+    </n-modal>
+
     <CategoryBatchImportPanel
       :show-loading="showBatchImportLoading"
       :show-progress-toast="showBatchImportProgressToast"
@@ -4144,6 +4592,7 @@ const handleToggleCompleted = async (resource: any) => {
       :batch-import-fetch-info-enabled="batchImportFetchInfoEnabled"
       :detail-is-manga="detailIsManga"
       :detail-is-asmr="detailIsAsmr"
+      :detail-is-website="detailIsWebsite"
       :show-batch-import-button="showBatchImportButton"
       :website-type-select-options="websiteTypeSelectOptions"
       :can-toggle-batch-import-item="canToggleBatchImportItem"
@@ -4228,6 +4677,38 @@ const handleToggleCompleted = async (resource: any) => {
             </n-button>
             <n-button type="primary" :loading="isBatchLabelSubmitting" @click="handleSubmitBatchLabelAction">
               确认
+            </n-button>
+          </n-space>
+        </div>
+      </n-space>
+    </n-modal>
+
+    <n-modal
+      v-model:show="showBatchArchivePackageNameModal"
+      preset="card"
+      title="合包归档"
+      :style="{ width: '560px', maxWidth: '92vw' }"
+      @after-leave="closeBatchArchiveResourcesAsPackageModal"
+    >
+      <n-space vertical :size="16">
+        <n-alert type="info" :show-icon="false">
+          将选中的 {{ selectedResourceCount }} 项资源归档到同一个压缩包中。
+        </n-alert>
+        <n-form-item label="压缩包名称">
+          <n-input
+            v-model:value="batchArchivePackageName"
+            clearable
+            maxlength="120"
+            show-count
+            placeholder="请输入压缩包名称"
+            @keydown.enter.prevent="handleBatchArchiveResourcesAsPackage"
+          />
+        </n-form-item>
+        <div class="batch-label-modal__footer">
+          <n-space justify="end">
+            <n-button @click="closeBatchArchiveResourcesAsPackageModal">取消</n-button>
+            <n-button type="primary" :loading="isBatchPackageArchiving" @click="handleBatchArchiveResourcesAsPackage">
+              确认归档
             </n-button>
           </n-space>
         </div>
@@ -4627,6 +5108,92 @@ const handleToggleCompleted = async (resource: any) => {
   word-break: break-word;
 }
 
+.website-import-source {
+  display: grid;
+  gap: 14px;
+}
+
+.website-import-source__option,
+.website-import-source__browser,
+.website-import-source__browser-item {
+  width: 100%;
+  border: 1px solid rgba(128, 128, 128, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  text-align: left;
+  box-sizing: border-box;
+}
+
+.website-import-source__option,
+.website-import-source__browser-item {
+  cursor: pointer;
+  transition: border-color 0.18s ease, background-color 0.18s ease;
+}
+
+.website-import-source__option:hover,
+.website-import-source__browser-item:hover {
+  border-color: rgba(99, 226, 183, 0.4);
+  background: rgba(99, 226, 183, 0.06);
+}
+
+.website-import-source__option {
+  padding: 14px 16px;
+}
+
+.website-import-source__browser {
+  padding: 14px 16px;
+}
+
+.website-import-source__browser-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.website-import-source__title {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.website-import-source__desc,
+.website-import-source__browser-path {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  opacity: 0.68;
+}
+
+.website-import-source__browser-list {
+  display: grid;
+  gap: 8px;
+}
+
+.website-import-source__browser-item {
+  padding: 10px 12px;
+}
+
+.website-import-source__browser-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.website-import-source__browser-path {
+  word-break: break-all;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
 
 .detail-main {
   position: relative;
@@ -4687,42 +5254,40 @@ const handleToggleCompleted = async (resource: any) => {
 
 .detail-selection-bar {
   position: absolute;
-  top: 56px;
   left: 0;
   right: 0;
-  min-height: 52px;
   padding: 10px 20px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
   gap: 16px;
   border-bottom: 1px solid rgba(128, 128, 128, 0.16);
   box-sizing: border-box;
+  z-index: 1;
 }
 
 .detail-selection-bar__meta {
-  flex: 0 1 auto;
-  min-width: 0;
+  flex: 0 0 auto;
+  min-width: max-content;
   font-size: 13px;
   font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 
 .detail-selection-bar__actions {
-  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .detail-content {
   position: absolute;
-  top: 56px;
   right: 0;
   bottom: 64px;
   left: 0;
   overflow: hidden;
   min-height: 0;
-}
-
-.detail-selection-bar + .detail-content {
-  top: 108px;
 }
 
 .detail-scrollbar {
@@ -5012,15 +5577,14 @@ const handleToggleCompleted = async (resource: any) => {
   }
 
   .detail-selection-bar {
-    top: 104px;
-    min-height: 116px;
-    align-items: flex-start;
-    flex-wrap: wrap;
+    grid-template-columns: 1fr;
     row-gap: 12px;
   }
 
   .detail-selection-bar__meta {
     width: 100%;
+    min-width: 0;
+    white-space: normal;
   }
 
   .detail-selection-bar__actions {
@@ -5028,23 +5592,7 @@ const handleToggleCompleted = async (resource: any) => {
   }
 
   .detail-selection-bar__actions :deep(.n-space) {
-    width: 100%;
-    flex-wrap: wrap;
-    justify-content: flex-start;
-  }
-
-  .detail-selection-bar + .detail-content {
-    top: 232px;
-  }
-}
-
-@media (max-width: 820px) {
-  .detail-selection-bar {
-    min-height: 168px;
-  }
-
-  .detail-selection-bar + .detail-content {
-    top: 284px;
+    justify-content: flex-end;
   }
 }
 

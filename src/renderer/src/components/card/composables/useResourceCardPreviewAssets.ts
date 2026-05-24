@@ -76,7 +76,8 @@ export const useResourceCardPreviewAssets = (params: {
     maxWidth: websiteFaviconMaxWidth,
     maxHeight: websiteFaviconMaxHeight,
     fit: 'cover',
-    quality: websiteFaviconQuality
+    quality: websiteFaviconQuality,
+    fallbackToFileUrl: true
   }, normalizeWebsiteIconSource)
 
   const resolveCardFileIconPreviewUrl = async (basePath: string, fileName: string) =>

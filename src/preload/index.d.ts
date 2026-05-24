@@ -2,7 +2,13 @@ import { ElectronAPI } from '@electron-toolkit/preload'
 import {SettingDetail} from "../common/constants";
 import {settings, category} from "../main/db/schema";
 import { ResourceForm } from '../main/model/models'
-import type { AppNotificationMessage, BatchImportProgressMessage, ResourceStateChangedMessage } from '../main/service/notification-queue.service'
+import type {
+  AppNotificationMessage,
+  BatchImportProgressMessage,
+  ResourceArchiveProgressMessage,
+  ResourceStateChangedMessage,
+  WebsiteCoverProgressMessage
+} from '../main/service/notification-queue.service'
 
 type HomePinnedResource = {
   id: string
@@ -80,6 +86,10 @@ declare global {
         getCompletedResourceCountByCategoryId: (categoryId: string) => Promise<number>,
         getRunningResourceCountByCategoryId: (categoryId: string) => Promise<number>,
         getGovernanceIssueWorkbench: (query?: any) => Promise<any>,
+        getGovernanceTagWorkbench: () => Promise<any>,
+        renameGovernanceTagEntity: (kind: 'tag' | 'type', id: string, name: string) => Promise<any>,
+        deleteGovernanceTagEntity: (kind: 'tag' | 'type', id: string) => Promise<any>,
+        deleteGovernanceTagEntities: (kind: 'tag' | 'type', ids: string[]) => Promise<any>,
         getTypeByCategoryId: (categoryId: string) => Promise<any>,
         getTagByCategoryId: (categoryId: string) => Promise<any>,
         getSelectDictData: (dictType: string) => Promise<any>,
@@ -90,6 +100,8 @@ declare global {
         selectFolders: () => Promise<string[]>,
         selectFile: (extensions: string[]) => Promise<any>,
         selectFiles: (extensions: string[]) => Promise<string[]>,
+        selectBookmarkFile: () => Promise<string | null>,
+        exportBookmarkHtmlFile: (items: Array<{ title?: string; url?: string; folder?: string; favicon?: string }>) => Promise<any>,
         selectGameLaunchFile: (directoryPath: string) => Promise<string | null>,
         readImageAsDataUrl: (filePath: string) => Promise<string | null>,
         getImagePreviewUrl: (
@@ -164,6 +176,10 @@ declare global {
         importBatchGameDirectories: (categoryId: string, items: any[]) => Promise<any>,
         importBatchMultiImageDirectories: (categoryId: string, items: any[]) => Promise<any>,
         importBatchAsmrDirectories: (categoryId: string, items: any[]) => Promise<any>,
+        listBrowserBookmarkSources: () => Promise<any>,
+        analyzeWebsiteBookmarkFile: (filePath: string) => Promise<any>,
+        analyzeWebsiteBookmarksFromBrowser: (sourceId: string) => Promise<any>,
+        importBatchWebsiteBookmarks: (categoryId: string, items: any[]) => Promise<any>,
         fetchResourceInfo: (websiteId: string, resourceId: string) => Promise<any>,
         fetchWebsiteInfo: (url: string) => Promise<any>,
         fetchWebsiteCover: (url: string) => Promise<any>,
@@ -197,17 +213,34 @@ declare global {
         updateResourceCompleted: (resourceId: string, completed: boolean) => Promise<any>,
         updateResourceTop: (resourceId: string, top: boolean) => Promise<any>,
         updateResourceHomePin: (resourceId: string, pinned: boolean) => Promise<any>,
-        setGovernanceIssueIgnored: (resourceId: string, issueType: 'brokenPath' | 'missingCover' | 'longUnvisited', ignored: boolean) => Promise<any>,
+        setGovernanceIssueIgnored: (resourceId: string, issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' | 'duplicateResource', ignored: boolean) => Promise<any>,
         batchSetGovernanceIssueIgnored: (
-          items: Array<{ resourceId: string; issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' }>,
+          items: Array<{ resourceId: string; issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' | 'duplicateResource' }>,
           ignored: boolean
         ) => Promise<any>,
+        archiveResource: (resourceId: string) => Promise<any>,
+        archiveResources: (resourceIds: string[]) => Promise<any>,
+        archiveResourcesAsPackage: (resourceIds: string[], packageTitle?: string) => Promise<any>,
+        listArchivedPackages: () => Promise<any>,
+        restoreArchivedPackage: (archiveId: string) => Promise<any>,
+        restoreArchivedPackages: (archiveIds: string[]) => Promise<any>,
+        deleteArchivedPackage: (archiveId: string) => Promise<any>,
+        deleteArchivedPackages: (archiveIds: string[]) => Promise<any>,
+        listArchiveQueueItems: () => Promise<any>,
+        deleteArchiveQueueItem: (queueItemId: string) => Promise<any>,
+        stopArchiveQueue: () => Promise<any>,
+        rescanMissingResources: (resourceIds: string[]) => Promise<any>,
+        syncEverythingClientFromSettings: () => Promise<any>,
+        restartApiServer: () => Promise<{ host: string; port: number; restarted: boolean }>,
+        testEverythingHttpServer: (payload?: { host?: string; port?: string; username?: string; password?: string }) => Promise<any>,
         startBackgroundServices: (reason?: string, delayMs?: number) => Promise<boolean>,
         startNotificationPush: () => Promise<boolean>,
         onNotificationPush: (listener: (message: AppNotificationMessage) => void) => () => void,
         onResourceStateChanged: (listener: (message: ResourceStateChangedMessage) => void) => () => void,
         onVideoFrameCaptureShortcut: (listener: () => void) => () => void,
         onBatchImportProgress: (listener: (message: BatchImportProgressMessage) => void) => () => void,
+        onResourceArchiveProgress: (listener: (message: ResourceArchiveProgressMessage) => void) => () => void,
+        onWebsiteCoverProgress: (listener: (message: WebsiteCoverProgressMessage) => void) => () => void,
       }
     }
   }

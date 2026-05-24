@@ -1,4 +1,4 @@
-import { computed, type ComputedRef, type Ref } from 'vue'
+import { computed, ref, type ComputedRef, type Ref } from 'vue'
 
 type BatchLabelField = 'tags' | 'types' | 'authors' | 'actors' | 'album'
 type BatchLabelMode = 'add' | 'remove'
@@ -34,6 +34,7 @@ interface UseCategoryBatchActionsOptions {
   showNotifyByType: (type: NotifyType, title: string, content: string) => void
   confirmDialog: (title: string, content: string) => Promise<boolean>
   fetchData: () => Promise<void>
+  loadAllCategoryResources: () => Promise<any[]>
   cloneFormData: (data: any) => any
   mapResourceDetailToFormData: (detail: any) => any
   syncAudioAuthorFields: (formData: any, values?: string[]) => void
@@ -56,6 +57,7 @@ const splitManualValues = (input: string) =>
     .filter(Boolean)
 
 export const useCategoryBatchActions = (options: UseCategoryBatchActionsOptions) => {
+  const isSelectingAllPages = ref(false)
   const batchLabelIsSingleValue = computed(() => options.batchLabelField.value === 'album')
 
   const batchLabelOptions = computed(() => {
@@ -425,6 +427,31 @@ export const useCategoryBatchActions = (options: UseCategoryBatchActionsOptions)
     options.selectedResourceIds.value = [...selectedSet]
   }
 
+  const handleSelectAllPagesResources = async () => {
+    try {
+      isSelectingAllPages.value = true
+      const allResources = await options.loadAllCategoryResources()
+      const allResourceIds = Array.from(new Set(
+        (Array.isArray(allResources) ? allResources : [])
+          .map((item) => String(item?.id ?? '').trim())
+          .filter(Boolean)
+      ))
+
+      if (!allResourceIds.length) {
+        options.showNotifyByType('warning', '全量选择', `当前没有可选择的${options.categoryName.value}`)
+        return
+      }
+
+      options.selectionModeManuallyEnabled.value = true
+      options.selectedResourceIds.value = allResourceIds
+      options.showNotifyByType('success', '全量选择', `已选择当前筛选下的 ${allResourceIds.length} 个${options.categoryName.value}`)
+    } catch (error) {
+      options.showNotifyByType('error', '全量选择', error instanceof Error ? error.message : '跨页选择失败')
+    } finally {
+      isSelectingAllPages.value = false
+    }
+  }
+
   const handleDeselectAllResources = () => {
     options.selectedResourceIds.value = []
   }
@@ -601,8 +628,8 @@ export const useCategoryBatchActions = (options: UseCategoryBatchActionsOptions)
     const confirmed = await options.confirmDialog(
       `批量删除${options.categoryName.value}`,
       runningCount > 0
-        ? `确认删除选中的 ${options.selectedResourceIds.value.length} 个${options.categoryName.value}吗？其中 ${runningCount} 个正在运行，将在真正删除时自动跳过。`
-        : `确认删除选中的 ${options.selectedResourceIds.value.length} 个${options.categoryName.value}吗？`
+        ? `你确定要删除这些记录吗？\n选中的 ${options.selectedResourceIds.value.length} 个${options.categoryName.value}将会消失！`
+        : `你确定要删除这些记录吗？\n选中的 ${options.selectedResourceIds.value.length} 个${options.categoryName.value}将会消失！`
     )
 
     if (!confirmed) {
@@ -644,6 +671,7 @@ export const useCategoryBatchActions = (options: UseCategoryBatchActionsOptions)
 
   return {
     batchLabelIsSingleValue,
+    isSelectingAllPages,
     batchLabelOptions,
     batchLabelTitle,
     batchLabelPlaceholder,
@@ -660,6 +688,7 @@ export const useCategoryBatchActions = (options: UseCategoryBatchActionsOptions)
     createSelectOption,
     handleBatchLabelSearch,
     handleSubmitBatchLabelAction,
+    handleSelectAllPagesResources,
     handleSelectAllResources,
     handleDeselectAllResources,
     handleInvertSelectedResources,

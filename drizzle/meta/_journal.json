@@ -134,6 +134,20 @@
       "when": 1777968000000,
       "tag": "0018_add_resource_search_text",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1779187200000,
+      "tag": "0019_add_resource_issue_ignore",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1779571200000,
+      "tag": "0020_replace_resource_archive_with_package_tables",
+      "breakpoints": true
     }
   ]
 }

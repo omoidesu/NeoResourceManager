@@ -20,7 +20,8 @@ import { detectGameEngineProfile } from '../util/game-engine-detector'
 import { detectGameLaunchFile } from '../util/game-launch-file-detector'
 import { analyzeNovelFile } from '../util/novel-file-analyzer'
 import { parseFile } from 'music-metadata'
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
+import type { ChildProcess } from 'child_process'
 import crypto from 'crypto'
 
 const fs = require('fs-extra')
@@ -28,7 +29,9 @@ const hidefile = require('hidefile')
 const ffmpegPath = require('ffmpeg-static') as string | null
 const ffprobeStatic = require('ffprobe-static') as { path?: string }
 const VIDEO_COVER_FRAME_COUNT = 5
-const MAX_COVER_PROCESS_PIXELS = 100_000_000
+const MAX_COVER_PROCESS_PIXELS = 36_000_000
+const MAX_COVER_SOURCE_BYTES = 100 * 1024 * 1024
+const COVER_PROCESS_TIMEOUT_MS = 20_000
 const VIDEO_FIXED_COVER_FRAME_TIMES = [
   { label: '1 分钟', time: 60 },
   { label: '5 分钟', time: 5 * 60 },
@@ -40,6 +43,13 @@ const WEBSITE_COVER_CAPTURE_WIDTH = 1440
 const WEBSITE_COVER_CAPTURE_HEIGHT = 900
 const WEBSITE_COVER_CAPTURE_TIMEOUT_MS = 20000
 const WEBSITE_COVER_STABILIZE_DELAY_MS = 1800
+const WEBSITE_COVER_BACKFILL_CONCURRENCY = 5
+const WEBSITE_INFO_BACKFILL_TIMEOUT_MS = 45000
+const WEBSITE_COVER_BACKFILL_TIMEOUT_MS = 45000
+const WEBSITE_COVER_CAPTURE_OPERATION_TIMEOUT_MS = 10000
+const WEBSITE_COVER_WRITE_TIMEOUT_MS = 15000
+const COVER_THUMBNAIL_MAX_WIDTH = 360
+const COVER_THUMBNAIL_WEBP_QUALITY = 76
 const WEBSITE_DIRECT_DOWNLOAD_EXTENSION_SET = new Set(WEBSITE_DIRECT_DOWNLOAD_EXTENSIONS)
 const VIDEO_SUB_SYNC_TTL_MS = 30 * 1000
 const STORE_URL_DICT_TYPES = [
@@ -50,6 +60,61 @@ const STORE_URL_DICT_TYPES = [
   DictType.NOVEL_SITE_TYPE,
 ]
 let cachedStoreOptionMap: Map<string, any> | null = null
+
+type ArchiveQueueItemStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+
+type ArchiveQueueItem = {
+  id: string
+  operation: 'archive' | 'restore'
+  archiveId: string
+  resourceId: string
+  resourceIds: string[]
+  title: string
+  coverPath: string
+  sourcePath: string
+  sourcePaths: string[]
+  archivePath: string
+  archiveFormat: string
+  status: ArchiveQueueItemStatus
+  progress: number
+  currentIndex: number
+  totalCount: number
+  message: string
+  errorMessage: string
+  createdAt: number
+  startedAt: number | null
+  finishedAt: number | null
+}
+
+type BrowserBookmarkSource = {
+  id: string
+  browserName: string
+  profileName: string
+  filePath: string
+}
+
+type WebsiteBookmarkItem = {
+  title: string
+  url: string
+  favicon?: string
+  folder?: string
+  source?: string
+  exists?: boolean
+  existingResourceTitle?: string
+  errorMessage?: string
+  checked?: boolean
+  fetchInfoEnabled?: boolean
+}
+
+type WebsiteCoverBackfillTask = {
+  resourceId: string
+  categoryId: string
+  title: string
+  url: string
+  favicon?: string
+}
+
+type ArchiveSourceMode = 'file' | 'directory' | 'none'
 
 function formatDebugPayload(payload: Record<string, any>) {
   try {
@@ -63,6 +128,11 @@ export class ResourceService {
   static readonly logger = createLogger('ResourceService')
   private static readonly videoSubSyncTaskMap = new Map<string, Promise<any>>()
   private static readonly videoSubSyncCompletedAtMap = new Map<string, number>()
+  private static readonly archiveQueueItems: ArchiveQueueItem[] = []
+  private static archiveQueueProcessorRunning = false
+  private static archiveQueueProcessorScheduled = false
+  private static archiveCancellationRequested = false
+  private static archiveActiveProcess: ChildProcess | null = null
   static normalizeVideoSubPath(targetPath: string) {
     return String(targetPath ?? '').replace(/\\/g, '/').trim()
   }
@@ -1292,17 +1362,8 @@ export class ResourceService {
         const fallbackTitle = getHostnameLabel(finalUrl) || getHostnameLabel(normalizedInputUrl) || normalizedInputUrl
         data.website = finalUrl
         data.name = fallbackTitle
-        data.favicon = buildFallbackFaviconUrl(finalUrl)
         data.isDownloadLink = false
-
-        if (data.favicon) {
-          const faviconCacheKey = `website-fetch-${crypto
-            .createHash('sha1')
-            .update(`${finalUrl}::${String(data.favicon)}::fallback`)
-            .digest('hex')
-            .slice(0, 16)}`
-          data.favicon = await cacheWebsiteFaviconToCache(String(data.favicon), faviconCacheKey, finalUrl)
-        }
+        data.favicon = await resolveWebsiteFaviconToCache('', finalUrl, buildWebsiteFetchCacheKey(finalUrl, 'fallback'))
 
         ResourceService.logger.warn('fetchWebsiteInfo html preview failed, fallback to basic website info', {
           url: normalizedInputUrl,
@@ -1325,21 +1386,12 @@ export class ResourceService {
 
       if (isHtmlContentType(contentType) || /<html[\s>]/i.test(htmlText)) {
         data.name = extractHtmlTitle(htmlText) || fallbackTitle
-        data.favicon = extractFaviconUrl(htmlText, finalUrl) || buildFallbackFaviconUrl(finalUrl)
+        data.favicon = await resolveWebsiteFaviconToCache(htmlText, finalUrl, buildWebsiteFetchCacheKey(finalUrl, htmlText))
         data.isDownloadLink = false
       } else {
         data.name = fallbackTitle
         data.favicon = ''
         data.isDownloadLink = true
-      }
-
-      if (data.favicon && !data.isDownloadLink) {
-        const faviconCacheKey = `website-fetch-${crypto
-          .createHash('sha1')
-          .update(`${finalUrl}::${String(data.favicon)}`)
-          .digest('hex')
-          .slice(0, 16)}`
-        data.favicon = await cacheWebsiteFaviconToCache(String(data.favicon), faviconCacheKey, finalUrl)
       }
 
       if (!hasUsefulFetchedData(data) && !data.favicon) {
@@ -1383,10 +1435,19 @@ export class ResourceService {
 
     try {
       const probeResult = await inspectWebsiteScreenshotTarget(normalizedInputUrl)
-      const normalizedFinalUrl = String(probeResult.url || normalizedInputUrl).trim() || normalizedInputUrl
+      const normalizedFinalUrl = preserveOriginalUrlHash(
+        String(probeResult.url || normalizedInputUrl).trim() || normalizedInputUrl,
+        normalizedInputUrl
+      )
       const isDownloadLink = probeResult.reason === 'download-url' || probeResult.reason === 'download-response'
 
       if (!probeResult.canCapture || isDownloadLink) {
+        ResourceService.logger.warn('fetchWebsiteCover skipped target', {
+          url: normalizedInputUrl,
+          finalUrl: normalizedFinalUrl,
+          reason: probeResult.reason,
+          isDownloadLink
+        })
         return {
           type: 'warning',
           message: isDownloadLink ? '当前链接更像下载地址，无法自动获取页面图片' : '当前网站暂不支持自动获取页面图片',
@@ -1401,6 +1462,11 @@ export class ResourceService {
       const previewResourceId = `website-cover-preview-${generateId()}`
       const screenshotBuffer = await captureWebsiteCoverBuffer(normalizedFinalUrl, previewResourceId)
       const coverPath = await writeManagedWebsiteCover(previewResourceId, screenshotBuffer)
+      ResourceService.logger.info('fetchWebsiteCover success', {
+        url: normalizedInputUrl,
+        finalUrl: normalizedFinalUrl,
+        coverPath
+      })
 
       return {
         type: 'success',
@@ -1421,6 +1487,442 @@ export class ResourceService {
         message: error instanceof Error ? error.message : '获取页面图片失败',
       }
     }
+  }
+
+  static async listBrowserBookmarkSources() {
+    try {
+      const sources = await discoverBrowserBookmarkSources()
+      return {
+        type: sources.length ? 'success' : 'warning',
+        message: sources.length ? '已找到浏览器书签文件' : '未找到可直接导入的浏览器书签文件',
+        data: sources
+      }
+    } catch (error) {
+      ResourceService.logger.error('listBrowserBookmarkSources failed', {
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return {
+        type: 'error',
+        message: error instanceof Error ? error.message : '检测浏览器书签失败',
+        data: []
+      }
+    }
+  }
+
+  static async analyzeWebsiteBookmarkFile(filePath: string) {
+    const normalizedFilePath = path.normalize(String(filePath ?? '').trim())
+    if (!normalizedFilePath || !await fs.pathExists(normalizedFilePath)) {
+      return {
+        type: 'warning',
+        message: '书签文件不存在',
+        data: {
+          sourceLabel: '',
+          items: []
+        }
+      }
+    }
+
+    try {
+      const items = await readWebsiteBookmarksFromFile(normalizedFilePath)
+      const analyzedItems = await analyzeWebsiteBookmarkItems(items, path.basename(normalizedFilePath))
+      return {
+        type: analyzedItems.length ? 'success' : 'warning',
+        message: analyzedItems.length ? `已解析 ${analyzedItems.length} 个网站书签` : '未在文件中找到可导入的网站书签',
+        data: {
+          sourceLabel: path.basename(normalizedFilePath),
+          items: analyzedItems
+        }
+      }
+    } catch (error) {
+      ResourceService.logger.error('analyzeWebsiteBookmarkFile failed', {
+        filePath: normalizedFilePath,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return {
+        type: 'error',
+        message: error instanceof Error ? error.message : '解析书签文件失败',
+        data: {
+          sourceLabel: path.basename(normalizedFilePath),
+          items: []
+        }
+      }
+    }
+  }
+
+  static async analyzeWebsiteBookmarksFromBrowser(sourceId: string) {
+    try {
+      const sources = await discoverBrowserBookmarkSources()
+      const source = sources.find((item) => item.id === sourceId)
+      if (!source) {
+        return {
+          type: 'warning',
+          message: '未找到所选浏览器书签',
+          data: {
+            sourceLabel: '',
+            items: []
+          }
+        }
+      }
+
+      const items = await readWebsiteBookmarksFromFile(source.filePath)
+      const sourceLabel = `${source.browserName} / ${source.profileName}`
+      const analyzedItems = await analyzeWebsiteBookmarkItems(items, sourceLabel)
+      return {
+        type: analyzedItems.length ? 'success' : 'warning',
+        message: analyzedItems.length ? `已解析 ${analyzedItems.length} 个网站书签` : '未在浏览器书签中找到可导入的网站',
+        data: {
+          sourceLabel,
+          items: analyzedItems
+        }
+      }
+    } catch (error) {
+      ResourceService.logger.error('analyzeWebsiteBookmarksFromBrowser failed', {
+        sourceId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return {
+        type: 'error',
+        message: error instanceof Error ? error.message : '读取浏览器书签失败',
+        data: {
+          sourceLabel: '',
+          items: []
+        }
+      }
+    }
+  }
+
+  static async importBatchWebsiteBookmarks(categoryId: string, items: WebsiteBookmarkItem[]) {
+    const results: Array<{ url: string; type: string; message: string }> = []
+    const coverBackfillTasks: WebsiteCoverBackfillTask[] = []
+    const total = Array.isArray(items) ? items.length : 0
+    let completed = 0
+
+    const pushImportProgress = (message: string, done = false) => {
+      NotificationQueueService.getInstance().pushBatchImportProgress({
+        categoryId,
+        stage: 'import',
+        current: completed,
+        total,
+        message,
+        done
+      })
+    }
+
+    for (const item of items ?? []) {
+      const normalizedUrl = normalizeWebsiteFetchUrl(String(item?.url ?? '').trim(), 'https')
+      const title = String(item?.title ?? '').trim()
+      const favicon = String(item?.favicon ?? '').trim()
+      const bookmarkTypeName = getBookmarkFolderTypeName(String(item?.folder ?? '').trim())
+      const coverBackfillEnabled = item?.fetchInfoEnabled !== false
+
+      if (!normalizedUrl) {
+        results.push({
+          url: String(item?.url ?? '').trim(),
+          type: 'warning',
+          message: '网站地址无效'
+        })
+        completed += 1
+        pushImportProgress(title || String(item?.url ?? '').trim())
+        continue
+      }
+
+      const existingResource = await DatabaseService.getResourceByStoragePath(normalizedUrl, null)
+      if (existingResource) {
+        results.push({
+          url: normalizedUrl,
+          type: 'info',
+          message: existingResource.title ? `已存在：${existingResource.title}` : '该网站已存在'
+        })
+        completed += 1
+        pushImportProgress(title || normalizedUrl)
+        continue
+      }
+
+      const saveResult = await ResourceService.saveResource({
+        author: '',
+        actors: [],
+        basePath: normalizedUrl,
+        categoryId,
+        coverPath: '',
+        description: '',
+        name: title || getHostnameLabel(normalizedUrl) || normalizedUrl,
+        tags: [],
+        types: bookmarkTypeName ? [bookmarkTypeName] : [],
+        meta: {
+          additionalStores: [],
+          commandLineArgs: '',
+          engine: '',
+          gameId: '',
+          illust: '',
+          language: '',
+          lastReadPage: 0,
+          nameEn: '',
+          nameJp: '',
+          nameZh: '',
+          nickname: '',
+          pixivId: '',
+          resolution: '',
+          format: '',
+          scenario: '',
+          translator: '',
+          version: '',
+          website: normalizedUrl,
+          websiteType: '',
+          favicon: '',
+          isDownloadLink: false
+        } as ResourceMeta
+      } as ResourceForm)
+
+      const savedResourceId = String((saveResult as any)?.data?.resourceId ?? '').trim()
+      const saveResultType = String(saveResult?.type ?? 'info')
+      if (coverBackfillEnabled && savedResourceId && saveResultType !== 'error') {
+        coverBackfillTasks.push({
+          resourceId: savedResourceId,
+          categoryId,
+          title: title || getHostnameLabel(normalizedUrl) || normalizedUrl,
+          url: normalizedUrl,
+          favicon
+        })
+      }
+
+      results.push({
+        url: normalizedUrl,
+        type: saveResultType,
+        message: String(saveResult?.message ?? '处理完成')
+      })
+      completed += 1
+      pushImportProgress(title || normalizedUrl)
+    }
+
+    const successCount = results.filter((item) => item.type === 'success').length
+    const skippedCount = results.filter((item) => item.type === 'info').length
+    const failedCount = results.filter((item) => item.type === 'error').length
+    pushImportProgress('', true)
+
+    if (coverBackfillTasks.length) {
+      void ResourceService.runWebsiteCoverBackfill(coverBackfillTasks)
+    }
+
+    return {
+      type: failedCount > 0 && successCount === 0 ? 'error' : 'success',
+      message: coverBackfillTasks.length
+        ? `批量导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}。网站图标和封面正在后台获取。`
+        : `批量导入完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}`,
+      data: results
+    }
+  }
+
+  private static async runWebsiteCoverBackfill(tasks: WebsiteCoverBackfillTask[]) {
+    const normalizedTasks = (tasks ?? [])
+      .map((task) => ({
+        resourceId: String(task?.resourceId ?? '').trim(),
+        categoryId: String(task?.categoryId ?? '').trim(),
+        title: String(task?.title ?? '').trim(),
+        url: String(task?.url ?? '').trim(),
+        favicon: String(task?.favicon ?? '').trim()
+      }))
+      .filter((task) => task.resourceId && task.categoryId && task.url)
+
+    if (!normalizedTasks.length) {
+      return
+    }
+
+    const taskId = `website-cover-${Date.now()}-${generateId()}`
+    const total = normalizedTasks.length
+    let successCount = 0
+    let failedCount = 0
+    let skippedCount = 0
+    let completedCount = 0
+
+    const pushProgress = (params: {
+      current: number
+      title?: string
+      url?: string
+      favicon?: string
+      message: string
+      done?: boolean
+      success?: boolean
+    }) => {
+      const current = Math.max(0, Math.min(total, Number(params.current ?? 0)))
+      const progress = total > 0 ? Math.max(0, Math.min(100, Math.round((current / total) * 100))) : 0
+      NotificationQueueService.getInstance().pushWebsiteCoverProgress({
+        taskId,
+        categoryId: normalizedTasks[0]?.categoryId ?? '',
+        current,
+        total,
+        progress,
+        title: String(params.title ?? '').trim(),
+        url: String(params.url ?? '').trim(),
+        favicon: String(params.favicon ?? '').trim(),
+        message: params.message,
+        done: params.done,
+        success: params.success,
+        successCount,
+        failedCount,
+        skippedCount
+      })
+    }
+
+    pushProgress({
+      current: 0,
+      message: '正在准备获取网站图标和封面'
+    })
+
+    const processTask = async (task: typeof normalizedTasks[number]) => {
+      pushProgress({
+        current: completedCount,
+        title: task.title,
+        url: task.url,
+        message: '正在获取网站图标和封面'
+      })
+
+      let taskFaviconPath = ''
+      try {
+        let taskUpdated = false
+        let taskFailed = false
+
+        try {
+          const websiteInfoResult = await withTimeout(
+            ResourceService.fetchWebsiteInfo(task.url),
+            WEBSITE_INFO_BACKFILL_TIMEOUT_MS,
+            '网站图标获取超时'
+          )
+          const websiteInfoData = (websiteInfoResult as any)?.data ?? null
+          const fetchedWebsiteUrl = normalizeWebsiteFetchUrl(String(websiteInfoData?.website ?? '').trim(), 'https') || task.url
+          const fetchedFavicon = String(websiteInfoData?.favicon ?? '').trim()
+          const fetchedIsDownloadLink = Boolean(websiteInfoData?.isDownloadLink)
+
+          if (fetchedFavicon && !fetchedIsDownloadLink) {
+            const cachedFavicon = await withTimeout(
+              cacheWebsiteFaviconToCache(
+                fetchedFavicon,
+                task.resourceId,
+                fetchedWebsiteUrl,
+                { returnInputOnFailure: false }
+              ),
+              WEBSITE_INFO_BACKFILL_TIMEOUT_MS,
+              '网站图标缓存超时'
+            )
+            if (cachedFavicon && !/^data:/i.test(cachedFavicon)) {
+              taskFaviconPath = cachedFavicon
+              DatabaseService.upsertWebsiteMeta({
+                resourceId: task.resourceId,
+                url: fetchedWebsiteUrl,
+                favicon: cachedFavicon,
+                isDownloadLink: false
+              })
+              taskUpdated = true
+            }
+          }
+        } catch (error) {
+          ResourceService.logger.warn('website favicon fetch from page failed', {
+            resourceId: task.resourceId,
+            url: task.url,
+            error: error instanceof Error ? error.message : String(error)
+          })
+        }
+
+        if (!taskFaviconPath && task.favicon) {
+          try {
+            const cachedFavicon = await withTimeout(
+              cacheWebsiteFaviconToCache(
+                task.favicon,
+                task.resourceId,
+                task.url,
+                { returnInputOnFailure: false }
+              ),
+              WEBSITE_INFO_BACKFILL_TIMEOUT_MS,
+              '导入图标缓存超时'
+            )
+            if (cachedFavicon && !/^data:/i.test(cachedFavicon)) {
+              taskFaviconPath = cachedFavicon
+              DatabaseService.upsertWebsiteMeta({
+                resourceId: task.resourceId,
+                url: task.url,
+                favicon: cachedFavicon,
+                isDownloadLink: false
+              })
+              taskUpdated = true
+            }
+          } catch (error) {
+            ResourceService.logger.warn('website favicon backfill failed', {
+              resourceId: task.resourceId,
+              url: task.url,
+              error: error instanceof Error ? error.message : String(error)
+            })
+          }
+        }
+
+        const coverResult = await withTimeout(
+          ResourceService.fetchWebsiteCover(task.url),
+          WEBSITE_COVER_BACKFILL_TIMEOUT_MS,
+          '网站封面获取超时'
+        )
+        const coverPath = String(coverResult?.data?.coverPath ?? '').trim()
+        if (coverResult?.type === 'success' && coverPath) {
+          await DatabaseService.updateResource({
+            id: task.resourceId,
+            coverPath
+          })
+          taskUpdated = true
+        } else if (coverResult?.type === 'error') {
+          taskFailed = true
+        }
+
+        if (taskUpdated) {
+          NotificationQueueService.getInstance().pushResourceStateChanged({
+            resourceId: task.resourceId,
+            categoryId: task.categoryId,
+            running: false,
+            changedAt: Date.now()
+          })
+          successCount += 1
+        } else if (taskFailed) {
+          failedCount += 1
+        } else {
+          skippedCount += 1
+        }
+      } catch (error) {
+        failedCount += 1
+        ResourceService.logger.warn('website cover/favicon backfill failed', {
+          resourceId: task.resourceId,
+          url: task.url,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+
+      completedCount += 1
+      pushProgress({
+        current: completedCount,
+        title: task.title,
+        url: task.url,
+        favicon: taskFaviconPath,
+        message: '网站图标和封面处理完成'
+      })
+    }
+
+    let nextTaskIndex = 0
+    const workerCount = Math.min(WEBSITE_COVER_BACKFILL_CONCURRENCY, normalizedTasks.length)
+    const worker = async () => {
+      while (nextTaskIndex < normalizedTasks.length) {
+        const task = normalizedTasks[nextTaskIndex]
+        nextTaskIndex += 1
+        if (!task) {
+          continue
+        }
+
+        await processTask(task)
+      }
+    }
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()))
+
+    pushProgress({
+      current: total,
+      message: '网站图标和封面后台处理完成',
+      done: true,
+      success: failedCount === 0
+    })
   }
 
   static async launchResource(resourceId: string, basePath: string, fileName?: string | null) {
@@ -2952,7 +3454,7 @@ export class ResourceService {
       }
     }
 
-    const targetDirectory = resolveResourceDeletionDirectory(existingResource.basePath)
+    const targetDirectory = resolveResourceDeletionDirectory(existingResource.basePath, existingResource.fileName ?? null)
     if (!targetDirectory) {
       return {
         type: 'error',
@@ -2988,6 +3490,2004 @@ export class ResourceService {
       message: targetDirectoryExists
         ? '已删除数据库记录和本地目录'
         : '本地目录不存在，已删除数据库记录',
+    }
+  }
+
+  static async archiveResource(resourceId: string) {
+    const result = await ResourceService.enqueueArchiveResource(resourceId)
+    if (result.type === 'success') {
+      ResourceService.archiveCancellationRequested = false
+      ResourceService.scheduleArchiveQueueProcessor()
+    }
+    return result
+  }
+
+  static async archiveResources(resourceIds: string[]) {
+    const normalizedResourceIds = Array.from(new Set((resourceIds ?? []).map((item) => String(item ?? '').trim()).filter(Boolean)))
+    if (!normalizedResourceIds.length) {
+      return {
+        type: 'warning',
+        message: '未选择需要归档的资源',
+        data: {
+          successCount: 0,
+          failedCount: 0,
+          results: []
+        }
+      }
+    }
+
+    const results: Array<{
+      resourceId: string
+      type: 'success' | 'warning'
+      message: string
+      data?: {
+        taskId: string
+        queueItemId: string
+      }
+    }> = []
+    for (const resourceId of normalizedResourceIds) {
+      const result = await ResourceService.enqueueArchiveResource(resourceId)
+      results.push({
+        resourceId,
+        ...result
+      })
+    }
+
+    const successCount = results.filter((item) => item.type === 'success').length
+    if (successCount > 0) {
+      ResourceService.archiveCancellationRequested = false
+      ResourceService.scheduleArchiveQueueProcessor()
+    }
+
+    return {
+      type: successCount > 0 ? 'success' : 'warning',
+      message: successCount > 0
+        ? `已加入 ${successCount} 项资源的归档队列`
+        : '没有资源成功加入归档队列',
+      data: {
+        successCount,
+        failedCount: results.length - successCount,
+        results
+      }
+    }
+  }
+
+  static async archiveResourcesAsPackage(resourceIds: string[], packageTitle?: string) {
+    const normalizedResourceIds = Array.from(new Set((resourceIds ?? []).map((item) => String(item ?? '').trim()).filter(Boolean)))
+    if (normalizedResourceIds.length < 2) {
+      return {
+        type: 'warning',
+        message: '请至少选择 2 个资源再执行合包归档'
+      }
+    }
+
+    const result = await ResourceService.enqueueArchiveResourcesAsPackage(normalizedResourceIds, packageTitle)
+    if (result.type === 'success') {
+      ResourceService.archiveCancellationRequested = false
+      ResourceService.scheduleArchiveQueueProcessor()
+    }
+    return result
+  }
+
+  static async restoreArchivedPackage(archiveId: string) {
+    const result = await ResourceService.enqueueRestoreArchive(archiveId)
+    if (result.type === 'success') {
+      ResourceService.archiveCancellationRequested = false
+      ResourceService.scheduleArchiveQueueProcessor()
+    }
+    return result
+  }
+
+  static async restoreArchivedPackages(archiveIds: string[]) {
+    const normalizedArchiveIds = Array.from(new Set((archiveIds ?? []).map((item) => String(item ?? '').trim()).filter(Boolean)))
+    if (!normalizedArchiveIds.length) {
+      return {
+        type: 'warning',
+        message: '未选择需要还原的归档包',
+        data: {
+          successCount: 0,
+          failedCount: 0,
+          results: []
+        }
+      }
+    }
+
+    const results: Array<{
+      archiveId: string
+      type: 'success' | 'warning'
+      message: string
+      data?: {
+        taskId: string
+        queueItemId: string
+      }
+    }> = []
+    for (const archiveId of normalizedArchiveIds) {
+      const result = await ResourceService.enqueueRestoreArchive(archiveId)
+      results.push({
+        archiveId,
+        ...result
+      })
+    }
+
+    const successCount = results.filter((item) => item.type === 'success').length
+    if (successCount > 0) {
+      ResourceService.archiveCancellationRequested = false
+      ResourceService.scheduleArchiveQueueProcessor()
+    }
+
+    return {
+      type: successCount > 0 ? 'success' : 'warning',
+      message: successCount > 0
+        ? `已加入 ${successCount} 项归档包的还原队列`
+        : '没有归档包成功加入还原队列',
+      data: {
+        successCount,
+        failedCount: results.length - successCount,
+        results
+      }
+    }
+  }
+
+  static async listArchivedPackages() {
+    const items = await DatabaseService.listArchivedPackages()
+    return {
+      type: 'success',
+      message: '获取归档包列表成功',
+      data: items.map((item) => ({
+        id: String(item.id ?? '').trim(),
+        resourceId: String(item.resourceId ?? '').trim(),
+        title: String(item.title ?? '').trim() || '未命名资源',
+        categoryId: String(item.categoryId ?? '').trim(),
+        categoryName: String(item.categoryName ?? '').trim() || '未分类',
+        categoryEmoji: String(item.categoryEmoji ?? '').trim(),
+        categoryColor: String(item.categoryColor ?? '').trim() || '#737373',
+        archivePath: String(item.archivePath ?? '').trim(),
+        archiveFormat: String(item.archiveFormat ?? '').trim(),
+        archiveLevel: Number(item.archiveLevel ?? 0),
+        passwordEnabled: Boolean(item.passwordEnabled),
+        archivePassword: String(item.archivePassword ?? ''),
+        sourcePath: String(item.sourcePath ?? '').trim(),
+        sourceSize: Number(item.sourceSize ?? 0),
+        archiveSize: Number(item.archiveSize ?? 0),
+        resourceCount: Math.max(1, Number(item.resourceCount ?? 1)),
+        status: String(item.status ?? '').trim() || 'active',
+        archivedAt: item.archivedAt instanceof Date ? item.archivedAt.getTime() : null,
+        items: Array.isArray(item.items)
+          ? item.items.map((entry) => ({
+              resourceId: String(entry.resourceId ?? '').trim(),
+              title: String(entry.title ?? '').trim() || '未命名资源',
+              coverPath: String(entry.coverPath ?? '').trim(),
+              sourcePath: String(entry.sourcePath ?? '').trim(),
+              categoryId: String(entry.categoryId ?? '').trim(),
+              categoryName: String(entry.categoryName ?? '').trim() || '未分类',
+              categoryEmoji: String(entry.categoryEmoji ?? '').trim(),
+              categoryColor: String(entry.categoryColor ?? '').trim() || '#737373',
+            }))
+          : [],
+      }))
+    }
+  }
+
+  static async deleteArchivedPackages(archiveIds: string[]) {
+    const normalizedArchiveIds = Array.from(new Set((archiveIds ?? []).map((item) => String(item ?? '').trim()).filter(Boolean)))
+    if (!normalizedArchiveIds.length) {
+      return {
+        type: 'warning',
+        message: '未选择需要删除的归档包',
+        data: {
+          successCount: 0,
+          failedCount: 0,
+          results: []
+        }
+      }
+    }
+
+    const results: Array<{
+      archiveId: string
+      type: string
+      message: string
+      data?: unknown
+    }> = []
+    for (const archiveId of normalizedArchiveIds) {
+      results.push({
+        archiveId,
+        ...await ResourceService.deleteArchivedPackage(archiveId)
+      })
+    }
+
+    const successCount = results.filter((item) => item.type === 'success').length
+    const failedCount = results.length - successCount
+    return {
+      type: successCount > 0 ? (failedCount > 0 ? 'warning' : 'success') : 'error',
+      message: failedCount > 0
+        ? `已删除 ${successCount} 个归档包，${failedCount} 个删除失败`
+        : `已删除 ${successCount} 个归档包`,
+      data: {
+        successCount,
+        failedCount,
+        results
+      }
+    }
+  }
+
+  static async deleteArchivedPackage(archiveId: string) {
+    const normalizedArchiveId = String(archiveId ?? '').trim()
+    if (!normalizedArchiveId) {
+      return {
+        type: 'warning',
+        message: '归档记录ID无效',
+      }
+    }
+
+    const archive = await DatabaseService.getResourceArchiveById(normalizedArchiveId)
+    if (!archive) {
+      return {
+        type: 'warning',
+        message: '未找到对应的归档记录',
+      }
+    }
+
+    const activeQueueItem = ResourceService.archiveQueueItems.find((item) =>
+      item.archiveId === normalizedArchiveId
+      && (item.status === 'queued' || item.status === 'running')
+    )
+    if (activeQueueItem) {
+      return {
+        type: 'warning',
+        message: activeQueueItem.operation === 'restore'
+          ? '当前归档包正在还原队列中，无法删除'
+          : '当前归档包正在队列中，无法删除',
+      }
+    }
+
+    const archivePath = String(archive.archivePath ?? '').trim()
+    if (archivePath && await fs.pathExists(archivePath)) {
+      await removeArchiveOutputs(archivePath)
+    }
+
+    await DatabaseService.logicalDeleteResourceArchive(normalizedArchiveId)
+
+    return {
+      type: 'success',
+      message: archivePath ? '归档包已删除' : '归档记录已移除',
+    }
+  }
+
+  static async listArchiveQueueItems() {
+    const items = ResourceService.getArchiveQueueItemsSnapshot()
+    return {
+      type: 'success',
+      message: '获取归档队列成功',
+      data: items.map((item) => ({
+        id: String(item.id ?? '').trim(),
+        resourceId: String(item.resourceId ?? '').trim(),
+        resourceIds: ResourceService.getQueueItemResourceIds(item),
+        title: String(item.title ?? '').trim(),
+        coverPath: String(item.coverPath ?? '').trim(),
+        sourcePath: String(item.sourcePath ?? '').trim(),
+        sourcePaths: Array.isArray(item.sourcePaths) ? item.sourcePaths.map((entry) => String(entry ?? '').trim()).filter(Boolean) : [],
+        archivePath: String(item.archivePath ?? '').trim(),
+        archiveFormat: String(item.archiveFormat ?? '').trim(),
+        status: String(item.status ?? '').trim(),
+        progress: Number(item.progress ?? 0),
+        currentIndex: Number(item.currentIndex ?? 0),
+        totalCount: Number(item.totalCount ?? 0),
+        message: String(item.message ?? '').trim(),
+        errorMessage: String(item.errorMessage ?? '').trim(),
+        createdAt: Number(item.createdAt ?? 0) || null,
+        startedAt: Number(item.startedAt ?? 0) || null,
+        finishedAt: Number(item.finishedAt ?? 0) || null,
+      }))
+    }
+  }
+
+  static async deleteArchiveQueueItem(queueItemId: string) {
+    const normalizedQueueItemId = String(queueItemId ?? '').trim()
+    if (!normalizedQueueItemId) {
+      return {
+        type: 'warning',
+        message: '队列项ID无效',
+      }
+    }
+
+    const queueItem = ResourceService.findArchiveQueueItem(normalizedQueueItemId)
+    if (!queueItem) {
+      return {
+        type: 'warning',
+        message: '未找到对应的归档队列项',
+      }
+    }
+
+    if (String(queueItem.status ?? '').trim() === 'running') {
+      return {
+        type: 'warning',
+        message: '当前队列项正在归档中，暂不支持移除',
+      }
+    }
+
+    ResourceService.removeArchiveQueueItem(normalizedQueueItemId)
+
+    return {
+      type: 'success',
+      message: '已移除归档队列项',
+    }
+  }
+
+  static async stopArchiveQueue() {
+    const runningItem = ResourceService.archiveQueueItems.find((item) => item.status === 'running') ?? null
+    const queuedItems = ResourceService.archiveQueueItems.filter((item) => item.status === 'queued')
+
+    if (!runningItem && !queuedItems.length) {
+      return {
+        type: 'warning',
+        message: '当前没有正在执行的归档任务',
+      }
+    }
+
+    ResourceService.archiveCancellationRequested = true
+
+    for (const item of queuedItems) {
+      ResourceService.removeArchiveQueueItem(item.id)
+    }
+
+    if (runningItem) {
+      runningItem.message = '正在停止归档任务'
+    }
+
+    if (ResourceService.archiveActiveProcess && !ResourceService.archiveActiveProcess.killed) {
+      try {
+        ResourceService.archiveActiveProcess.kill('SIGTERM')
+      } catch (error) {
+        ResourceService.logger.warn('failed to stop archive process', {
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+
+    return {
+      type: 'success',
+      message: `已停止归档队列，取消 ${queuedItems.length + (runningItem ? 1 : 0)} 项任务`,
+    }
+  }
+
+  static async dispose() {
+    ResourceService.archiveCancellationRequested = true
+
+    if (ResourceService.archiveActiveProcess && !ResourceService.archiveActiveProcess.killed) {
+      try {
+        ResourceService.archiveActiveProcess.kill('SIGTERM')
+      } catch (error) {
+        ResourceService.logger.warn('failed to stop archive process on dispose', {
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+
+    for (const item of ResourceService.archiveQueueItems) {
+      if (item.status === 'queued' || item.status === 'running') {
+        const previousStatus = item.status
+        item.status = 'cancelled'
+        item.message = '应用关闭，已取消归档任务'
+        item.errorMessage = previousStatus === 'running' ? '应用关闭，归档任务已中断' : ''
+        item.finishedAt = Date.now()
+      }
+    }
+
+    ResourceService.archiveQueueItems.length = 0
+    ResourceService.archiveActiveProcess = null
+    ResourceService.archiveQueueProcessorRunning = false
+    ResourceService.archiveQueueProcessorScheduled = false
+  }
+
+  private static getArchiveQueueItemsSnapshot() {
+    return [...ResourceService.archiveQueueItems].sort((left, right) => {
+      const statusOrder = (status: ArchiveQueueItemStatus) => {
+        if (status === 'running') return 0
+        if (status === 'queued') return 1
+        if (status === 'failed') return 2
+        if (status === 'completed') return 3
+        return 4
+      }
+
+      return statusOrder(left.status) - statusOrder(right.status)
+        || left.createdAt - right.createdAt
+        || left.id.localeCompare(right.id)
+    })
+  }
+
+  private static findArchiveQueueItem(queueItemId: string) {
+    return ResourceService.archiveQueueItems.find((item) => item.id === queueItemId) ?? null
+  }
+
+  private static removeArchiveQueueItem(queueItemId: string) {
+    const queueItemIndex = ResourceService.archiveQueueItems.findIndex((item) => item.id === queueItemId)
+    if (queueItemIndex >= 0) {
+      ResourceService.archiveQueueItems.splice(queueItemIndex, 1)
+    }
+  }
+
+  private static getActiveArchiveQueueItems() {
+    return ResourceService.archiveQueueItems
+      .filter((item) => item.status === 'queued' || item.status === 'running')
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+  }
+
+  private static getNextArchiveQueueItem() {
+    return ResourceService.getActiveArchiveQueueItems().find((item) => item.status === 'queued') ?? null
+  }
+
+  private static getQueueItemResourceIds(item: ArchiveQueueItem | null | undefined) {
+    if (!item) {
+      return []
+    }
+    const explicitIds = Array.isArray(item.resourceIds) ? item.resourceIds : []
+    const normalizedIds = explicitIds.map((entry) => String(entry ?? '').trim()).filter(Boolean)
+    if (normalizedIds.length) {
+      return normalizedIds
+    }
+    const fallbackId = String(item.resourceId ?? '').trim()
+    return fallbackId ? [fallbackId] : []
+  }
+
+  private static async enqueueArchiveResource(resourceId: string) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    if (!normalizedResourceId) {
+      return {
+        type: 'warning' as const,
+        message: '资源ID无效',
+      }
+    }
+
+    const existingResource = await DatabaseService.getResourceById(normalizedResourceId)
+    if (!existingResource) {
+      return {
+        type: 'warning' as const,
+        message: '资源不存在或已被删除',
+      }
+    }
+
+    const activeQueueItem = ResourceService.archiveQueueItems.find((item) =>
+      (item.status === 'queued' || item.status === 'running')
+      && ResourceService.getQueueItemResourceIds(item).includes(normalizedResourceId)
+    )
+    if (activeQueueItem) {
+      return {
+        type: 'warning' as const,
+        message: activeQueueItem.status === 'running'
+          ? '当前资源正在归档中，请稍候'
+          : '当前资源已在归档队列中，请勿重复提交',
+      }
+    }
+
+    const existingArchive = await DatabaseService.getResourceArchiveByResourceId(normalizedResourceId)
+    if (existingArchive) {
+      return {
+        type: 'warning' as const,
+        message: '该资源已存在归档记录',
+      }
+    }
+
+    const queueItemId = generateId()
+    ResourceService.archiveQueueItems.push({
+      id: queueItemId,
+      operation: 'archive',
+      archiveId: '',
+      resourceId: normalizedResourceId,
+      resourceIds: [normalizedResourceId],
+      title: String(existingResource.title ?? '资源归档').trim() || '资源归档',
+      coverPath: String(existingResource.coverPath ?? '').trim(),
+      sourcePath: resolveResourceDeletionDirectory(existingResource.basePath, existingResource.fileName ?? null) || '',
+      sourcePaths: [],
+      archivePath: '',
+      archiveFormat: '',
+      status: 'queued',
+      progress: 0,
+      message: '等待归档',
+      errorMessage: '',
+      currentIndex: 0,
+      totalCount: 0,
+      createdAt: Date.now(),
+      startedAt: null,
+      finishedAt: null,
+    })
+
+    return {
+      type: 'success' as const,
+      message: '已加入归档队列',
+      data: {
+        taskId: queueItemId,
+        queueItemId
+      }
+    }
+  }
+
+  private static async enqueueArchiveResourcesAsPackage(resourceIds: string[], packageTitleInput?: string) {
+    const normalizedResourceIds = Array.from(new Set((resourceIds ?? []).map((item) => String(item ?? '').trim()).filter(Boolean)))
+    if (normalizedResourceIds.length < 2) {
+      return {
+        type: 'warning' as const,
+        message: '请至少选择 2 个资源再执行合包归档'
+      }
+    }
+
+    const resources = await DatabaseService.getResourcesByIds(normalizedResourceIds)
+    if (resources.length !== normalizedResourceIds.length) {
+      return {
+        type: 'warning' as const,
+        message: '部分资源不存在或已被删除，请刷新后重试'
+      }
+    }
+
+    const resourcesById = new Map(resources.map((item) => [String(item.id ?? '').trim(), item]))
+    const orderedResources = normalizedResourceIds.map((id) => resourcesById.get(id)).filter(Boolean)
+    const categoryIds = Array.from(new Set(orderedResources.map((item) => String(item?.categoryId ?? '').trim()).filter(Boolean)))
+    if (categoryIds.length !== 1) {
+      return {
+        type: 'warning' as const,
+        message: '仅支持同一分类的资源合并归档'
+      }
+    }
+
+    const categoryInfo = await DatabaseService.getCategoryById(categoryIds[0])
+    const archiveSourceMode = resolveArchiveSourceMode(categoryInfo)
+    if (archiveSourceMode === 'none') {
+      return {
+        type: 'warning' as const,
+        message: '当前资源类型不支持归档'
+      }
+    }
+
+    for (const resource of orderedResources) {
+      const resourceId = String(resource?.id ?? '').trim()
+      const activeQueueItem = ResourceService.archiveQueueItems.find((item) =>
+        (item.status === 'queued' || item.status === 'running')
+        && ResourceService.getQueueItemResourceIds(item).includes(resourceId)
+      )
+      if (activeQueueItem) {
+        return {
+          type: 'warning' as const,
+          message: `资源“${String(resource?.title ?? '').trim() || resourceId}”已在归档队列中，请勿重复提交`
+        }
+      }
+
+      const existingArchive = await DatabaseService.getResourceArchiveByResourceId(resourceId)
+      if (existingArchive) {
+        return {
+          type: 'warning' as const,
+          message: `资源“${String(resource?.title ?? '').trim() || resourceId}”已存在归档记录`
+        }
+      }
+    }
+
+    const queueItemId = generateId()
+    const primaryResource = orderedResources[0]
+    const categoryName = String(categoryInfo?.name ?? primaryResource?.categoryId ?? '资源').trim() || '资源'
+    const packageTitle = String(packageTitleInput ?? '').trim() || `${categoryName}（${orderedResources.length} 项）`
+    ResourceService.archiveQueueItems.push({
+      id: queueItemId,
+      operation: 'archive',
+      archiveId: '',
+      resourceId: String(primaryResource?.id ?? '').trim(),
+      resourceIds: orderedResources.map((item) => String(item?.id ?? '').trim()).filter(Boolean),
+      title: packageTitle,
+      coverPath: String(primaryResource?.coverPath ?? '').trim(),
+      sourcePath: '',
+      sourcePaths: [],
+      archivePath: '',
+      archiveFormat: '',
+      status: 'queued',
+      progress: 0,
+      message: '等待合包归档',
+      errorMessage: '',
+      currentIndex: 0,
+      totalCount: 0,
+      createdAt: Date.now(),
+      startedAt: null,
+      finishedAt: null,
+    })
+
+    return {
+      type: 'success' as const,
+      message: '已加入合包归档队列',
+      data: {
+        taskId: queueItemId,
+        queueItemId
+      }
+    }
+  }
+
+  private static async enqueueRestoreArchive(archiveId: string) {
+    const normalizedArchiveId = String(archiveId ?? '').trim()
+    if (!normalizedArchiveId) {
+      return {
+        type: 'warning' as const,
+        message: '归档记录ID无效',
+      }
+    }
+
+    const archive = await DatabaseService.getResourceArchiveById(normalizedArchiveId)
+    if (!archive) {
+      return {
+        type: 'warning' as const,
+        message: '未找到对应的归档记录',
+      }
+    }
+    const archiveItems = await DatabaseService.listResourceArchiveItemsByArchiveId(normalizedArchiveId)
+    if (!archiveItems.length) {
+      return {
+        type: 'warning' as const,
+        message: '归档包内没有可还原的资源项',
+      }
+    }
+
+    const activeQueueItem = ResourceService.archiveQueueItems.find((item) =>
+      item.archiveId === normalizedArchiveId
+      && item.operation === 'restore'
+      && (item.status === 'queued' || item.status === 'running')
+    )
+    if (activeQueueItem) {
+      return {
+        type: 'warning' as const,
+        message: activeQueueItem.status === 'running'
+          ? '当前归档包正在还原中，请稍候'
+          : '当前归档包已在还原队列中，请勿重复提交',
+      }
+    }
+
+    const primaryArchiveItem = archiveItems[0]
+    const resourceId = String(primaryArchiveItem?.resourceId ?? '').trim()
+    const existingResource = resourceId
+      ? await DatabaseService.getResourceArchiveSourceResourceById(resourceId)
+      : null
+    const queueItemId = generateId()
+    ResourceService.archiveQueueItems.push({
+      id: queueItemId,
+      operation: 'restore',
+      archiveId: normalizedArchiveId,
+      resourceId,
+      resourceIds: resourceId ? [resourceId] : [],
+      title: String(archive.packageTitle ?? existingResource?.title ?? path.basename(String(archive.archivePath ?? '')) ?? '归档包还原').trim() || '归档包还原',
+      coverPath: String(existingResource?.coverPath ?? '').trim(),
+      sourcePath: String(primaryArchiveItem?.sourcePath ?? '').trim(),
+      sourcePaths: [],
+      archivePath: String(archive.archivePath ?? '').trim(),
+      archiveFormat: String(archive.archiveFormat ?? '').trim(),
+      status: 'queued',
+      progress: 0,
+      message: '等待还原',
+      errorMessage: '',
+      currentIndex: 0,
+      totalCount: 0,
+      createdAt: Date.now(),
+      startedAt: null,
+      finishedAt: null,
+    })
+
+    return {
+      type: 'success' as const,
+      message: '已加入还原队列',
+      data: {
+        taskId: queueItemId,
+        queueItemId
+      }
+    }
+  }
+
+  private static scheduleArchiveQueueProcessor() {
+    if (ResourceService.archiveQueueProcessorRunning || ResourceService.archiveQueueProcessorScheduled) {
+      return
+    }
+
+    ResourceService.archiveQueueProcessorScheduled = true
+    setImmediate(() => {
+      ResourceService.archiveQueueProcessorScheduled = false
+      void ResourceService.processArchiveQueue()
+    })
+  }
+
+  private static async processArchiveQueue() {
+    if (ResourceService.archiveQueueProcessorRunning) {
+      return
+    }
+
+    ResourceService.archiveQueueProcessorRunning = true
+    try {
+      while (true) {
+        const nextQueueItem = ResourceService.getNextArchiveQueueItem()
+        if (!nextQueueItem) {
+          break
+        }
+
+        if (nextQueueItem.operation === 'restore') {
+          await ResourceService.runRestoreArchiveTask(nextQueueItem.id, nextQueueItem.archiveId)
+        } else {
+          const queueResourceIds = ResourceService.getQueueItemResourceIds(nextQueueItem)
+          if (queueResourceIds.length > 1) {
+            await ResourceService.runArchiveResourcePackageTask(nextQueueItem.id, queueResourceIds)
+          } else {
+            await ResourceService.runArchiveResourceTask(nextQueueItem.id, nextQueueItem.resourceId)
+          }
+        }
+      }
+    } finally {
+      ResourceService.archiveQueueProcessorRunning = false
+      const hasRemainingQueueItem = ResourceService.getNextArchiveQueueItem()
+      if (hasRemainingQueueItem) {
+        ResourceService.scheduleArchiveQueueProcessor()
+      }
+    }
+  }
+
+  private static async runArchiveResourceTask(queueItemId: string, resourceId: string) {
+    const notificationQueue = NotificationQueueService.getInstance()
+    const resourceTitleRef = { value: '资源归档' }
+    const categoryIdRef = { value: '' }
+    const resourceCoverPathRef = { value: '' }
+    const queueSnapshot = ResourceService.getActiveArchiveQueueItems()
+    const queuePositionIndex = Math.max(0, queueSnapshot.findIndex((item) => String(item.id ?? '').trim() === queueItemId))
+    const queueCurrent = queuePositionIndex + 1
+    const queueTotal = Math.max(queueSnapshot.length, queueCurrent, 1)
+    let generatedArchivePath = ''
+    let cleanupPaths: string[] = []
+    const queueItem = ResourceService.findArchiveQueueItem(queueItemId)
+    if (!queueItem) {
+      return
+    }
+
+    if (ResourceService.archiveCancellationRequested) {
+      queueItem.status = 'cancelled'
+      queueItem.message = '应用关闭，已取消归档任务'
+      queueItem.finishedAt = Date.now()
+      return
+    }
+
+    queueItem.status = 'running'
+    queueItem.progress = 0
+    queueItem.currentIndex = queueCurrent
+    queueItem.totalCount = queueTotal
+    queueItem.message = '正在准备归档资源'
+    queueItem.errorMessage = ''
+    queueItem.startedAt = Date.now()
+
+    const pushProgress = async (patch: Partial<{
+      title: string
+      current: number
+      total: number
+      progress: number
+      message: string
+      done: boolean
+      success: boolean
+      archivePath: string
+      categoryId: string
+      persist: boolean
+      status: ArchiveQueueItemStatus
+    }>) => {
+      const current = Math.max(1, Number(patch.current ?? queueCurrent))
+      const total = Math.max(1, Number(patch.total ?? queueTotal))
+      const progress = Math.max(0, Math.min(100, Number(patch.progress ?? 0)))
+      const message = String(patch.message ?? '正在准备归档资源')
+      const done = Boolean(patch.done)
+      const success = patch.success === undefined ? undefined : Boolean(patch.success)
+      const archivePath = patch.archivePath
+      notificationQueue.pushResourceArchiveProgress({
+        taskId: queueItemId,
+        operation: 'archive',
+        archiveId: '',
+        resourceId,
+        categoryId: String(patch.categoryId ?? categoryIdRef.value),
+        title: String(patch.title ?? resourceTitleRef.value),
+        coverPath: resourceCoverPathRef.value,
+        current,
+        total,
+        progress,
+        message,
+        done,
+        success,
+        archivePath
+      })
+
+      if (patch.persist === false) {
+        return
+      }
+
+      const currentQueueItem = ResourceService.findArchiveQueueItem(queueItemId)
+      if (!currentQueueItem) {
+        return
+      }
+
+      currentQueueItem.progress = progress
+      currentQueueItem.currentIndex = current
+      currentQueueItem.totalCount = total
+      currentQueueItem.message = message
+      currentQueueItem.archivePath = archivePath ?? generatedArchivePath ?? ''
+
+      if (done) {
+        currentQueueItem.status = patch.status ?? (success ? 'completed' : 'failed')
+        currentQueueItem.finishedAt = Date.now()
+        currentQueueItem.errorMessage = success ? '' : message
+        if (currentQueueItem.status === 'cancelled') {
+          ResourceService.removeArchiveQueueItem(currentQueueItem.id)
+        }
+      }
+    }
+
+    try {
+      const existingResource = await DatabaseService.getResourceById(resourceId)
+      if (!existingResource) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '资源不存在或已被删除',
+          done: true,
+          success: false
+        })
+        return
+      }
+
+      resourceTitleRef.value = String(existingResource.title ?? '资源归档').trim() || '资源归档'
+      categoryIdRef.value = String(existingResource.categoryId ?? '').trim()
+      resourceCoverPathRef.value = String(existingResource.coverPath ?? '').trim()
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 3,
+        message: `正在准备归档 ${resourceTitleRef.value}`
+      })
+
+      const runningResourceIds = await DatabaseService.getRunningResourceIdsByResourceIds([resourceId])
+      if (runningResourceIds.length) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '资源正在运行，无法归档',
+          done: true,
+          success: false
+        })
+        return
+      }
+
+      const categoryInfo = await DatabaseService.getCategoryById(String(existingResource.categoryId ?? '').trim())
+      const archiveSourceMode = resolveArchiveSourceMode(categoryInfo)
+      if (archiveSourceMode === 'none') {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '当前资源类型不支持归档',
+          done: true,
+          success: false
+        })
+        return
+      }
+
+      const existingArchive = await DatabaseService.getResourceArchiveByResourceId(resourceId)
+      if (existingArchive) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '该资源已存在归档记录',
+          done: true,
+          success: false,
+          archivePath: String(existingArchive.archivePath ?? '')
+        })
+        return
+      }
+
+      const sourcePath = resolveArchiveSourcePath(categoryInfo, existingResource.basePath, existingResource.fileName ?? null)
+      if (!sourcePath) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '未找到可归档的资源路径',
+          done: true,
+          success: false
+        })
+        return
+      }
+
+      if (!isSafeResourceDeletionDirectory(sourcePath)) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: `资源路径不安全，已阻止归档：${sourcePath}`,
+          done: true,
+          success: false
+        })
+        return
+      }
+
+      const sourceExists = await fs.pathExists(sourcePath)
+      if (!sourceExists) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '资源路径不存在，无法执行归档',
+          done: true,
+          success: false
+        })
+        return
+      }
+
+      const [
+        archivePathSetting,
+        archiveFormatSetting,
+        archiveLevelSetting,
+        archivePasswordSetting,
+        archiveSplitSetting,
+        archiveSplitCustomSetting,
+        archiveMultithreadSetting,
+        archiveThreadCountSetting
+      ] = await Promise.all([
+        DatabaseService.getSetting(Settings.ARCHIVE_PATH),
+        DatabaseService.getSetting(Settings.ARCHIVE_FORMAT),
+        DatabaseService.getSetting(Settings.ARCHIVE_LEVEL),
+        DatabaseService.getSetting(Settings.ARCHIVE_PASSWORD),
+        DatabaseService.getSetting(Settings.ARCHIVE_SPLIT_SIZE),
+        DatabaseService.getSetting(Settings.ARCHIVE_SPLIT_SIZE_CUSTOM_MB),
+        DatabaseService.getSetting(Settings.ARCHIVE_ENABLE_MULTITHREAD),
+        DatabaseService.getSetting(Settings.ARCHIVE_THREAD_COUNT)
+      ])
+
+      const archiveRoot = String(archivePathSetting?.value ?? Settings.ARCHIVE_PATH.default).trim()
+      if (!archiveRoot) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '请先在设置中配置资源归档路径',
+          done: true,
+          success: false
+        })
+        return
+      }
+
+      const archiveFormat = normalizeArchiveFormat(String(archiveFormatSetting?.value ?? Settings.ARCHIVE_FORMAT.default).trim())
+      const archiveLevel = clampArchiveLevel(Number.parseInt(String(archiveLevelSetting?.value ?? Settings.ARCHIVE_LEVEL.default), 10))
+      const archivePassword = String(archivePasswordSetting?.value ?? Settings.ARCHIVE_PASSWORD.default).trim()
+      const splitSizeMb = resolveArchiveSplitSizeMb(
+        String(archiveSplitSetting?.value ?? Settings.ARCHIVE_SPLIT_SIZE.default).trim(),
+        String(archiveSplitCustomSetting?.value ?? Settings.ARCHIVE_SPLIT_SIZE_CUSTOM_MB.default).trim()
+      )
+      const multithreadEnabled = parseBooleanSetting(
+        archiveMultithreadSetting?.value,
+        String(Settings.ARCHIVE_ENABLE_MULTITHREAD.default) === '1'
+      )
+      const threadCount = Math.max(
+        1,
+        Number.parseInt(String(archiveThreadCountSetting?.value ?? Settings.ARCHIVE_THREAD_COUNT.default), 10) || 16
+      )
+
+      if (archivePassword && !supportsArchivePassword(archiveFormat)) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: `${archiveFormat.toUpperCase()} 格式暂不支持设置压缩密码`,
+          done: true,
+          success: false
+        })
+        return
+      }
+
+      const sevenZipPath = await resolveSevenZipExecutablePath()
+      if (!sevenZipPath) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '未找到 7z.exe，无法执行归档',
+          done: true,
+          success: false
+        })
+        return
+      }
+
+      const categoryName = sanitizeArchiveName(String(categoryInfo?.name ?? '未分类').trim() || '未分类')
+      const archiveDir = path.join(archiveRoot, categoryName)
+      await fs.ensureDir(archiveDir)
+
+      const archiveBaseName = sanitizeArchiveName(`${resourceTitleRef.value}-${resourceId}`)
+      const plannedArchivePath = await allocateArchiveTargetPath(archiveDir, archiveBaseName, archiveFormat)
+      const sourceSize = await calculateDirectorySize(sourcePath)
+      const archivePlan = buildArchiveExecutionPlan({
+        sevenZipPath,
+        archiveFormat,
+        archivePath: plannedArchivePath,
+        sourcePaths: [sourcePath],
+        password: archivePassword,
+        splitSizeMb,
+        multithreadEnabled,
+        threadCount,
+        archiveLevel
+      })
+
+      cleanupPaths = archivePlan.cleanupPaths
+      queueItem.sourcePath = sourcePath
+      queueItem.archivePath = plannedArchivePath
+      queueItem.archiveFormat = archiveFormat
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 8,
+        message: `正在打包 ${resourceTitleRef.value}`
+      })
+
+      for (const step of archivePlan.steps) {
+        await run7ZipArchiveStep(
+          step,
+          (progress) => {
+            void pushProgress({
+              current: queueCurrent,
+              total: queueTotal,
+              progress,
+              message: `正在打包 ${resourceTitleRef.value}`,
+              persist: false
+            })
+          },
+          {
+            onSpawn: (archiveProcess) => {
+              ResourceService.archiveActiveProcess = archiveProcess
+            },
+            isCancelled: () => ResourceService.archiveCancellationRequested
+          }
+        )
+      }
+
+      generatedArchivePath = await resolveArchiveOutputPath(archivePlan.outputPath)
+      const archiveSize = await calculateArchiveOutputSize(generatedArchivePath)
+
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 94,
+        message: `正在清理 ${resourceTitleRef.value} 的源文件`
+      })
+
+      await ResourceWatcher.getInstance().untrackResource(resourceId)
+      await removeResourceMarker({
+        id: resourceId,
+        basePath: existingResource.basePath,
+        fileName: existingResource.fileName ?? null
+      })
+      await fs.remove(sourcePath)
+
+      const archivePackageId = generateId()
+      await DatabaseService.insertResourceArchive({
+        packageData: {
+          id: archivePackageId,
+          packageTitle: resourceTitleRef.value,
+          archivePath: generatedArchivePath,
+          archiveFormat,
+          archiveLevel,
+          passwordEnabled: Boolean(archivePassword),
+          archivePassword,
+          splitSizeMb,
+          multithreadEnabled,
+          threadCount: multithreadEnabled ? threadCount : null,
+          sourceTotalSize: sourceSize,
+          archiveSize,
+          resourceCount: 1,
+          status: 'active',
+          archivedAt: new Date(),
+          isDeleted: false
+        },
+        itemDataList: [{
+          id: generateId(),
+          packageId: archivePackageId,
+          resourceId,
+          archiveEntryPath: resolveArchiveItemEntryPath(sourcePath),
+          sourcePath,
+          sourceSize,
+          sortOrder: 0,
+          isDeleted: false
+        }]
+      })
+      await DatabaseService.logicalDeleteResource(resourceId)
+
+      notificationQueue.pushResourceStateChanged({
+        resourceId,
+        categoryId: categoryIdRef.value,
+        running: false,
+        missingStatus: Boolean(existingResource.missingStatus),
+        changedAt: Date.now()
+      })
+
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 100,
+        message: `${resourceTitleRef.value} 已归档完成`,
+        done: true,
+        success: true,
+        archivePath: generatedArchivePath
+      })
+    } catch (error) {
+      if (generatedArchivePath) {
+        try {
+          await removeArchiveOutputs(generatedArchivePath)
+        } catch (cleanupError) {
+          ResourceService.logger.warn('archiveResource cleanup generated archive failed', {
+            resourceId,
+            archivePath: generatedArchivePath,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          })
+        }
+      }
+
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 100,
+        message: ResourceService.archiveCancellationRequested
+          ? '归档任务已取消'
+          : (error instanceof Error ? error.message : '归档失败，请稍后重试'),
+        done: true,
+        success: false,
+        archivePath: generatedArchivePath || undefined,
+        status: ResourceService.archiveCancellationRequested ? 'cancelled' : 'failed'
+      })
+    } finally {
+      ResourceService.archiveActiveProcess = null
+      for (const cleanupPath of cleanupPaths) {
+        try {
+          if (cleanupPath) {
+            await fs.remove(cleanupPath)
+          }
+        } catch (cleanupError) {
+          ResourceService.logger.warn('archiveResource cleanup temp file failed', {
+            resourceId,
+            cleanupPath,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          })
+        }
+      }
+    }
+  }
+
+  private static async runArchiveResourcePackageTask(queueItemId: string, resourceIds: string[]) {
+    const notificationQueue = NotificationQueueService.getInstance()
+    const queueSnapshot = ResourceService.getActiveArchiveQueueItems()
+    const queuePositionIndex = Math.max(0, queueSnapshot.findIndex((item) => String(item.id ?? '').trim() === queueItemId))
+    const queueCurrent = queuePositionIndex + 1
+    const queueTotal = Math.max(queueSnapshot.length, queueCurrent, 1)
+    const queueItem = ResourceService.findArchiveQueueItem(queueItemId)
+    let generatedArchivePath = ''
+    let cleanupPaths: string[] = []
+    if (!queueItem) {
+      return
+    }
+
+    if (ResourceService.archiveCancellationRequested) {
+      queueItem.status = 'cancelled'
+      queueItem.message = '应用关闭，已取消归档任务'
+      queueItem.finishedAt = Date.now()
+      return
+    }
+
+    queueItem.status = 'running'
+    queueItem.progress = 0
+    queueItem.currentIndex = queueCurrent
+    queueItem.totalCount = queueTotal
+    queueItem.message = '正在准备合包归档'
+    queueItem.errorMessage = ''
+    queueItem.startedAt = Date.now()
+
+    const pushProgress = async (patch: Partial<{
+      title: string
+      current: number
+      total: number
+      progress: number
+      message: string
+      done: boolean
+      success: boolean
+      archivePath: string
+      categoryId: string
+      persist: boolean
+      status: ArchiveQueueItemStatus
+    }>) => {
+      const current = Math.max(1, Number(patch.current ?? queueCurrent))
+      const total = Math.max(1, Number(patch.total ?? queueTotal))
+      const progress = Math.max(0, Math.min(100, Number(patch.progress ?? 0)))
+      const message = String(patch.message ?? '正在准备合包归档')
+      const done = Boolean(patch.done)
+      const success = patch.success === undefined ? undefined : Boolean(patch.success)
+      const archivePath = patch.archivePath
+      notificationQueue.pushResourceArchiveProgress({
+        taskId: queueItemId,
+        operation: 'archive',
+        archiveId: '',
+        resourceId: String(resourceIds[0] ?? ''),
+        categoryId: String(patch.categoryId ?? ''),
+        title: String(patch.title ?? queueItem.title ?? '资源归档').trim() || '资源归档',
+        coverPath: String(queueItem.coverPath ?? '').trim(),
+        current,
+        total,
+        progress,
+        message,
+        done,
+        success,
+        archivePath
+      })
+
+      if (patch.persist === false) {
+        return
+      }
+
+      const currentQueueItem = ResourceService.findArchiveQueueItem(queueItemId)
+      if (!currentQueueItem) {
+        return
+      }
+
+      currentQueueItem.progress = progress
+      currentQueueItem.currentIndex = current
+      currentQueueItem.totalCount = total
+      currentQueueItem.message = message
+      currentQueueItem.archivePath = archivePath ?? generatedArchivePath ?? ''
+
+      if (done) {
+        currentQueueItem.status = patch.status ?? (success ? 'completed' : 'failed')
+        currentQueueItem.finishedAt = Date.now()
+        currentQueueItem.errorMessage = success ? '' : message
+        if (currentQueueItem.status === 'cancelled') {
+          ResourceService.removeArchiveQueueItem(currentQueueItem.id)
+        }
+      }
+    }
+
+    try {
+      const normalizedResourceIds = Array.from(new Set(resourceIds.map((item) => String(item ?? '').trim()).filter(Boolean)))
+      const resources = await DatabaseService.getResourcesByIds(normalizedResourceIds)
+      if (resources.length !== normalizedResourceIds.length) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '部分资源不存在或已被删除',
+          done: true,
+          success: false
+        })
+        return
+      }
+
+      const resourceMap = new Map(resources.map((item) => [String(item.id ?? '').trim(), item]))
+      const orderedResources = normalizedResourceIds.map((id) => resourceMap.get(id)).filter(Boolean)
+      const primaryResource = orderedResources[0]
+      const categoryId = String(primaryResource?.categoryId ?? '').trim()
+      const categoryInfo = await DatabaseService.getCategoryById(categoryId)
+      const archiveSourceMode = resolveArchiveSourceMode(categoryInfo)
+      if (archiveSourceMode === 'none') {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '当前资源类型不支持归档',
+          done: true,
+          success: false,
+          categoryId
+        })
+        return
+      }
+
+      const runningResourceIds = await DatabaseService.getRunningResourceIdsByResourceIds(normalizedResourceIds)
+      if (runningResourceIds.length) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '选中的资源中存在正在运行项，无法归档',
+          done: true,
+          success: false,
+          categoryId
+        })
+        return
+      }
+
+      const targets: Array<{
+        resourceId: string
+        title: string
+        basePath: string
+        fileName: string | null
+        coverPath: string
+        sourcePath: string
+        sourceSize: number
+      }> = []
+
+      for (const resource of orderedResources) {
+        const resourceId = String(resource?.id ?? '').trim()
+        const title = String(resource?.title ?? resourceId).trim() || resourceId
+        const existingArchive = await DatabaseService.getResourceArchiveByResourceId(resourceId)
+        if (existingArchive) {
+          await pushProgress({
+            current: queueCurrent,
+            total: queueTotal,
+            progress: 100,
+            message: `资源“${title}”已存在归档记录`,
+            done: true,
+            success: false,
+            categoryId
+          })
+          return
+        }
+
+        const sourcePath = resolveArchiveSourcePath(categoryInfo, String(resource?.basePath ?? '').trim(), resource?.fileName ?? null)
+        if (!sourcePath) {
+          await pushProgress({
+            current: queueCurrent,
+            total: queueTotal,
+            progress: 100,
+            message: `资源“${title}”缺少可归档路径`,
+            done: true,
+            success: false,
+            categoryId
+          })
+          return
+        }
+        if (!isSafeResourceDeletionDirectory(sourcePath)) {
+          await pushProgress({
+            current: queueCurrent,
+            total: queueTotal,
+            progress: 100,
+            message: `资源路径不安全，已阻止归档：${sourcePath}`,
+            done: true,
+            success: false,
+            categoryId
+          })
+          return
+        }
+        if (!await fs.pathExists(sourcePath)) {
+          await pushProgress({
+            current: queueCurrent,
+            total: queueTotal,
+            progress: 100,
+            message: `资源“${title}”路径不存在，无法执行归档`,
+            done: true,
+            success: false,
+            categoryId
+          })
+          return
+        }
+
+        targets.push({
+          resourceId,
+          title,
+          basePath: String(resource?.basePath ?? '').trim(),
+          fileName: resource?.fileName ?? null,
+          coverPath: String(resource?.coverPath ?? '').trim(),
+          sourcePath,
+          sourceSize: Number(await calculateDirectorySize(sourcePath) ?? 0)
+        })
+      }
+
+      const [
+        archivePathSetting,
+        archiveFormatSetting,
+        archiveLevelSetting,
+        archivePasswordSetting,
+        archiveSplitSetting,
+        archiveSplitCustomSetting,
+        archiveMultithreadSetting,
+        archiveThreadCountSetting
+      ] = await Promise.all([
+        DatabaseService.getSetting(Settings.ARCHIVE_PATH),
+        DatabaseService.getSetting(Settings.ARCHIVE_FORMAT),
+        DatabaseService.getSetting(Settings.ARCHIVE_LEVEL),
+        DatabaseService.getSetting(Settings.ARCHIVE_PASSWORD),
+        DatabaseService.getSetting(Settings.ARCHIVE_SPLIT_SIZE),
+        DatabaseService.getSetting(Settings.ARCHIVE_SPLIT_SIZE_CUSTOM_MB),
+        DatabaseService.getSetting(Settings.ARCHIVE_ENABLE_MULTITHREAD),
+        DatabaseService.getSetting(Settings.ARCHIVE_THREAD_COUNT)
+      ])
+
+      const archiveRoot = String(archivePathSetting?.value ?? Settings.ARCHIVE_PATH.default).trim()
+      if (!archiveRoot) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '请先在设置中配置资源归档路径',
+          done: true,
+          success: false,
+          categoryId
+        })
+        return
+      }
+
+      const archiveFormat = normalizeArchiveFormat(String(archiveFormatSetting?.value ?? Settings.ARCHIVE_FORMAT.default).trim())
+      const archiveLevel = clampArchiveLevel(Number.parseInt(String(archiveLevelSetting?.value ?? Settings.ARCHIVE_LEVEL.default), 10))
+      const archivePassword = String(archivePasswordSetting?.value ?? Settings.ARCHIVE_PASSWORD.default).trim()
+      const splitSizeMb = resolveArchiveSplitSizeMb(
+        String(archiveSplitSetting?.value ?? Settings.ARCHIVE_SPLIT_SIZE.default).trim(),
+        String(archiveSplitCustomSetting?.value ?? Settings.ARCHIVE_SPLIT_SIZE_CUSTOM_MB.default).trim()
+      )
+      const multithreadEnabled = parseBooleanSetting(
+        archiveMultithreadSetting?.value,
+        String(Settings.ARCHIVE_ENABLE_MULTITHREAD.default) === '1'
+      )
+      const threadCount = Math.max(
+        1,
+        Number.parseInt(String(archiveThreadCountSetting?.value ?? Settings.ARCHIVE_THREAD_COUNT.default), 10) || 16
+      )
+
+      if (archivePassword && !supportsArchivePassword(archiveFormat)) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: `${archiveFormat.toUpperCase()} 格式暂不支持设置压缩密码`,
+          done: true,
+          success: false,
+          categoryId
+        })
+        return
+      }
+
+      const sevenZipPath = await resolveSevenZipExecutablePath()
+      if (!sevenZipPath) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '未找到 7z.exe，无法执行归档',
+          done: true,
+          success: false,
+          categoryId
+        })
+        return
+      }
+
+      const categoryName = sanitizeArchiveName(String(categoryInfo?.name ?? '未分类').trim() || '未分类')
+      const archiveDir = path.join(archiveRoot, categoryName)
+      await fs.ensureDir(archiveDir)
+
+      const packageTitle = String(queueItem.title ?? '').trim() || `${categoryName}（${targets.length} 项）`
+      const archiveBaseName = sanitizeArchiveName(`${packageTitle}-${Date.now()}`)
+      const plannedArchivePath = await allocateArchiveTargetPath(archiveDir, archiveBaseName, archiveFormat)
+      const sourcePaths = targets.map((item) => item.sourcePath)
+      const sourceTotalSize = targets.reduce((sum, item) => sum + Math.max(0, Number(item.sourceSize ?? 0)), 0)
+      const archivePlan = buildArchiveExecutionPlan({
+        sevenZipPath,
+        archiveFormat,
+        archivePath: plannedArchivePath,
+        sourcePaths,
+        password: archivePassword,
+        splitSizeMb,
+        multithreadEnabled,
+        threadCount,
+        archiveLevel
+      })
+
+      cleanupPaths = archivePlan.cleanupPaths
+      queueItem.sourcePath = sourcePaths[0] ?? ''
+      queueItem.sourcePaths = sourcePaths
+      queueItem.archivePath = plannedArchivePath
+      queueItem.archiveFormat = archiveFormat
+
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 8,
+        message: `正在打包 ${packageTitle}`,
+        categoryId
+      })
+
+      for (const step of archivePlan.steps) {
+        await run7ZipArchiveStep(
+          step,
+          (progress) => {
+            void pushProgress({
+              current: queueCurrent,
+              total: queueTotal,
+              progress,
+              message: `正在打包 ${packageTitle}`,
+              categoryId,
+              persist: false
+            })
+          },
+          {
+            onSpawn: (archiveProcess) => {
+              ResourceService.archiveActiveProcess = archiveProcess
+            },
+            isCancelled: () => ResourceService.archiveCancellationRequested
+          }
+        )
+      }
+
+      generatedArchivePath = await resolveArchiveOutputPath(archivePlan.outputPath)
+      const archiveSize = await calculateArchiveOutputSize(generatedArchivePath)
+
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 94,
+        message: `正在清理 ${packageTitle} 的源文件`,
+        categoryId
+      })
+
+      for (const target of targets) {
+        await ResourceWatcher.getInstance().untrackResource(target.resourceId)
+        await removeResourceMarker({
+          id: target.resourceId,
+          basePath: target.basePath,
+          fileName: target.fileName ?? null
+        })
+        await fs.remove(target.sourcePath)
+      }
+
+      const archivePackageId = generateId()
+      await DatabaseService.insertResourceArchive({
+        packageData: {
+          id: archivePackageId,
+          packageTitle,
+          archivePath: generatedArchivePath,
+          archiveFormat,
+          archiveLevel,
+          passwordEnabled: Boolean(archivePassword),
+          archivePassword,
+          splitSizeMb,
+          multithreadEnabled,
+          threadCount: multithreadEnabled ? threadCount : null,
+          sourceTotalSize,
+          archiveSize,
+          resourceCount: targets.length,
+          status: 'active',
+          archivedAt: new Date(),
+          isDeleted: false
+        },
+        itemDataList: targets.map((target, index) => ({
+          id: generateId(),
+          packageId: archivePackageId,
+          resourceId: target.resourceId,
+          archiveEntryPath: resolveArchiveItemEntryPath(target.sourcePath),
+          sourcePath: target.sourcePath,
+          sourceSize: target.sourceSize,
+          sortOrder: index,
+          isDeleted: false
+        }))
+      })
+      await DatabaseService.logicalDeleteResources(targets.map((item) => item.resourceId))
+
+      for (const target of targets) {
+        notificationQueue.pushResourceStateChanged({
+          resourceId: target.resourceId,
+          categoryId,
+          running: false,
+          missingStatus: false,
+          changedAt: Date.now()
+        })
+      }
+
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 100,
+        message: `${packageTitle} 已归档完成`,
+        done: true,
+        success: true,
+        archivePath: generatedArchivePath,
+        categoryId
+      })
+    } catch (error) {
+      if (generatedArchivePath) {
+        try {
+          await removeArchiveOutputs(generatedArchivePath)
+        } catch (cleanupError) {
+          ResourceService.logger.warn('archiveResourcesAsPackage cleanup generated archive failed', {
+            resourceIds,
+            archivePath: generatedArchivePath,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          })
+        }
+      }
+
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 100,
+        message: ResourceService.archiveCancellationRequested
+          ? '归档任务已取消'
+          : (error instanceof Error ? error.message : '归档失败，请稍后重试'),
+        done: true,
+        success: false,
+        archivePath: generatedArchivePath || undefined,
+        status: ResourceService.archiveCancellationRequested ? 'cancelled' : 'failed'
+      })
+    } finally {
+      ResourceService.archiveActiveProcess = null
+      for (const cleanupPath of cleanupPaths) {
+        try {
+          if (cleanupPath) {
+            await fs.remove(cleanupPath)
+          }
+        } catch (cleanupError) {
+          ResourceService.logger.warn('archiveResourcesAsPackage cleanup temp file failed', {
+            resourceIds,
+            cleanupPath,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          })
+        }
+      }
+    }
+  }
+
+  private static async runRestoreArchiveTask(queueItemId: string, archiveId: string) {
+    const notificationQueue = NotificationQueueService.getInstance()
+    const resourceTitleRef = { value: '归档包还原' }
+    const categoryIdRef = { value: '' }
+    const resourceCoverPathRef = { value: '' }
+    const queueSnapshot = ResourceService.getActiveArchiveQueueItems()
+    const queuePositionIndex = Math.max(0, queueSnapshot.findIndex((item) => String(item.id ?? '').trim() === queueItemId))
+    const queueCurrent = queuePositionIndex + 1
+    const queueTotal = Math.max(queueSnapshot.length, queueCurrent, 1)
+    const queueItem = ResourceService.findArchiveQueueItem(queueItemId)
+    let archivePath = ''
+    let sourcePath = ''
+    let resourceId = ''
+    if (!queueItem) {
+      return
+    }
+
+    if (ResourceService.archiveCancellationRequested) {
+      queueItem.status = 'cancelled'
+      queueItem.message = '应用关闭，已取消还原任务'
+      queueItem.finishedAt = Date.now()
+      return
+    }
+
+    queueItem.status = 'running'
+    queueItem.progress = 0
+    queueItem.currentIndex = queueCurrent
+    queueItem.totalCount = queueTotal
+    queueItem.message = '正在准备还原归档包'
+    queueItem.errorMessage = ''
+    queueItem.startedAt = Date.now()
+
+    const pushProgress = async (patch: Partial<{
+      title: string
+      current: number
+      total: number
+      progress: number
+      message: string
+      done: boolean
+      success: boolean
+      archivePath: string
+      categoryId: string
+      persist: boolean
+      status: ArchiveQueueItemStatus
+    }>) => {
+      const current = Math.max(1, Number(patch.current ?? queueCurrent))
+      const total = Math.max(1, Number(patch.total ?? queueTotal))
+      const progress = Math.max(0, Math.min(100, Number(patch.progress ?? 0)))
+      const message = String(patch.message ?? '正在准备还原归档包')
+      const done = Boolean(patch.done)
+      const success = patch.success === undefined ? undefined : Boolean(patch.success)
+      const nextArchivePath = patch.archivePath
+      notificationQueue.pushResourceArchiveProgress({
+        taskId: queueItemId,
+        operation: 'restore',
+        archiveId,
+        resourceId,
+        categoryId: String(patch.categoryId ?? categoryIdRef.value),
+        title: String(patch.title ?? resourceTitleRef.value),
+        coverPath: resourceCoverPathRef.value,
+        current,
+        total,
+        progress,
+        message,
+        done,
+        success,
+        archivePath: nextArchivePath
+      })
+
+      if (patch.persist === false) {
+        return
+      }
+
+      const currentQueueItem = ResourceService.findArchiveQueueItem(queueItemId)
+      if (!currentQueueItem) {
+        return
+      }
+
+      currentQueueItem.progress = progress
+      currentQueueItem.currentIndex = current
+      currentQueueItem.totalCount = total
+      currentQueueItem.message = message
+      currentQueueItem.archivePath = nextArchivePath ?? archivePath ?? ''
+
+      if (done) {
+        currentQueueItem.status = patch.status ?? (success ? 'completed' : 'failed')
+        currentQueueItem.finishedAt = Date.now()
+        currentQueueItem.errorMessage = success ? '' : message
+        if (currentQueueItem.status === 'cancelled') {
+          ResourceService.removeArchiveQueueItem(currentQueueItem.id)
+        }
+      }
+    }
+
+    try {
+      const archive = await DatabaseService.getResourceArchiveById(archiveId)
+      if (!archive) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '未找到对应的归档记录',
+          done: true,
+          success: false
+        })
+        return
+      }
+
+      const archiveItems = await DatabaseService.listResourceArchiveItemsByArchiveId(archiveId)
+      if (!archiveItems.length) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '归档包中没有可还原的资源项',
+          done: true,
+          success: false,
+          archivePath: String(archive.archivePath ?? '').trim() || undefined
+        })
+        return
+      }
+
+      archivePath = String(archive.archivePath ?? '').trim()
+      const resourceDetails = await Promise.all(
+        archiveItems.map((item) => DatabaseService.getResourceArchiveSourceResourceById(String(item.resourceId ?? '').trim()))
+      )
+      const primaryArchiveItem = archiveItems[0]
+      const primaryResource = resourceDetails[0]
+      resourceId = String(primaryArchiveItem?.resourceId ?? '').trim()
+      sourcePath = path.normalize(String(primaryArchiveItem?.sourcePath ?? '').trim())
+      resourceTitleRef.value = String(archive.packageTitle ?? primaryResource?.title ?? '归档包还原').trim() || '归档包还原'
+      categoryIdRef.value = String(primaryResource?.categoryId ?? '').trim()
+      resourceCoverPathRef.value = String(primaryResource?.coverPath ?? '').trim()
+      queueItem.resourceId = resourceId
+      queueItem.title = resourceTitleRef.value
+      queueItem.coverPath = resourceCoverPathRef.value
+      queueItem.archivePath = archivePath
+      queueItem.sourcePath = sourcePath
+      queueItem.archiveFormat = String(archive.archiveFormat ?? '').trim()
+
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 3,
+        message: `正在准备还原 ${resourceTitleRef.value}`,
+        archivePath
+      })
+
+      if (!archivePath) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '归档记录缺少还原所需路径',
+          done: true,
+          success: false,
+          archivePath
+        })
+        return
+      }
+
+      if (!await fs.pathExists(archivePath)) {
+        await pushProgress({
+          current: queueCurrent,
+          total: queueTotal,
+          progress: 100,
+          message: '归档包文件不存在，无法还原',
+          done: true,
+          success: false,
+          archivePath
+        })
+        return
+      }
+
+      const restoreTargets = archiveItems.map((item, index) => {
+        const targetSourcePath = path.normalize(String(item.sourcePath ?? '').trim())
+        const targetResourceId = String(item.resourceId ?? '').trim()
+        const targetResource = resourceDetails[index]
+        return {
+          item,
+          targetSourcePath,
+          targetResourceId,
+          targetResource,
+        }
+      })
+
+      for (const target of restoreTargets) {
+        if (!target.targetSourcePath || !target.targetResourceId || !target.targetResource) {
+          await pushProgress({
+            current: queueCurrent,
+            total: queueTotal,
+            progress: 100,
+            message: '归档资源项缺少还原所需记录',
+            done: true,
+            success: false,
+            archivePath
+          })
+          return
+        }
+
+        if (!isSafeResourceDeletionDirectory(target.targetSourcePath)) {
+          await pushProgress({
+            current: queueCurrent,
+            total: queueTotal,
+            progress: 100,
+            message: `归档原始目录不安全，已阻止还原：${target.targetSourcePath}`,
+            done: true,
+            success: false,
+            archivePath
+          })
+          return
+        }
+
+        if (await fs.pathExists(target.targetSourcePath)) {
+          await pushProgress({
+            current: queueCurrent,
+            total: queueTotal,
+            progress: 100,
+            message: '原始资源目录已存在，已取消还原以避免覆盖文件',
+            done: true,
+            success: false,
+            archivePath
+          })
+          return
+        }
+      }
+
+      let archivePassword = String(archive.archivePassword ?? '').trim()
+      if (!archivePassword && Boolean(archive.passwordEnabled)) {
+        const archivePasswordSetting = await DatabaseService.getSetting(Settings.ARCHIVE_PASSWORD)
+        archivePassword = String(archivePasswordSetting?.value ?? Settings.ARCHIVE_PASSWORD.default).trim()
+      }
+
+      const restoreTempDirectory = path.join(path.dirname(archivePath), `.nrm-restore-${generateId()}`)
+      await extractArchivedPackageToDirectory({
+        archivePath,
+        archiveFormat: normalizeArchiveFormat(String(archive.archiveFormat ?? '').trim()),
+        outputDirectory: restoreTempDirectory,
+        password: archivePassword,
+        onProgress: (progress) => {
+          void pushProgress({
+            current: queueCurrent,
+            total: queueTotal,
+            progress: Math.max(8, Math.min(88, progress)),
+            message: `正在还原 ${resourceTitleRef.value}`,
+            archivePath,
+            persist: false
+          })
+        },
+        onSpawn: (archiveProcess) => {
+          ResourceService.archiveActiveProcess = archiveProcess
+        },
+        isCancelled: () => ResourceService.archiveCancellationRequested
+      })
+
+      try {
+        for (const target of restoreTargets) {
+          const extractedSourcePath = resolveArchiveExtractedItemPath(restoreTempDirectory, String(target.item.archiveEntryPath ?? ''), target.targetSourcePath)
+          if (!await fs.pathExists(extractedSourcePath)) {
+            await pushProgress({
+              current: queueCurrent,
+              total: queueTotal,
+              progress: 100,
+              message: `归档包已解压，但未找到资源项：${path.basename(target.targetSourcePath)}`,
+              done: true,
+              success: false,
+              archivePath
+            })
+            return
+          }
+
+          await fs.ensureDir(path.dirname(target.targetSourcePath))
+          await fs.move(extractedSourcePath, target.targetSourcePath, { overwrite: false })
+        }
+      } finally {
+        await fs.remove(restoreTempDirectory)
+      }
+
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 92,
+        message: `正在恢复 ${resourceTitleRef.value} 的资源记录`,
+        archivePath
+      })
+
+      await DatabaseService.restoreResourceArchive(archiveId, restoreTargets.map((item) => item.targetResourceId))
+
+      for (const target of restoreTargets) {
+        const targetCategoryInfo = await DatabaseService.getCategoryById(String(target.targetResource?.categoryId ?? '').trim())
+        if (!targetCategoryInfo || ResourceService.isVirtualResourceCategory(targetCategoryInfo)) {
+          continue
+        }
+
+        await writeResourceMarker({
+          resourceId: target.targetResourceId,
+          basePath: String(target.targetResource?.basePath ?? '').trim(),
+          fileName: target.targetResource?.fileName ?? null,
+          markerEnabled: shouldCreateResourceMarker(
+            targetCategoryInfo,
+            {
+              basePath: String(target.targetResource?.basePath ?? '').trim(),
+              fileName: target.targetResource?.fileName ?? null
+            },
+            {} as ResourceMeta
+          )
+        })
+        ResourceWatcher.getInstance().trackResource({
+          id: target.targetResourceId,
+          categoryId: String(target.targetResource?.categoryId ?? '').trim(),
+          basePath: String(target.targetResource?.basePath ?? '').trim(),
+          fileName: target.targetResource?.fileName ?? null,
+          missingStatus: false,
+          directoryMetadataKind: ResourceDirectoryMetadataService.getDirectoryMetadataKindFromCategory(targetCategoryInfo),
+        })
+      }
+
+      let archiveRemoved = true
+      try {
+        await removeArchiveOutputs(archivePath)
+      } catch (error) {
+        archiveRemoved = false
+        ResourceService.logger.warn('restoreArchivedPackage remove archive outputs failed', {
+          archiveId,
+          archivePath,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+
+      notificationQueue.pushResourceStateChanged({
+        resourceId,
+        categoryId: String(primaryResource?.categoryId ?? '').trim(),
+        running: false,
+        missingStatus: false,
+        changedAt: Date.now()
+      })
+
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 100,
+        message: archiveRemoved ? `${resourceTitleRef.value} 已还原完成` : `${resourceTitleRef.value} 已还原，但归档包文件删除失败`,
+        done: true,
+        success: true,
+        archivePath
+      })
+    } catch (error) {
+      if (sourcePath && await fs.pathExists(sourcePath)) {
+        try {
+          await fs.remove(sourcePath)
+        } catch (cleanupError) {
+          ResourceService.logger.warn('restoreArchivedPackage cleanup partial restore failed', {
+            archiveId,
+            sourcePath,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          })
+        }
+      }
+
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 100,
+        message: ResourceService.archiveCancellationRequested
+          ? '还原任务已取消'
+          : (error instanceof Error ? error.message : '还原失败，请稍后重试'),
+        done: true,
+        success: false,
+        archivePath: archivePath || undefined,
+        status: ResourceService.archiveCancellationRequested ? 'cancelled' : 'failed'
+      })
+    } finally {
+      ResourceService.archiveActiveProcess = null
     }
   }
 
@@ -3233,7 +5733,7 @@ export class ResourceService {
 
   static async setGovernanceIssueIgnored(
     resourceId: string,
-    issueType: 'brokenPath' | 'missingCover' | 'longUnvisited',
+    issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' | 'duplicateResource',
     ignored: boolean
   ) {
     const normalizedResourceId = String(resourceId ?? '').trim()
@@ -3261,7 +5761,7 @@ export class ResourceService {
   }
 
   static async batchSetGovernanceIssueIgnored(
-    items: Array<{ resourceId: string; issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' }>,
+    items: Array<{ resourceId: string; issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' | 'duplicateResource' }>,
     ignored: boolean
   ) {
     const normalizedItems = Array.isArray(items)
@@ -3270,7 +5770,7 @@ export class ResourceService {
           resourceId: String(item?.resourceId ?? '').trim(),
           issueType: item?.issueType
         }))
-        .filter((item) => item.resourceId && ['brokenPath', 'missingCover', 'longUnvisited'].includes(String(item.issueType)))
+        .filter((item) => item.resourceId && ['brokenPath', 'missingCover', 'longUnvisited', 'duplicateResource'].includes(String(item.issueType)))
       : []
 
     if (!normalizedItems.length) {
@@ -3284,7 +5784,7 @@ export class ResourceService {
       for (const item of normalizedItems) {
         await DatabaseService.setGovernanceIssueIgnored(
           item.resourceId,
-          item.issueType as 'brokenPath' | 'missingCover' | 'longUnvisited',
+          item.issueType as 'brokenPath' | 'missingCover' | 'longUnvisited' | 'duplicateResource',
           ignored,
           tx
         )
@@ -3294,6 +5794,30 @@ export class ResourceService {
     return {
       type: 'success',
       message: ignored ? `已忽略 ${normalizedItems.length} 项问题资源` : `已恢复 ${normalizedItems.length} 项问题资源`
+    }
+  }
+
+  static async rescanMissingResources(resourceIds: string[]) {
+    const normalizedResourceIds = Array.isArray(resourceIds)
+      ? Array.from(new Set(resourceIds.map((resourceId) => String(resourceId ?? '').trim()).filter(Boolean)))
+      : []
+
+    if (!normalizedResourceIds.length) {
+      return {
+        type: 'warning',
+        message: '未选择有效的资源'
+      }
+    }
+
+    const watcher = ResourceWatcher.getInstance()
+    return watcher.relocateMissingResourcesNow(normalizedResourceIds)
+  }
+
+  static async syncEverythingClientFromSettings() {
+    await ResourceWatcher.getInstance().syncEverythingClientFromSettings()
+    return {
+      type: 'success',
+      message: 'Everything 客户端缓存已刷新'
     }
   }
 
@@ -3745,6 +6269,276 @@ function normalizeWebsiteFetchUrl(input: string, defaultScheme: 'http' | 'https'
   }
 }
 
+function decodeHtmlEntityText(input: string) {
+  const namedEntities: Record<string, string> = {
+    amp: '&',
+    apos: "'",
+    gt: '>',
+    lt: '<',
+    nbsp: ' ',
+    quot: '"'
+  }
+
+  return String(input ?? '').replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (_match, entity: string) => {
+    const normalizedEntity = String(entity ?? '').trim().toLowerCase()
+    if (!normalizedEntity) {
+      return ''
+    }
+
+    if (normalizedEntity.startsWith('#x')) {
+      const codePoint = Number.parseInt(normalizedEntity.slice(2), 16)
+      return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : ''
+    }
+
+    if (normalizedEntity.startsWith('#')) {
+      const codePoint = Number.parseInt(normalizedEntity.slice(1), 10)
+      return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : ''
+    }
+
+    return namedEntities[normalizedEntity] ?? `&${entity};`
+  })
+}
+
+function stripBookmarkHtmlTags(input: string) {
+  return decodeHtmlEntityText(String(input ?? '').replace(/<[^>]*>/g, '')).replace(/\s+/g, ' ').trim()
+}
+
+function parseHtmlAttributes(input: string) {
+  const attrs: Record<string, string> = {}
+  const attrRegex = /([^\s=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g
+  let match: RegExpExecArray | null
+
+  while ((match = attrRegex.exec(input)) !== null) {
+    const key = String(match[1] ?? '').trim().toLowerCase()
+    if (!key) {
+      continue
+    }
+
+    attrs[key] = decodeHtmlEntityText(String(match[2] ?? match[3] ?? match[4] ?? '').trim())
+  }
+
+  return attrs
+}
+
+function parseBookmarkHtml(content: string): WebsiteBookmarkItem[] {
+  const items: WebsiteBookmarkItem[] = []
+  const folderStack: string[] = []
+  let pendingFolderName = ''
+  const tokenRegex = /<h3\b[^>]*>[\s\S]*?<\/h3>|<dl\b[^>]*>|<\/dl>|<a\b([^>]*)>([\s\S]*?)<\/a>/gi
+  let match: RegExpExecArray | null
+
+  while ((match = tokenRegex.exec(content)) !== null) {
+    const token = String(match[0] ?? '')
+    if (/^<h3\b/i.test(token)) {
+      pendingFolderName = stripBookmarkHtmlTags(token)
+      continue
+    }
+
+    if (/^<dl\b/i.test(token)) {
+      if (pendingFolderName) {
+        folderStack.push(pendingFolderName)
+        pendingFolderName = ''
+      }
+      continue
+    }
+
+    if (/^<\/dl/i.test(token)) {
+      pendingFolderName = ''
+      if (folderStack.length) {
+        folderStack.pop()
+      }
+      continue
+    }
+
+    const attrs = parseHtmlAttributes(String(match[1] ?? ''))
+    const url = normalizeWebsiteFetchUrl(String(attrs.href ?? '').trim(), 'https')
+    if (!url) {
+      continue
+    }
+
+    items.push({
+      title: stripBookmarkHtmlTags(String(match[2] ?? '')) || getHostnameLabel(url) || url,
+      url,
+      favicon: String(attrs.icon_uri ?? attrs.icon ?? '').trim(),
+      folder: folderStack.join(' / '),
+      source: 'Chrome 导出文件'
+    })
+  }
+
+  return items
+}
+
+function getBookmarkFolderTypeName(folder: string) {
+  const rootFolderNames = new Set([
+    'bookmarks bar',
+    'bookmark bar',
+    'other bookmarks',
+    'mobile bookmarks',
+    'favorites bar',
+    '书签栏',
+    '书签列',
+    '其他书签',
+    '移动设备书签',
+    '收藏夹栏',
+    '收藏夹'
+  ])
+  const parts = String(folder ?? '')
+    .split('/')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => !rootFolderNames.has(item.toLowerCase()))
+
+  return parts[parts.length - 1] ?? ''
+}
+
+function collectBookmarkJsonItems(node: any, folderParts: string[] = [], items: WebsiteBookmarkItem[] = []) {
+  if (!node || typeof node !== 'object') {
+    return items
+  }
+
+  const type = String(node.type ?? '').trim().toLowerCase()
+  if (type === 'url') {
+    const url = normalizeWebsiteFetchUrl(String(node.url ?? '').trim(), 'https')
+    if (url) {
+      items.push({
+        title: String(node.name ?? '').trim() || getHostnameLabel(url) || url,
+        url,
+        folder: folderParts.join(' / '),
+        source: '浏览器书签'
+      })
+    }
+    return items
+  }
+
+  const nextFolderParts = type === 'folder' && String(node.name ?? '').trim()
+    ? [...folderParts, String(node.name).trim()]
+    : folderParts
+  const children = Array.isArray(node.children) ? node.children : []
+  children.forEach((child) => collectBookmarkJsonItems(child, nextFolderParts, items))
+  return items
+}
+
+function parseBookmarkJson(content: string): WebsiteBookmarkItem[] {
+  const parsed = JSON.parse(content)
+  const roots = parsed?.roots && typeof parsed.roots === 'object' ? parsed.roots : parsed
+  const items: WebsiteBookmarkItem[] = []
+
+  Object.values(roots ?? {}).forEach((root: any) => {
+    const rootName = String(root?.name ?? '').trim()
+    collectBookmarkJsonItems(root, rootName ? [rootName] : [], items)
+  })
+
+  return items
+}
+
+async function readWebsiteBookmarksFromFile(filePath: string) {
+  const content = await fs.readFile(filePath, 'utf8')
+  const trimmedContent = String(content ?? '').trim()
+  if (!trimmedContent) {
+    return []
+  }
+
+  if (trimmedContent.startsWith('{') || trimmedContent.startsWith('[')) {
+    return parseBookmarkJson(trimmedContent)
+  }
+
+  return parseBookmarkHtml(trimmedContent)
+}
+
+async function analyzeWebsiteBookmarkItems(items: WebsiteBookmarkItem[], sourceLabel: string) {
+  const itemMap = new Map<string, WebsiteBookmarkItem>()
+
+  for (const item of items ?? []) {
+    const normalizedUrl = normalizeWebsiteFetchUrl(String(item?.url ?? '').trim(), 'https')
+    if (!normalizedUrl || itemMap.has(normalizedUrl)) {
+      continue
+    }
+
+    itemMap.set(normalizedUrl, {
+      ...item,
+      url: normalizedUrl,
+      source: item.source || sourceLabel
+    })
+  }
+
+  const normalizedItems = Array.from(itemMap.values())
+  return await Promise.all(normalizedItems.map(async (item) => {
+    try {
+      const existingResource = await DatabaseService.getResourceByStoragePath(item.url, null)
+      return {
+        ...item,
+        exists: Boolean(existingResource),
+        existingResourceTitle: String(existingResource?.title ?? ''),
+        checked: !existingResource,
+        errorMessage: ''
+      }
+    } catch (error) {
+      return {
+        ...item,
+        exists: false,
+        checked: false,
+        errorMessage: error instanceof Error ? error.message : '分析失败'
+      }
+    }
+  }))
+}
+
+function getBrowserBookmarkRoots() {
+  const localAppData = String(process.env.LOCALAPPDATA ?? '').trim()
+  const appData = String(process.env.APPDATA ?? '').trim()
+  return [
+    { browserName: 'Chrome', rootPath: localAppData ? path.join(localAppData, 'Google', 'Chrome', 'User Data') : '' },
+    { browserName: 'Edge', rootPath: localAppData ? path.join(localAppData, 'Microsoft', 'Edge', 'User Data') : '' },
+    { browserName: 'Brave', rootPath: localAppData ? path.join(localAppData, 'BraveSoftware', 'Brave-Browser', 'User Data') : '' },
+    { browserName: 'Chromium', rootPath: localAppData ? path.join(localAppData, 'Chromium', 'User Data') : '' },
+    { browserName: 'Vivaldi', rootPath: localAppData ? path.join(localAppData, 'Vivaldi', 'User Data') : '' },
+    { browserName: 'Opera', rootPath: appData ? path.join(appData, 'Opera Software', 'Opera Stable') : '' },
+    { browserName: 'Opera GX', rootPath: appData ? path.join(appData, 'Opera Software', 'Opera GX Stable') : '' }
+  ].filter((item) => item.rootPath)
+}
+
+async function discoverBrowserBookmarkSources(): Promise<BrowserBookmarkSource[]> {
+  const sources: BrowserBookmarkSource[] = []
+
+  for (const browser of getBrowserBookmarkRoots()) {
+    if (!await fs.pathExists(browser.rootPath)) {
+      continue
+    }
+
+    const entries = await fs.readdir(browser.rootPath, { withFileTypes: true }) as Array<{ isDirectory: () => boolean; name: string }>
+    const profileNames: string[] = entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => String(entry.name ?? ''))
+      .filter((name) => name === 'Default' || /^Profile \d+$/i.test(name))
+
+    if (await fs.pathExists(path.join(browser.rootPath, 'Bookmarks'))) {
+      profileNames.unshift('')
+    }
+
+    for (const profileNameRaw of Array.from(new Set(profileNames))) {
+      const profileName = String(profileNameRaw ?? '').trim()
+      const bookmarkPath = profileName
+        ? path.join(browser.rootPath, profileName, 'Bookmarks')
+        : path.join(browser.rootPath, 'Bookmarks')
+      if (!await fs.pathExists(bookmarkPath)) {
+        continue
+      }
+
+      sources.push({
+        id: crypto
+          .createHash('sha1')
+          .update(`${browser.browserName}::${profileName || 'Default'}::${bookmarkPath}`)
+          .digest('hex'),
+        browserName: browser.browserName,
+        profileName: profileName || 'Default',
+        filePath: bookmarkPath
+      })
+    }
+  }
+
+  return sources
+}
+
 function buildWebsiteFetchCandidates(input: string) {
   const normalizedInput = String(input ?? '').trim()
   if (!normalizedInput) {
@@ -3847,6 +6641,10 @@ function isHtmlContentType(contentType: string) {
   return normalizedContentType.includes('text/html') || normalizedContentType.includes('application/xhtml+xml')
 }
 
+function isAcceptableWebsitePageStatus(status: number) {
+  return status >= 200 && status < 500
+}
+
 function hasAttachmentContentDisposition(contentDisposition: string) {
   return /attachment/i.test(String(contentDisposition ?? ''))
 }
@@ -3912,7 +6710,7 @@ async function probeWebsiteResponse(url: string, method: 'head' | 'get', timeout
   const requestConfig = {
     timeout: timeoutMs,
     maxRedirects: 5,
-    validateStatus: (status: number) => status >= 200 && status < 400,
+    validateStatus: isAcceptableWebsitePageStatus,
     headers: requestHeaders,
     ...(await getAxiosProxyConfig(url)),
   }
@@ -4021,7 +6819,7 @@ async function fetchWebsiteHtmlPreview(url: string, maxBytes = 256 * 1024, timeo
   const response = await axios.get<NodeJS.ReadableStream>(url, {
     timeout: timeoutMs,
     maxRedirects: 5,
-    validateStatus: (status) => status >= 200 && status < 400,
+    validateStatus: isAcceptableWebsitePageStatus,
     responseType: 'stream',
     headers: buildWebsitePageRequestHeaders(),
     ...(await getAxiosProxyConfig(url)),
@@ -4120,6 +6918,31 @@ async function inspectWebsiteScreenshotTarget(url: string) {
 
 function getAxiosResponseUrl(response: any, fallbackUrl: string) {
   return String(response?.request?.res?.responseUrl ?? response?.config?.url ?? fallbackUrl).trim() || fallbackUrl
+}
+
+function preserveOriginalUrlHash(targetUrl: string, originalUrl: string) {
+  const normalizedTargetUrl = String(targetUrl ?? '').trim()
+  const normalizedOriginalUrl = String(originalUrl ?? '').trim()
+  if (!normalizedTargetUrl || !normalizedOriginalUrl) {
+    return normalizedTargetUrl
+  }
+
+  try {
+    const target = new URL(normalizedTargetUrl)
+    const original = new URL(normalizedOriginalUrl)
+    if (target.hash || !original.hash) {
+      return target.toString()
+    }
+
+    if (target.origin === original.origin && target.pathname === original.pathname && target.search === original.search) {
+      target.hash = original.hash
+      return target.toString()
+    }
+  } catch {
+    return normalizedTargetUrl
+  }
+
+  return normalizedTargetUrl
 }
 
 const WEBSITE_FETCH_USER_AGENT =
@@ -4225,35 +7048,355 @@ function extractHtmlTitle(htmlText: string) {
   return stripHtmlTags(match?.[1] ?? '')
 }
 
-function extractFaviconUrl(htmlText: string, pageUrl: string) {
-  const normalizedHtml = String(htmlText ?? '')
-  const linkPattern = /<link\b[^>]*rel=["'][^"']*(?:icon|shortcut icon|apple-touch-icon)[^"']*["'][^>]*>/gi
-  const linkMatches = normalizedHtml.match(linkPattern) ?? []
+type WebsiteFaviconCandidate = {
+  url: string
+  priority: number
+  source: string
+}
 
-  for (const linkTag of linkMatches) {
-    const hrefMatch = linkTag.match(/href=["']([^"']+)["']/i)
-    const href = String(hrefMatch?.[1] ?? '').trim()
-    if (!href) {
+function buildWebsiteFetchCacheKey(pageUrl: string, salt: string) {
+  return `website-fetch-${crypto
+    .createHash('sha1')
+    .update(`${String(pageUrl ?? '').trim()}::${String(salt ?? '').slice(0, 4096)}`)
+    .digest('hex')
+    .slice(0, 16)}`
+}
+
+function getHtmlTagAttributes(htmlText: string, tagName: string) {
+  const normalizedTagName = String(tagName ?? '').trim()
+  if (!normalizedTagName) {
+    return []
+  }
+
+  const tagRegex = new RegExp(`<${normalizedTagName}\\b[^>]*>`, 'gi')
+  return (String(htmlText ?? '').match(tagRegex) ?? []).map((tag) => parseHtmlAttributes(tag))
+}
+
+function normalizeFaviconCandidateUrl(rawUrl: string, baseUrl: string) {
+  const normalizedRawUrl = String(rawUrl ?? '').trim()
+  if (!normalizedRawUrl) {
+    return ''
+  }
+
+  if (/^data:image\//i.test(normalizedRawUrl)) {
+    return normalizedRawUrl
+  }
+
+  try {
+    const candidateUrl = new URL(normalizedRawUrl, baseUrl)
+    return ['http:', 'https:'].includes(candidateUrl.protocol) ? candidateUrl.toString() : ''
+  } catch {
+    return ''
+  }
+}
+
+function getLargestIconSizeScore(sizes: string) {
+  const values = String(sizes ?? '').toLowerCase().match(/(\d{1,4})x(\d{1,4})/g) ?? []
+  let largest = 0
+  for (const value of values) {
+    const [width, height] = value.split('x').map((item) => Number.parseInt(item, 10))
+    if (Number.isFinite(width) && Number.isFinite(height)) {
+      largest = Math.max(largest, Math.min(width, height))
+    }
+  }
+
+  return Math.min(24, largest / 16)
+}
+
+function addFaviconCandidate(
+  candidates: WebsiteFaviconCandidate[],
+  rawUrl: string,
+  baseUrl: string,
+  priority: number,
+  source: string
+) {
+  const url = normalizeFaviconCandidateUrl(rawUrl, baseUrl)
+  if (!url) {
+    return
+  }
+
+  const existing = candidates.find((candidate) => candidate.url === url)
+  if (existing) {
+    if (priority > existing.priority) {
+      existing.priority = priority
+      existing.source = source
+    }
+    return
+  }
+
+  candidates.push({
+    url,
+    priority,
+    source
+  })
+}
+
+function collectHtmlFaviconCandidates(htmlText: string, pageUrl: string) {
+  const candidates: WebsiteFaviconCandidate[] = []
+  const links = getHtmlTagAttributes(htmlText, 'link')
+
+  for (const attrs of links) {
+    const href = String(attrs.href ?? '').trim()
+    const relTokens = String(attrs.rel ?? '')
+      .toLowerCase()
+      .split(/\s+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+    if (!href || !relTokens.length) {
       continue
     }
 
+    const hasIconRel = relTokens.includes('icon') || relTokens.includes('shortcut')
+    const hasAppleTouchIconRel = relTokens.includes('apple-touch-icon') || relTokens.includes('apple-touch-icon-precomposed')
+    const hasMaskIconRel = relTokens.includes('mask-icon')
+    const hasFluidIconRel = relTokens.includes('fluid-icon')
+    if (!hasIconRel && !hasAppleTouchIconRel && !hasMaskIconRel && !hasFluidIconRel) {
+      continue
+    }
+
+    const sizes = String(attrs.sizes ?? '').toLowerCase()
+    const type = String(attrs.type ?? '').toLowerCase()
+    const priority = (hasIconRel ? 120 : hasAppleTouchIconRel ? 95 : hasFluidIconRel ? 82 : 72)
+      + (sizes === 'any' ? 10 : 0)
+      + getLargestIconSizeScore(sizes)
+      + (type.includes('svg') ? 8 : 0)
+      + (type.includes('png') || type.includes('webp') ? 4 : 0)
+    addFaviconCandidate(candidates, href, pageUrl, priority, 'html-link')
+  }
+
+  const metaIconNames = new Set([
+    'msapplication-tileimage',
+    'msapplication-square70x70logo',
+    'msapplication-square150x150logo',
+    'msapplication-wide310x150logo',
+    'msapplication-square310x310logo',
+    'thumbnail'
+  ])
+  for (const attrs of getHtmlTagAttributes(htmlText, 'meta')) {
+    const name = String(attrs.name ?? attrs.property ?? '').trim().toLowerCase()
+    const content = String(attrs.content ?? '').trim()
+    if (!content || !metaIconNames.has(name)) {
+      continue
+    }
+    addFaviconCandidate(candidates, content, pageUrl, 68, 'html-meta')
+  }
+
+  for (const candidate of collectInlineSiteIconCandidates(htmlText, pageUrl)) {
+    addFaviconCandidate(candidates, candidate.url, pageUrl, candidate.priority, candidate.source)
+  }
+
+  return candidates
+}
+
+function collectManifestUrls(htmlText: string, pageUrl: string) {
+  const manifestUrls: string[] = []
+  for (const attrs of getHtmlTagAttributes(htmlText, 'link')) {
+    const relTokens = String(attrs.rel ?? '')
+      .toLowerCase()
+      .split(/\s+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+    if (!relTokens.includes('manifest')) {
+      continue
+    }
+
+    const manifestUrl = normalizeFaviconCandidateUrl(String(attrs.href ?? '').trim(), pageUrl)
+    if (manifestUrl && !manifestUrls.includes(manifestUrl)) {
+      manifestUrls.push(manifestUrl)
+    }
+  }
+
+  return manifestUrls
+}
+
+async function collectManifestFaviconCandidates(htmlText: string, pageUrl: string) {
+  const candidates: WebsiteFaviconCandidate[] = []
+  for (const manifestUrl of collectManifestUrls(htmlText, pageUrl).slice(0, 3)) {
     try {
-      return new URL(href, pageUrl).toString()
+      const response = await axios.get(manifestUrl, {
+        timeout: 10000,
+        maxRedirects: 5,
+        validateStatus: isAcceptableWebsitePageStatus,
+        headers: buildWebsitePageRequestHeaders(pageUrl),
+        ...(await getAxiosProxyConfig(manifestUrl)),
+      })
+      if (Number(response.status) >= 400) {
+        continue
+      }
+
+      const manifest = typeof response.data === 'string' ? JSON.parse(response.data) : response.data
+      const icons = Array.isArray(manifest?.icons) ? manifest.icons : []
+      for (const icon of icons) {
+        const src = String(icon?.src ?? '').trim()
+        if (!src) {
+          continue
+        }
+
+        const purpose = String(icon?.purpose ?? '').toLowerCase()
+        const priority = 78
+          + getLargestIconSizeScore(String(icon?.sizes ?? ''))
+          + (String(icon?.type ?? '').toLowerCase().includes('svg') ? 6 : 0)
+          - (purpose.includes('monochrome') ? 20 : 0)
+        addFaviconCandidate(candidates, src, manifestUrl, priority, 'manifest')
+      }
+    } catch (error) {
+      ResourceService.logger.debug('collectManifestFaviconCandidates failed', {
+        pageUrl,
+        manifestUrl,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
+  return candidates
+}
+
+function collectBrowserConfigUrls(htmlText: string, pageUrl: string) {
+  const configUrls: string[] = []
+  for (const attrs of getHtmlTagAttributes(htmlText, 'meta')) {
+    const name = String(attrs.name ?? '').trim().toLowerCase()
+    const content = String(attrs.content ?? '').trim()
+    if (name !== 'msapplication-config' || !content) {
+      continue
+    }
+
+    const configUrl = normalizeFaviconCandidateUrl(content, pageUrl)
+    if (configUrl && !configUrls.includes(configUrl)) {
+      configUrls.push(configUrl)
+    }
+  }
+
+  return configUrls
+}
+
+async function collectBrowserConfigFaviconCandidates(htmlText: string, pageUrl: string) {
+  const candidates: WebsiteFaviconCandidate[] = []
+  for (const configUrl of collectBrowserConfigUrls(htmlText, pageUrl).slice(0, 3)) {
+    try {
+      const response = await axios.get(configUrl, {
+        timeout: 10000,
+        maxRedirects: 5,
+        validateStatus: isAcceptableWebsitePageStatus,
+        headers: buildWebsitePageRequestHeaders(pageUrl),
+        ...(await getAxiosProxyConfig(configUrl)),
+      })
+      if (Number(response.status) >= 400) {
+        continue
+      }
+
+      const xmlText = String(response.data ?? '')
+      const tileMatches = xmlText.match(/<(?:square\d+x\d+logo|wide\d+x\d+logo|tileimage)\b[^>]*>/gi) ?? []
+      for (const tileTag of tileMatches) {
+        const attrs = parseHtmlAttributes(tileTag)
+        addFaviconCandidate(candidates, String(attrs.src ?? '').trim(), configUrl, 62, 'browserconfig')
+      }
+    } catch (error) {
+      ResourceService.logger.debug('collectBrowserConfigFaviconCandidates failed', {
+        pageUrl,
+        configUrl,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
+  return candidates
+}
+
+function collectFallbackFaviconCandidates(pageUrl: string) {
+  const candidates: WebsiteFaviconCandidate[] = []
+  for (const item of [
+    { path: '/favicon.ico', priority: 30 },
+    { path: '/favicon.png', priority: 24 },
+    { path: '/favicon.svg', priority: 22 },
+    { path: '/apple-touch-icon.png', priority: 20 },
+    { path: '/apple-touch-icon-precomposed.png', priority: 18 }
+  ]) {
+    try {
+      const page = new URL(pageUrl)
+      addFaviconCandidate(candidates, item.path, page.origin, item.priority, 'fallback')
     } catch {
       continue
     }
   }
 
+  return candidates
+}
+
+async function collectWebsiteFaviconCandidates(htmlText: string, pageUrl: string) {
+  const candidates = [
+    ...collectHtmlFaviconCandidates(htmlText, pageUrl),
+    ...await collectManifestFaviconCandidates(htmlText, pageUrl),
+    ...await collectBrowserConfigFaviconCandidates(htmlText, pageUrl),
+    ...collectFallbackFaviconCandidates(pageUrl)
+  ]
+  const dedupedCandidates: WebsiteFaviconCandidate[] = []
+  for (const candidate of candidates) {
+    addFaviconCandidate(dedupedCandidates, candidate.url, pageUrl, candidate.priority, candidate.source)
+  }
+
+  return dedupedCandidates.sort((left, right) => right.priority - left.priority)
+}
+
+async function resolveWebsiteFaviconToCache(htmlText: string, pageUrl: string, resourceId: string) {
+  const candidates = await collectWebsiteFaviconCandidates(htmlText, pageUrl)
+  for (const candidate of candidates) {
+    const cachedFavicon = await cacheWebsiteFaviconToCache(
+      candidate.url,
+      resourceId,
+      pageUrl,
+      { returnInputOnFailure: false }
+    )
+    if (cachedFavicon) {
+      ResourceService.logger.debug('resolveWebsiteFaviconToCache success', {
+        pageUrl,
+        faviconUrl: candidate.url,
+        source: candidate.source
+      })
+      return cachedFavicon
+    }
+  }
+
+  ResourceService.logger.debug('resolveWebsiteFaviconToCache found no usable favicon', {
+    pageUrl,
+    candidateCount: candidates.length
+  })
   return ''
 }
 
-function buildFallbackFaviconUrl(pageUrl: string) {
-  try {
-    const parsedUrl = new URL(pageUrl)
-    return new URL('/favicon.ico', parsedUrl.origin).toString()
-  } catch {
-    return ''
+function collectInlineSiteIconCandidates(htmlText: string, pageUrl: string) {
+  const candidates: WebsiteFaviconCandidate[] = []
+  const imgMatches = String(htmlText ?? '').match(/<img\b[^>]*>/gi) ?? []
+
+  for (const imgTag of imgMatches) {
+    const attrs = parseHtmlAttributes(imgTag)
+    const src = String(attrs.src ?? '').trim()
+    if (!src) {
+      continue
+    }
+
+    const descriptor = [
+      attrs.class,
+      attrs.id,
+      attrs.alt,
+      attrs.title,
+      attrs.role
+    ].map((value) => String(value ?? '').toLowerCase()).join(' ')
+
+    const isSiteIcon = /(?:^|[\s_-])(?:atwiki-)?site-icon(?:$|[\s_-])/.test(descriptor)
+      || /(?:^|[\s_-])(?:app|wiki|site)[\s_-]*icon(?:$|[\s_-])/.test(descriptor)
+      || /(?:^|[\s_-])favicon(?:$|[\s_-])/.test(descriptor)
+    if (!isSiteIcon) {
+      continue
+    }
+
+    try {
+      addFaviconCandidate(candidates, src, pageUrl, 42, 'inline-site-icon')
+    } catch {
+      continue
+    }
   }
+
+  return candidates
 }
 
 type ResourcePathInfo = {
@@ -4826,6 +7969,15 @@ async function isImageTooLargeForCover(input: string | Buffer) {
   }
 }
 
+async function isLocalCoverFileTooLarge(filePath: string) {
+  try {
+    const stat = await fs.stat(filePath)
+    return stat.isFile() && Number(stat.size ?? 0) > MAX_COVER_SOURCE_BYTES
+  } catch {
+    return false
+  }
+}
+
 async function dealCover(coverPath: string, resourceId: string): Promise<string> {
   if (!coverPath) return ''
 
@@ -4843,10 +7995,23 @@ async function dealCover(coverPath: string, resourceId: string): Promise<string>
   const writeProcessedCover = async (input: string | Buffer) => {
     const targetPath = createTargetPath()
     const tempTargetPath = `${targetPath}.tmp`
-    await sharp(input, { limitInputPixels: MAX_COVER_PROCESS_PIXELS, animated: false })
-      .resize({width: 560, fit: 'contain', background: {r: 0, g: 0, b: 0, alpha: 0}})
-      .webp()
-      .toFile(tempTargetPath)
+    await withTimeout(
+      sharp(input, { limitInputPixels: MAX_COVER_PROCESS_PIXELS, animated: false })
+        .resize({
+          width: COVER_THUMBNAIL_MAX_WIDTH,
+          height: COVER_THUMBNAIL_MAX_WIDTH,
+          fit: 'inside',
+          withoutEnlargement: true,
+          background: { r: 0, g: 0, b: 0, alpha: 0 }
+        })
+        .webp({
+          quality: COVER_THUMBNAIL_WEBP_QUALITY,
+          effort: 4
+        })
+        .toFile(tempTargetPath),
+      COVER_PROCESS_TIMEOUT_MS,
+      '封面压缩超时'
+    )
 
     await fs.move(tempTargetPath, targetPath, { overwrite: true })
     return targetPath
@@ -4888,6 +8053,9 @@ async function dealCover(coverPath: string, resourceId: string): Promise<string>
     })
 
     const imageBuffer = Buffer.from(response.data)
+    if (imageBuffer.byteLength > MAX_COVER_SOURCE_BYTES) {
+      return ''
+    }
     if (await isImageTooLargeForCover(imageBuffer)) {
       return ''
     }
@@ -4907,6 +8075,10 @@ async function dealCover(coverPath: string, resourceId: string): Promise<string>
     throw new Error('封面图片不存在')
   }
 
+  if (await isLocalCoverFileTooLarge(normalizedInputPath)) {
+    return ''
+  }
+
   if (await isImageTooLargeForCover(normalizedInputPath)) {
     return ''
   }
@@ -4914,9 +8086,17 @@ async function dealCover(coverPath: string, resourceId: string): Promise<string>
   return await writeProcessedCover(normalizedInputPath)
 }
 
-async function cacheWebsiteFaviconToCache(faviconPath: string, resourceId: string, pageUrl?: string) {
+async function cacheWebsiteFaviconToCache(
+  faviconPath: string,
+  resourceId: string,
+  pageUrl?: string,
+  options?: {
+    returnInputOnFailure?: boolean
+  }
+) {
   const normalizedFaviconPath = String(faviconPath ?? '').trim()
   const normalizedResourceId = String(resourceId ?? '').trim()
+  const returnInputOnFailure = options?.returnInputOnFailure !== false
   if (!normalizedFaviconPath) {
     return ''
   }
@@ -4926,8 +8106,23 @@ async function cacheWebsiteFaviconToCache(faviconPath: string, resourceId: strin
   }
 
   try {
-    return await dealCover(normalizedFaviconPath, `${normalizedResourceId}-favicon`)
+    const processedFavicon = await dealCover(normalizedFaviconPath, `${normalizedResourceId}-favicon`)
+    if (processedFavicon) {
+      return processedFavicon
+    }
+
+    const rawDataUrlFavicon = await cacheRawDataUrlFaviconAsset(normalizedFaviconPath, normalizedResourceId)
+    if (rawDataUrlFavicon) {
+      return rawDataUrlFavicon
+    }
+
+    return returnInputOnFailure ? normalizedFaviconPath : ''
   } catch (error) {
+    const rawDataUrlFavicon = await cacheRawDataUrlFaviconAsset(normalizedFaviconPath, normalizedResourceId)
+    if (rawDataUrlFavicon) {
+      return rawDataUrlFavicon
+    }
+
     if (isRemoteCoverPath(normalizedFaviconPath)) {
       const fallbackCachedPath = await cacheRawRemoteFaviconAsset(normalizedFaviconPath, normalizedResourceId, pageUrl)
       if (fallbackCachedPath) {
@@ -4940,7 +8135,49 @@ async function cacheWebsiteFaviconToCache(faviconPath: string, resourceId: strin
       faviconPath: normalizedFaviconPath,
       error: error instanceof Error ? error.message : String(error)
     })
-    return normalizedFaviconPath
+    return returnInputOnFailure ? normalizedFaviconPath : ''
+  }
+}
+
+async function cacheRawDataUrlFaviconAsset(faviconDataUrl: string, resourceId: string) {
+  try {
+    const normalizedFaviconDataUrl = String(faviconDataUrl ?? '').trim()
+    const dataUrlMatch = normalizedFaviconDataUrl.match(/^data:([^;,]+)?;base64,(.+)$/i)
+    if (!dataUrlMatch) {
+      return ''
+    }
+
+    const mimeType = String(dataUrlMatch[1] ?? '').trim().toLowerCase()
+    const extensionMap: Record<string, string> = {
+      'image/png': '.png',
+      'image/jpeg': '.jpg',
+      'image/jpg': '.jpg',
+      'image/webp': '.webp',
+      'image/gif': '.gif',
+      'image/bmp': '.bmp',
+      'image/x-icon': '.ico',
+      'image/vnd.microsoft.icon': '.ico',
+      'image/svg+xml': '.svg'
+    }
+    const safeExtension = extensionMap[mimeType] ?? '.ico'
+    const imageBuffer = Buffer.from(dataUrlMatch[2], 'base64')
+    if (!imageBuffer.length || imageBuffer.length > 5 * 1024 * 1024) {
+      return ''
+    }
+
+    const cacheRoot = await getCacheRootDirectory()
+    const faviconCacheDirectory = path.join(cacheRoot, 'website-favicons')
+    await fs.ensureDir(faviconCacheDirectory)
+
+    const targetPath = path.join(faviconCacheDirectory, `${resourceId}-${Date.now()}-${generateId()}${safeExtension}`)
+    await fs.writeFile(targetPath, imageBuffer)
+    return targetPath
+  } catch (error) {
+    ResourceService.logger.warn('cacheRawDataUrlFaviconAsset failed', {
+      resourceId,
+      error: error instanceof Error ? error.message : String(error)
+    })
+    return ''
   }
 }
 
@@ -4960,8 +8197,12 @@ async function cacheRawRemoteFaviconAsset(faviconUrl: string, resourceId: string
       responseType: 'arraybuffer',
       timeout: 20000,
       headers: buildWebsiteFaviconRequestHeaders(faviconUrl, pageUrl),
-      ...(await getAxiosProxyConfig()),
+      ...(await getAxiosProxyConfig(faviconUrl)),
     })
+    const contentType = String(response.headers?.['content-type'] ?? '').toLowerCase()
+    if (contentType && !contentType.includes('image/') && !contentType.includes('octet-stream')) {
+      return ''
+    }
 
     await fs.writeFile(targetPath, Buffer.from(response.data))
     return targetPath
@@ -4996,18 +8237,22 @@ async function writeManagedWebsiteCover(resourceId: string, imageBuffer: Buffer)
   const outputDirectory = path.dirname(outputPath)
   const tempPath = `${outputPath}.tmp`
   await fs.ensureDir(outputDirectory)
-  await sharp(imageBuffer, {
-    limitInputPixels: MAX_COVER_PROCESS_PIXELS,
-    animated: false,
-  })
-    .resize({
-      width: 1280,
-      height: 720,
-      fit: 'cover',
-      position: 'attention'
+  await withTimeout(
+    sharp(imageBuffer, {
+      limitInputPixels: MAX_COVER_PROCESS_PIXELS,
+      animated: false,
     })
-    .webp({ quality: 84 })
-    .toFile(tempPath)
+      .resize({
+        width: 1280,
+        height: 720,
+        fit: 'cover',
+        position: 'attention'
+      })
+      .webp({ quality: 84 })
+      .toFile(tempPath),
+    WEBSITE_COVER_WRITE_TIMEOUT_MS,
+    '网站封面图片写入超时'
+  )
 
   await fs.move(tempPath, outputPath, { overwrite: true })
   return outputPath
@@ -5028,6 +8273,133 @@ async function applyWebsiteScreenshotWindowProxy(window: BrowserWindow, targetUr
 function waitForTimeout(ms: number) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms)
+  })
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+  onTimeout?: () => void
+) {
+  let timeoutTimer: ReturnType<typeof setTimeout> | null = null
+
+  return new Promise<T>((resolve, reject) => {
+    timeoutTimer = setTimeout(() => {
+      timeoutTimer = null
+      try {
+        onTimeout?.()
+      } catch {}
+      reject(new Error(message))
+    }, timeoutMs)
+
+    promise.then((value) => {
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer)
+        timeoutTimer = null
+      }
+      resolve(value)
+    }).catch((error) => {
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer)
+        timeoutTimer = null
+      }
+      reject(error)
+    })
+  })
+}
+
+function waitForWebsiteScreenshotPageReady(window: BrowserWindow, url: string) {
+  return new Promise<void>((resolve, reject) => {
+    const webContents = window.webContents
+    let settled = false
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null
+    let domReadyTimer: ReturnType<typeof setTimeout> | null = null
+
+    const cleanup = () => {
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer)
+        timeoutTimer = null
+      }
+      if (domReadyTimer) {
+        clearTimeout(domReadyTimer)
+        domReadyTimer = null
+      }
+      webContents.removeListener('did-finish-load', handleFinishLoad)
+      webContents.removeListener('dom-ready', handleDomReady)
+      webContents.removeListener('did-fail-load', handleFailLoad)
+    }
+
+    const resolveReady = (reason: string) => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      cleanup()
+      ResourceService.logger.debug('website screenshot page ready', {
+        url,
+        reason,
+        currentUrl: webContents.isDestroyed() ? '' : webContents.getURL()
+      })
+      resolve()
+    }
+
+    const rejectLoad = (error: Error) => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      cleanup()
+      reject(error)
+    }
+
+    const handleFinishLoad = () => resolveReady('did-finish-load')
+    const handleDomReady = () => {
+      domReadyTimer = setTimeout(() => resolveReady('dom-ready'), 1200)
+    }
+    const handleFailLoad = (
+      _event: Electron.Event,
+      errorCode: number,
+      errorDescription: string,
+      validatedUrl: string,
+      isMainFrame: boolean
+    ) => {
+      if (!isMainFrame) {
+        return
+      }
+
+      rejectLoad(new Error(`网站封面页面加载失败：${errorDescription || errorCode} ${validatedUrl || url}`))
+    }
+
+    webContents.once('did-finish-load', handleFinishLoad)
+    webContents.once('dom-ready', handleDomReady)
+    webContents.on('did-fail-load', handleFailLoad)
+
+    webContents.loadURL(url, {
+      userAgent: WEBSITE_FETCH_USER_AGENT
+    }).then(() => {
+      resolveReady('loadURL')
+    }).catch((error) => {
+      if (!settled) {
+        rejectLoad(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
+
+    timeoutTimer = setTimeout(() => {
+      if (settled) {
+        return
+      }
+
+      const currentUrl = webContents.isDestroyed() ? '' : webContents.getURL()
+      if (currentUrl && currentUrl !== 'about:blank') {
+        resolveReady('timeout-with-document')
+        return
+      }
+
+      rejectLoad(new Error('网站封面截图超时'))
+    }, WEBSITE_COVER_CAPTURE_TIMEOUT_MS)
   })
 }
 
@@ -5061,20 +8433,13 @@ async function captureWebsiteCoverBuffer(url: string, resourceId: string) {
     screenshotWindow.webContents.session.on('will-download', downloadHandler)
     screenshotWindow.webContents.setAudioMuted(true)
 
-    await Promise.race([
-      screenshotWindow.loadURL(url, {
-        userAgent: 'NeoResourceManager/1.0'
-      }),
-      waitForTimeout(WEBSITE_COVER_CAPTURE_TIMEOUT_MS).then(() => {
-        throw new Error('网站封面截图超时')
-      })
-    ])
+    await waitForWebsiteScreenshotPageReady(screenshotWindow, url)
 
     if (downloadBlocked) {
       throw new Error('该链接指向下载内容，已跳过网页封面截图')
     }
 
-    await screenshotWindow.webContents.insertCSS(`
+    await withTimeout(screenshotWindow.webContents.insertCSS(`
 html, body {
   background: #ffffff !important;
 }
@@ -5085,9 +8450,13 @@ html, body {
   opacity: 0 !important;
   pointer-events: none !important;
 }
-    `)
+    `), WEBSITE_COVER_CAPTURE_OPERATION_TIMEOUT_MS, '网站封面样式注入超时', () => {
+      if (!screenshotWindow.isDestroyed()) {
+        screenshotWindow.destroy()
+      }
+    })
 
-    await screenshotWindow.webContents.executeJavaScript(`
+    await withTimeout(screenshotWindow.webContents.executeJavaScript(`
 (() => {
   window.scrollTo(0, 0)
   const selectors = ['[class*="cookie"]', '[id*="cookie"]', '[class*="consent"]', '[id*="consent"]', '[aria-modal="true"]']
@@ -5100,10 +8469,23 @@ html, body {
   }
   return true
 })()
-    `)
+    `), WEBSITE_COVER_CAPTURE_OPERATION_TIMEOUT_MS, '网站封面页面脚本执行超时', () => {
+      if (!screenshotWindow.isDestroyed()) {
+        screenshotWindow.destroy()
+      }
+    })
 
     await waitForTimeout(WEBSITE_COVER_STABILIZE_DELAY_MS)
-    const capturedImage = await screenshotWindow.webContents.capturePage()
+    const capturedImage = await withTimeout(
+      screenshotWindow.webContents.capturePage(),
+      WEBSITE_COVER_CAPTURE_OPERATION_TIMEOUT_MS,
+      '网站封面截图超时',
+      () => {
+        if (!screenshotWindow.isDestroyed()) {
+          screenshotWindow.destroy()
+        }
+      }
+    )
     const screenshotBuffer = capturedImage.toPNG()
 
     if (!screenshotBuffer.length) {
@@ -5112,8 +8494,8 @@ html, body {
 
     return screenshotBuffer
   } finally {
-    screenshotWindow.webContents.session.removeListener('will-download', downloadHandler)
     if (!screenshotWindow.isDestroyed()) {
+      screenshotWindow.webContents.session.removeListener('will-download', downloadHandler)
       screenshotWindow.destroy()
     }
   }
@@ -5128,7 +8510,8 @@ async function resolveResourceCoverPath(
   const extendTableName = getExtendTableName(categoryInfo)
 
   if (extendTableName === 'single_image_meta') {
-    return getResolvedFilePath(pathInfo)
+    const resolvedImagePath = getResolvedFilePath(pathInfo)
+    return resolvedImagePath ? await dealCover(resolvedImagePath, resourceId) : ''
   }
 
   if (extendTableName === 'multi_image_meta') {
@@ -5162,9 +8545,10 @@ async function resolveResourceCoverPath(
   } catch (error) {
     // Some embedded album art uses formats unsupported by sharp. For music,
     // skipping the cover is better than failing the whole import/save flow.
-    if (extendTableName === 'audio_meta') {
-      ResourceService.logger.warn('resolveResourceCoverPath skipped invalid audio cover', {
+    if (['audio_meta', 'single_image_meta', 'multi_image_meta'].includes(extendTableName)) {
+      ResourceService.logger.warn('resolveResourceCoverPath skipped invalid cover for tolerant category', {
         resourceId,
+        extendTableName,
         coverPath,
         error: error instanceof Error ? error.message : String(error)
       })
@@ -5245,7 +8629,8 @@ async function normalizeResourceMeta(
       : await cacheWebsiteFaviconToCache(
         String(normalizedMeta.favicon ?? '').trim(),
         String(resourceId ?? '').trim(),
-        websiteTarget
+        websiteTarget,
+        { returnInputOnFailure: false }
       )
   }
 
@@ -6300,13 +9685,505 @@ function isPowerShellExecutable(targetPath: string) {
   return fileName === 'powershell.exe' || fileName === 'powershell' || fileName === 'pwsh.exe' || fileName === 'pwsh'
 }
 
-function resolveResourceDeletionDirectory(basePath: string) {
+type ArchiveFormat = '7z' | 'zip' | 'tar' | 'xz' | 'tar.xz' | 'exe'
+
+type ArchiveExecutionPlan = {
+  outputPath: string
+  cleanupPaths: string[]
+  steps: Array<{
+    command: string
+    args: string[]
+    progressStart: number
+    progressEnd: number
+  }>
+}
+
+function normalizeArchiveFormat(value: string): ArchiveFormat {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  if (normalized === 'zip' || normalized === 'tar' || normalized === 'xz' || normalized === 'tar.xz' || normalized === 'exe') {
+    return normalized
+  }
+
+  return '7z'
+}
+
+function supportsArchivePassword(format: ArchiveFormat) {
+  return format === '7z' || format === 'zip' || format === 'exe'
+}
+
+function clampArchiveLevel(value: number) {
+  if (!Number.isFinite(value)) {
+    return 9
+  }
+
+  return Math.min(9, Math.max(0, Math.trunc(value)))
+}
+
+function parseBooleanSetting(value: unknown, fallback = false) {
+  const normalizedValue = String(value ?? '').trim().toLowerCase()
+  if (!normalizedValue) {
+    return fallback
+  }
+
+  return ['1', 'true', 'yes', 'on'].includes(normalizedValue)
+}
+
+function resolveArchiveSplitSizeMb(rawSplitValue: string, rawCustomValue: string) {
+  const normalizedSplitValue = String(rawSplitValue ?? '').trim().toLowerCase()
+  if (!normalizedSplitValue || normalizedSplitValue === 'none') {
+    return null
+  }
+
+  if (normalizedSplitValue === 'custom') {
+    const customValue = Number.parseInt(String(rawCustomValue ?? '').trim(), 10)
+    return Number.isFinite(customValue) && customValue > 0 ? customValue : null
+  }
+
+  const parsedValue = Number.parseInt(normalizedSplitValue, 10)
+  return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : null
+}
+
+function sanitizeArchiveName(value: string) {
+  const normalized = String(value ?? '').trim()
+  const sanitized = normalized
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+    .replace(/\s+/g, ' ')
+    .replace(/[. ]+$/g, '')
+    .trim()
+
+  return sanitized || 'archive'
+}
+
+function getArchiveFileExtension(format: ArchiveFormat) {
+  switch (format) {
+    case 'tar.xz':
+      return '.tar.xz'
+    case 'exe':
+      return '.exe'
+    default:
+      return `.${format}`
+  }
+}
+
+async function allocateArchiveTargetPath(directoryPath: string, baseName: string, format: ArchiveFormat) {
+  const extension = getArchiveFileExtension(format)
+  let index = 0
+
+  while (true) {
+    const suffix = index === 0 ? '' : `-${index + 1}`
+    const candidatePath = path.join(directoryPath, `${baseName}${suffix}${extension}`)
+    const candidateExists = await fs.pathExists(candidatePath)
+    const splitExists = await fs.pathExists(`${candidatePath}.001`)
+    if (!candidateExists && !splitExists) {
+      return candidatePath
+    }
+    index += 1
+  }
+}
+
+function resolveArchiveItemEntryPath(sourcePath: string) {
+  const normalizedSourcePath = path.normalize(String(sourcePath ?? '').trim())
+  return path.basename(normalizedSourcePath) || normalizedSourcePath
+}
+
+function resolveArchiveExtractedItemPath(outputDirectory: string, archiveEntryPath: string, fallbackSourcePath: string) {
+  const normalizedEntryPath = String(archiveEntryPath ?? '').trim()
+  const fallbackEntryPath = resolveArchiveItemEntryPath(fallbackSourcePath)
+  const looksAbsolutePath = /^[a-zA-Z]:[\\/]/.test(normalizedEntryPath) || normalizedEntryPath.startsWith('\\\\')
+  const relativeEntryPath = looksAbsolutePath || !normalizedEntryPath
+    ? fallbackEntryPath
+    : normalizedEntryPath.replace(/^[/\\]+/, '')
+
+  return path.join(outputDirectory, relativeEntryPath)
+}
+
+async function extractArchivedPackageToDirectory(options: {
+  archivePath: string
+  archiveFormat: ArchiveFormat
+  outputDirectory: string
+  password: string
+  onProgress?: (progress: number) => void
+  onSpawn?: (process: ChildProcess) => void
+  isCancelled?: () => boolean
+}) {
+  const sevenZipPath = await resolveSevenZipExecutablePath()
+  if (!sevenZipPath) {
+    throw new Error('未找到 7z.exe，无法还原归档包')
+  }
+
+  const archivePath = path.normalize(String(options.archivePath ?? '').trim())
+  const outputDirectory = path.normalize(String(options.outputDirectory ?? '').trim())
+  await fs.ensureDir(outputDirectory)
+
+  const buildExtractArgs = (targetArchivePath: string, outputDirectory: string) => {
+    const args = [
+      'x',
+      targetArchivePath,
+      `-o${outputDirectory}`,
+      '-y',
+      '-bsp1',
+      '-bse1'
+    ]
+    if (options.password) {
+      args.push(`-p${options.password}`)
+    }
+    return args
+  }
+
+  if (options.archiveFormat !== 'tar.xz') {
+    await run7ZipArchiveStep(
+      {
+        command: sevenZipPath,
+        args: buildExtractArgs(archivePath, outputDirectory),
+        progressStart: 0,
+        progressEnd: 100
+      },
+      (progress) => options.onProgress?.(progress),
+      {
+        onSpawn: options.onSpawn,
+        isCancelled: options.isCancelled
+      }
+    )
+    return
+  }
+
+    const tempDirectory = path.join(path.dirname(archivePath), `.nrm-restore-stage-${generateId()}`)
+  try {
+    await fs.ensureDir(tempDirectory)
+    await run7ZipArchiveStep(
+      {
+        command: sevenZipPath,
+        args: buildExtractArgs(archivePath, tempDirectory),
+        progressStart: 0,
+        progressEnd: 45
+      },
+      (progress) => options.onProgress?.(progress),
+      {
+        onSpawn: options.onSpawn,
+        isCancelled: options.isCancelled
+      }
+    )
+
+    const extractedEntries = await fs.readdir(tempDirectory)
+    const tarFileName = extractedEntries.find((entry) => entry.toLowerCase().endsWith('.tar')) ?? extractedEntries[0]
+    if (!tarFileName) {
+      throw new Error('解压 tar.xz 后未找到 tar 文件')
+    }
+
+    await run7ZipArchiveStep(
+      {
+        command: sevenZipPath,
+        args: buildExtractArgs(path.join(tempDirectory, tarFileName), outputDirectory),
+        progressStart: 45,
+        progressEnd: 100
+      },
+      (progress) => options.onProgress?.(progress),
+      {
+        onSpawn: options.onSpawn,
+        isCancelled: options.isCancelled
+      }
+    )
+  } finally {
+    await fs.remove(tempDirectory)
+  }
+}
+
+async function resolveSevenZipExecutablePath() {
+  const candidatePaths = [
+    path.resolve(process.cwd(), 'resources', 'bin', '7z.exe'),
+    path.resolve(process.cwd(), 'resources', 'bin', '7za.exe'),
+    process.resourcesPath ? path.join(process.resourcesPath, 'app.asar.unpacked', 'resources', 'bin', '7z.exe') : '',
+    process.resourcesPath ? path.join(process.resourcesPath, 'resources', 'bin', '7z.exe') : '',
+    process.resourcesPath ? path.join(process.resourcesPath, 'bin', '7z.exe') : ''
+  ].filter(Boolean)
+
+  for (const candidatePath of candidatePaths) {
+    if (await fs.pathExists(candidatePath)) {
+      return candidatePath
+    }
+  }
+
+  return ''
+}
+
+function buildArchiveExecutionPlan(options: {
+  sevenZipPath: string
+  archiveFormat: ArchiveFormat
+  archivePath: string
+  sourcePaths: string[]
+  password: string
+  splitSizeMb: number | null
+  multithreadEnabled: boolean
+  threadCount: number
+  archiveLevel: number
+}): ArchiveExecutionPlan {
+  const commonArgs = ['-y', '-bsp1', '-bse1', `-mx=${clampArchiveLevel(options.archiveLevel)}`]
+  if (options.password) {
+    commonArgs.push(`-p${options.password}`)
+  }
+  if (options.splitSizeMb && options.splitSizeMb > 0) {
+    commonArgs.push(`-v${options.splitSizeMb}m`)
+  }
+  commonArgs.push(options.multithreadEnabled ? `-mmt=${options.threadCount}` : '-mmt=off')
+
+  if (options.archiveFormat === 'tar.xz') {
+    const tempTarPath = options.archivePath.replace(/\.tar\.xz$/i, '.tar')
+    return {
+      outputPath: options.archivePath,
+      cleanupPaths: [tempTarPath],
+      steps: [
+        {
+          command: options.sevenZipPath,
+          args: ['a', '-ttar', tempTarPath, ...options.sourcePaths, ...commonArgs],
+          progressStart: 8,
+          progressEnd: 58
+        },
+        {
+          command: options.sevenZipPath,
+          args: ['a', '-txz', options.archivePath, tempTarPath, ...commonArgs],
+          progressStart: 60,
+          progressEnd: 92
+        }
+      ]
+    }
+  }
+
+  const formatSwitch = options.archiveFormat === 'exe'
+    ? '-t7z'
+    : `-t${options.archiveFormat}`
+  const extraArgs = options.archiveFormat === 'exe' ? ['-sfx'] : []
+
+  return {
+    outputPath: options.archivePath,
+    cleanupPaths: [],
+    steps: [
+      {
+        command: options.sevenZipPath,
+        args: ['a', formatSwitch, options.archivePath, ...options.sourcePaths, ...extraArgs, ...commonArgs],
+        progressStart: 8,
+        progressEnd: 92
+      }
+    ]
+  }
+}
+
+function run7ZipArchiveStep(
+  step: { command: string; args: string[]; progressStart: number; progressEnd: number },
+  onProgress: (progress: number) => void,
+  options?: {
+    onSpawn?: (process: ChildProcess) => void
+    isCancelled?: () => boolean
+  }
+) {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false
+    let stderrBuffer = ''
+    let stdoutBuffer = ''
+    let lastProgress = step.progressStart
+    const archiveProcess = spawn(step.command, step.args, {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    options?.onSpawn?.(archiveProcess)
+
+    if (options?.isCancelled?.()) {
+      settled = true
+      try {
+        archiveProcess.kill('SIGTERM')
+      } catch {}
+      reject(new Error('归档任务已取消'))
+      return
+    }
+
+    const updateProgressFromChunk = (chunk: Buffer | string) => {
+      if (options?.isCancelled?.()) {
+        if (!settled) {
+          settled = true
+          try {
+            archiveProcess.kill('SIGTERM')
+          } catch {}
+          reject(new Error('归档任务已取消'))
+        }
+        return
+      }
+
+      const text = String(chunk ?? '')
+      const matches = text.match(/(\d{1,3})%/g) ?? []
+      for (const match of matches) {
+        const value = Number.parseInt(match.replace('%', ''), 10)
+        if (!Number.isFinite(value)) {
+          continue
+        }
+        const normalized = Math.round(
+          step.progressStart + ((step.progressEnd - step.progressStart) * Math.min(100, Math.max(0, value)) / 100)
+        )
+        if (normalized > lastProgress) {
+          lastProgress = normalized
+          onProgress(normalized)
+        }
+      }
+    }
+
+    archiveProcess.stdout.on('data', (chunk) => {
+      stdoutBuffer += String(chunk)
+      updateProgressFromChunk(chunk)
+    })
+    archiveProcess.stderr.on('data', (chunk) => {
+      stderrBuffer += String(chunk)
+      updateProgressFromChunk(chunk)
+    })
+    archiveProcess.on('error', (error) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      reject(error)
+    })
+    archiveProcess.on('close', (code) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      if (code === 0) {
+        onProgress(step.progressEnd)
+        resolve()
+        return
+      }
+
+      const errorText = [stderrBuffer.trim(), stdoutBuffer.trim()].filter(Boolean).join('\n')
+      reject(new Error(errorText || `7z 进程退出失败，退出码：${String(code ?? 'unknown')}`))
+    })
+  })
+}
+
+async function resolveArchiveOutputPath(outputPath: string) {
+  const candidatePaths = [outputPath, `${outputPath}.001`]
+  for (const candidatePath of candidatePaths) {
+    if (await fs.pathExists(candidatePath)) {
+      return candidatePath
+    }
+  }
+
+  throw new Error('压缩完成后未找到归档包')
+}
+
+async function calculateDirectorySize(targetPath: string): Promise<number | null> {
+  if (!targetPath || !await fs.pathExists(targetPath)) {
+    return null
+  }
+
+  const stat = await fs.stat(targetPath)
+  if (!stat.isDirectory()) {
+    return stat.size
+  }
+
+  const entries = await fs.readdir(targetPath)
+  let totalSize = 0
+  for (const entry of entries) {
+    const childPath = path.join(targetPath, entry)
+    totalSize += Number(await calculateDirectorySize(childPath) ?? 0)
+  }
+
+  return totalSize
+}
+
+async function calculateArchiveOutputSize(outputPath: string): Promise<number | null> {
+  if (!outputPath || !await fs.pathExists(outputPath)) {
+    return null
+  }
+
+  const stat = await fs.stat(outputPath)
+  if (!stat.isFile()) {
+    return null
+  }
+
+  if (!outputPath.endsWith('.001')) {
+    return stat.size
+  }
+
+  const directoryPath = path.dirname(outputPath)
+  const prefix = path.basename(outputPath).replace(/\.001$/i, '')
+  const entries = await fs.readdir(directoryPath)
+  let totalSize = 0
+
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix)) {
+      continue
+    }
+    const entryPath = path.join(directoryPath, entry)
+    const entryStat = await fs.stat(entryPath)
+    if (entryStat.isFile()) {
+      totalSize += entryStat.size
+    }
+  }
+
+  return totalSize || stat.size
+}
+
+async function removeArchiveOutputs(outputPath: string) {
+  if (!outputPath) {
+    return
+  }
+
+  if (await fs.pathExists(outputPath)) {
+    const stat = await fs.stat(outputPath)
+    if (stat.isFile()) {
+      await fs.remove(outputPath)
+    }
+  }
+
+  if (!outputPath.endsWith('.001')) {
+    return
+  }
+
+  const directoryPath = path.dirname(outputPath)
+  const prefix = path.basename(outputPath).replace(/\.001$/i, '')
+  const entries = await fs.readdir(directoryPath)
+  await Promise.all(entries
+    .filter((entry) => entry.startsWith(prefix))
+    .map((entry) => fs.remove(path.join(directoryPath, entry))))
+}
+
+function resolveResourceDeletionDirectory(basePath: string, fileName?: string | null) {
   const normalizedPath = path.normalize(String(basePath ?? '').trim())
   if (!normalizedPath) {
     return ''
   }
 
+  const normalizedFileName = String(fileName ?? '').trim()
+  if (normalizedFileName) {
+    return path.join(normalizedPath, normalizedFileName)
+  }
+
   return normalizedPath
+}
+
+function resolveArchiveSourceMode(categoryInfo: any): ArchiveSourceMode {
+  const archiveEnabled = categoryInfo?.meta?.extra?.archiveEnabled
+  const archiveMode = String(categoryInfo?.meta?.extra?.archiveMode ?? '').trim()
+
+  if (archiveEnabled === false) {
+    return 'none'
+  }
+
+  if (archiveMode === 'file' || archiveMode === 'directory' || archiveMode === 'none') {
+    return archiveMode
+  }
+
+  return 'none'
+}
+
+function resolveArchiveSourcePath(categoryInfo: any, basePath: string, fileName?: string | null) {
+  const mode = resolveArchiveSourceMode(categoryInfo)
+  if (mode === 'none') {
+    return ''
+  }
+
+  if (mode === 'directory') {
+    return path.normalize(String(basePath ?? '').trim())
+  }
+
+  return resolveResourceDeletionDirectory(basePath, fileName)
 }
 
 function isSafeResourceDeletionDirectory(targetDirectory: string) {

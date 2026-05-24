@@ -6,6 +6,8 @@ import {ResourceForm} from "../model/models";
 import {ResourceService} from "./resource.service";
 import { NotificationQueueService } from './notification-queue.service'
 import { createLogger } from '../util/logger'
+import { EverythingService } from './everything.service'
+import { ApiServer } from '../api'
 
 const ipcLogger = createLogger('ipc-handle')
 
@@ -141,6 +143,22 @@ function registerResource() {
   ipcMain.handle('db:get-governance-issue-workbench', async (_event, query?: any) => {
     return await DatabaseService.getGovernanceIssueWorkbench(query)
   })
+
+  ipcMain.handle('db:get-governance-tag-workbench', async () => {
+    return await DatabaseService.getGovernanceTagWorkbench()
+  })
+
+  ipcMain.handle('db:rename-governance-tag-entity', async (_event, kind: 'tag' | 'type', id: string, name: string) => {
+    return await DatabaseService.renameGovernanceTagEntity(kind, id, name)
+  })
+
+  ipcMain.handle('db:delete-governance-tag-entity', async (_event, kind: 'tag' | 'type', id: string) => {
+    return await DatabaseService.deleteGovernanceTagEntity(kind, id)
+  })
+
+  ipcMain.handle('db:delete-governance-tag-entities', async (_event, kind: 'tag' | 'type', ids: string[]) => {
+    return await DatabaseService.deleteGovernanceTagEntities(kind, ids)
+  })
 }
 
 function registerTag() {
@@ -176,6 +194,14 @@ function registerDialog() {
 
   ipcMain.handle('dialog:select-files', async (_event, extensions: string[]) => {
     return DialogService.selectFiles(extensions);
+  })
+
+  ipcMain.handle('dialog:select-bookmark-file', async () => {
+    return DialogService.selectBookmarkFile();
+  })
+
+  ipcMain.handle('dialog:export-bookmark-html-file', async (_event, items: any[]) => {
+    return DialogService.exportBookmarkHtmlFile(items);
   })
 
   ipcMain.handle('dialog:select-game-launch-file', async (_event, directoryPath: string) => {
@@ -371,6 +397,22 @@ function registerService() {
     return ResourceService.importBatchAsmrDirectories(categoryId, items)
   })
 
+  ipcMain.handle('service:list-browser-bookmark-sources', async () => {
+    return ResourceService.listBrowserBookmarkSources()
+  })
+
+  ipcMain.handle('service:analyze-website-bookmark-file', async (_event, filePath: string) => {
+    return ResourceService.analyzeWebsiteBookmarkFile(filePath)
+  })
+
+  ipcMain.handle('service:analyze-website-bookmarks-from-browser', async (_event, sourceId: string) => {
+    return ResourceService.analyzeWebsiteBookmarksFromBrowser(sourceId)
+  })
+
+  ipcMain.handle('service:import-batch-website-bookmarks', async (_event, categoryId: string, items: any[]) => {
+    return ResourceService.importBatchWebsiteBookmarks(categoryId, items)
+  })
+
   ipcMain.handle('service:fetch-resource-info', async (_event, websiteId: string, resourceId: string) => {
     return ResourceService.fetchResourceInfo(websiteId, resourceId)
   })
@@ -508,20 +550,86 @@ function registerService() {
 
   ipcMain.handle(
     'service:set-governance-issue-ignored',
-    async (_event, resourceId: string, issueType: 'brokenPath' | 'missingCover' | 'longUnvisited', ignored: boolean) => {
+    async (_event, resourceId: string, issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' | 'duplicateResource', ignored: boolean) => {
       return ResourceService.setGovernanceIssueIgnored(resourceId, issueType, ignored)
     }
   )
 
   ipcMain.handle(
     'service:batch-set-governance-issue-ignored',
-    async (_event, items: Array<{ resourceId: string; issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' }>, ignored: boolean) => {
+    async (_event, items: Array<{ resourceId: string; issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' | 'duplicateResource' }>, ignored: boolean) => {
       return ResourceService.batchSetGovernanceIssueIgnored(items, ignored)
     }
   )
+
+  ipcMain.handle('service:archive-resource', async (_event, resourceId: string) => {
+    return ResourceService.archiveResource(resourceId)
+  })
+
+  ipcMain.handle('service:archive-resources', async (_event, resourceIds: string[]) => {
+    return ResourceService.archiveResources(resourceIds)
+  })
+
+  ipcMain.handle('service:archive-resources-as-package', async (_event, resourceIds: string[], packageTitle?: string) => {
+    return ResourceService.archiveResourcesAsPackage(resourceIds, packageTitle)
+  })
+
+  ipcMain.handle('service:list-archived-packages', async () => {
+    return ResourceService.listArchivedPackages()
+  })
+
+  ipcMain.handle('service:restore-archived-package', async (_event, archiveId: string) => {
+    return ResourceService.restoreArchivedPackage(archiveId)
+  })
+
+  ipcMain.handle('service:restore-archived-packages', async (_event, archiveIds: string[]) => {
+    return ResourceService.restoreArchivedPackages(archiveIds)
+  })
+
+  ipcMain.handle('service:delete-archived-package', async (_event, archiveId: string) => {
+    return ResourceService.deleteArchivedPackage(archiveId)
+  })
+
+  ipcMain.handle('service:delete-archived-packages', async (_event, archiveIds: string[]) => {
+    return ResourceService.deleteArchivedPackages(archiveIds)
+  })
+
+  ipcMain.handle('service:list-archive-queue-items', async () => {
+    return ResourceService.listArchiveQueueItems()
+  })
+
+  ipcMain.handle('service:delete-archive-queue-item', async (_event, queueItemId: string) => {
+    return ResourceService.deleteArchiveQueueItem(queueItemId)
+  })
+
+  ipcMain.handle('service:stop-archive-queue', async () => {
+    return ResourceService.stopArchiveQueue()
+  })
+
+  ipcMain.handle('service:rescan-missing-resources', async (_event, resourceIds: string[]) => {
+    return ResourceService.rescanMissingResources(resourceIds)
+  })
+
+  ipcMain.handle('service:sync-everything-client-from-settings', async () => {
+    return ResourceService.syncEverythingClientFromSettings()
+  })
+
+  ipcMain.handle('service:restart-api-server', async () => {
+    return ApiServer.restart()
+  })
 
   ipcMain.handle('service:start-notification-push', async (event) => {
     NotificationQueueService.getInstance().registerRenderer(event.sender)
     return true
   })
+
+  ipcMain.handle(
+    'service:test-everything-http-server',
+    async (
+      _event,
+      payload?: { host?: string; port?: string; username?: string; password?: string }
+    ) => {
+      return EverythingService.testHttpServer(payload)
+    }
+  )
 }

@@ -2,7 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import {SettingDetail} from "../common/constants";
 import {ResourceForm} from "../main/model/models";
-import type { AppNotificationMessage, BatchImportProgressMessage, ResourceStateChangedMessage } from '../main/service/notification-queue.service'
+import type { AppNotificationMessage, BatchImportProgressMessage, ResourceArchiveProgressMessage, ResourceStateChangedMessage } from '../main/service/notification-queue.service'
+import type { WebsiteCoverProgressMessage } from '../main/service/notification-queue.service'
 
 const sendRendererLog = (level: 'debug' | 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>) => {
   try {
@@ -88,6 +89,10 @@ const api = {
     getCompletedResourceCountByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-completed-resource-count-by-category-id', categoryId),
     getRunningResourceCountByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-running-resource-count-by-category-id', categoryId),
     getGovernanceIssueWorkbench: (query?: any) => ipcRenderer.invoke('db:get-governance-issue-workbench', query),
+    getGovernanceTagWorkbench: () => ipcRenderer.invoke('db:get-governance-tag-workbench'),
+    renameGovernanceTagEntity: (kind: 'tag' | 'type', id: string, name: string) => ipcRenderer.invoke('db:rename-governance-tag-entity', kind, id, name),
+    deleteGovernanceTagEntity: (kind: 'tag' | 'type', id: string) => ipcRenderer.invoke('db:delete-governance-tag-entity', kind, id),
+    deleteGovernanceTagEntities: (kind: 'tag' | 'type', ids: string[]) => ipcRenderer.invoke('db:delete-governance-tag-entities', kind, ids),
 
     // type
     getTypeByCategoryId: (categoryId: string) => ipcRenderer.invoke('db:get-type-by-category-id', categoryId),
@@ -104,6 +109,9 @@ const api = {
     selectFolders: () => ipcRenderer.invoke('dialog:select-folders'),
     selectFile: (extensions: string[]) => ipcRenderer.invoke('dialog:select-file', extensions),
     selectFiles: (extensions: string[]) => ipcRenderer.invoke('dialog:select-files', extensions),
+    selectBookmarkFile: () => ipcRenderer.invoke('dialog:select-bookmark-file'),
+    exportBookmarkHtmlFile: (items: Array<{ title?: string; url?: string; folder?: string; favicon?: string }>) =>
+      ipcRenderer.invoke('dialog:export-bookmark-html-file', items),
     selectGameLaunchFile: (directoryPath: string) => ipcRenderer.invoke('dialog:select-game-launch-file', directoryPath),
     readImageAsDataUrl: (filePath: string) => ipcRenderer.invoke('dialog:read-image-as-data-url', filePath),
     getImagePreviewUrl: (
@@ -162,6 +170,14 @@ const api = {
       ipcRenderer.invoke('service:import-batch-multi-image-directories', categoryId, items),
     importBatchAsmrDirectories: (categoryId: string, items: any[]) =>
       ipcRenderer.invoke('service:import-batch-asmr-directories', categoryId, items),
+    listBrowserBookmarkSources: () =>
+      ipcRenderer.invoke('service:list-browser-bookmark-sources'),
+    analyzeWebsiteBookmarkFile: (filePath: string) =>
+      ipcRenderer.invoke('service:analyze-website-bookmark-file', filePath),
+    analyzeWebsiteBookmarksFromBrowser: (sourceId: string) =>
+      ipcRenderer.invoke('service:analyze-website-bookmarks-from-browser', sourceId),
+    importBatchWebsiteBookmarks: (categoryId: string, items: any[]) =>
+      ipcRenderer.invoke('service:import-batch-website-bookmarks', categoryId, items),
     fetchResourceInfo: (websiteId: string, resourceId: string) =>
       ipcRenderer.invoke('service:fetch-resource-info', websiteId, resourceId),
     fetchWebsiteInfo: (url: string) =>
@@ -224,12 +240,42 @@ const api = {
       ipcRenderer.invoke('service:update-resource-top', resourceId, top),
     updateResourceHomePin: (resourceId: string, pinned: boolean) =>
       ipcRenderer.invoke('service:update-resource-home-pin', resourceId, pinned),
-    setGovernanceIssueIgnored: (resourceId: string, issueType: 'brokenPath' | 'missingCover' | 'longUnvisited', ignored: boolean) =>
+    setGovernanceIssueIgnored: (resourceId: string, issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' | 'duplicateResource', ignored: boolean) =>
       ipcRenderer.invoke('service:set-governance-issue-ignored', resourceId, issueType, ignored),
     batchSetGovernanceIssueIgnored: (
-      items: Array<{ resourceId: string; issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' }>,
+      items: Array<{ resourceId: string; issueType: 'brokenPath' | 'missingCover' | 'longUnvisited' | 'duplicateResource' }>,
       ignored: boolean
     ) => ipcRenderer.invoke('service:batch-set-governance-issue-ignored', items, ignored),
+    archiveResource: (resourceId: string) =>
+      ipcRenderer.invoke('service:archive-resource', resourceId),
+    archiveResources: (resourceIds: string[]) =>
+      ipcRenderer.invoke('service:archive-resources', resourceIds),
+    archiveResourcesAsPackage: (resourceIds: string[], packageTitle?: string) =>
+      ipcRenderer.invoke('service:archive-resources-as-package', resourceIds, packageTitle),
+    listArchivedPackages: () =>
+      ipcRenderer.invoke('service:list-archived-packages'),
+    restoreArchivedPackage: (archiveId: string) =>
+      ipcRenderer.invoke('service:restore-archived-package', archiveId),
+    restoreArchivedPackages: (archiveIds: string[]) =>
+      ipcRenderer.invoke('service:restore-archived-packages', archiveIds),
+    deleteArchivedPackage: (archiveId: string) =>
+      ipcRenderer.invoke('service:delete-archived-package', archiveId),
+    deleteArchivedPackages: (archiveIds: string[]) =>
+      ipcRenderer.invoke('service:delete-archived-packages', archiveIds),
+    listArchiveQueueItems: () =>
+      ipcRenderer.invoke('service:list-archive-queue-items'),
+    deleteArchiveQueueItem: (queueItemId: string) =>
+      ipcRenderer.invoke('service:delete-archive-queue-item', queueItemId),
+    stopArchiveQueue: () =>
+      ipcRenderer.invoke('service:stop-archive-queue'),
+    rescanMissingResources: (resourceIds: string[]) =>
+      ipcRenderer.invoke('service:rescan-missing-resources', resourceIds),
+    syncEverythingClientFromSettings: () =>
+      ipcRenderer.invoke('service:sync-everything-client-from-settings'),
+    restartApiServer: () =>
+      ipcRenderer.invoke('service:restart-api-server'),
+    testEverythingHttpServer: (payload?: { host?: string; port?: string; username?: string; password?: string }) =>
+      ipcRenderer.invoke('service:test-everything-http-server', payload),
     startBackgroundServices: (reason?: string, delayMs?: number) =>
       ipcRenderer.invoke('service:start-background-services', reason, delayMs),
     startNotificationPush: () => ipcRenderer.invoke('service:start-notification-push'),
@@ -275,6 +321,28 @@ const api = {
 
       return () => {
         ipcRenderer.removeListener('service:batch-import-progress', wrappedListener)
+      }
+    },
+    onResourceArchiveProgress: (listener: (message: ResourceArchiveProgressMessage) => void) => {
+      const wrappedListener = (_event: Electron.IpcRendererEvent, message: ResourceArchiveProgressMessage) => {
+        listener(message)
+      }
+
+      ipcRenderer.on('service:resource-archive-progress', wrappedListener)
+
+      return () => {
+        ipcRenderer.removeListener('service:resource-archive-progress', wrappedListener)
+      }
+    },
+    onWebsiteCoverProgress: (listener: (message: WebsiteCoverProgressMessage) => void) => {
+      const wrappedListener = (_event: Electron.IpcRendererEvent, message: WebsiteCoverProgressMessage) => {
+        listener(message)
+      }
+
+      ipcRenderer.on('service:website-cover-progress', wrappedListener)
+
+      return () => {
+        ipcRenderer.removeListener('service:website-cover-progress', wrappedListener)
       }
     },
   }

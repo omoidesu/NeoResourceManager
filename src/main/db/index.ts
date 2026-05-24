@@ -131,7 +131,7 @@ const IDEMPOTENT_COLUMN_MIGRATION_RULES: IdempotentColumnMigrationRule[] = [
     columns: [
       { name: 'search_text', type: 'text' }
     ]
-  }
+  },
 ]
 
 function ensureMigrationsTable() {

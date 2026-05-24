@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {computed} from 'vue'
 import RichTextEditor from '../../../components/RichTextEditor.vue'
+import CoverSelectorPanel from '../../../components/CoverSelectorPanel.vue'
 import type { ResourceEditorDrawerProps } from '../component-contracts'
 
 const props = withDefaults(defineProps<ResourceEditorDrawerProps>(), {
@@ -213,65 +214,28 @@ const showDuplicateResourceHint = computed(() =>
               label="封面图"
               path="cover"
             >
-              <div class="cover-field">
-                <div class="cover-preview">
-                  <img v-if="coverPreviewSrc" :src="coverPreviewSrc" alt="封面预览" class="cover-preview__image" />
-                  <span v-else class="cover-preview__label">{{ coverPreviewLabel }}</span>
-                </div>
-                <n-space size="small" wrap>
-                  <n-button size="small" @click="emit('choose-custom-cover')">选择自定义封面</n-button>
-                  <n-button
-                    v-if="showWebsiteCoverFetchButton"
-                    size="small"
-                    @click="emit('fetch-website-cover')"
-                  >
-                    自动获取页面图片
-                  </n-button>
-                  <n-button
-                    v-if="extendTable === 'audio_meta'"
-                    size="small"
-                    @click="emit('fetch-album-cover')"
-                  >
-                    获取专辑封面
-                  </n-button>
-                  <n-button
-                    v-if="extendTable === 'video_meta'"
-                    size="small"
-                    :loading="videoCoverFrameLoading"
-                    :disabled="!hasBasePath || videoCoverFrameLoading"
-                    @click="emit('use-video-random-frame-cover')"
-                  >
-                    使用随机帧
-                  </n-button>
-                  <n-button
-                    v-if="showScreenshotCoverButton"
-                    size="small"
-                    :disabled="!hasBasePath"
-                    @click="emit('use-screenshot-cover')"
-                  >
-                    使用截图作为封面
-                  </n-button>
-                  <n-button
-                    v-if="showScreenshotFolderButton"
-                    size="small"
-                    :disabled="!editingResourceId"
-                    @click="emit('choose-cover-from-screenshot-folder')"
-                  >
-                    从截图文件夹选择
-                  </n-button>
-                  <n-button
-                    v-if="extendTable === 'multi_image_meta'"
-                    size="small"
-                    :disabled="!hasBasePath"
-                    @click="emit('use-first-cover')"
-                  >
-                    选择第一张封面
-                  </n-button>
-                  <n-button size="small" type="error" quaternary :disabled="!hasCoverPath" @click="emit('clear-cover')">
-                    清除封面
-                  </n-button>
-                </n-space>
-              </div>
+              <CoverSelectorPanel
+                :preview-src="coverPreviewSrc"
+                :preview-label="coverPreviewLabel"
+                :video-cover-frame-loading="videoCoverFrameLoading"
+                :has-base-path="hasBasePath"
+                :has-editing-resource-id="Boolean(editingResourceId)"
+                :has-cover-path="hasCoverPath"
+                :show-website-cover-fetch-button="showWebsiteCoverFetchButton"
+                :show-album-cover-fetch-button="extendTable === 'audio_meta'"
+                :show-video-random-frame-button="extendTable === 'video_meta'"
+                :show-screenshot-cover-button="showScreenshotCoverButton"
+                :show-screenshot-folder-button="showScreenshotFolderButton"
+                :show-first-cover-button="extendTable === 'multi_image_meta'"
+                @choose-custom-cover="emit('choose-custom-cover')"
+                @fetch-website-cover="emit('fetch-website-cover')"
+                @fetch-album-cover="emit('fetch-album-cover')"
+                @use-video-random-frame-cover="emit('use-video-random-frame-cover')"
+                @use-screenshot-cover="emit('use-screenshot-cover')"
+                @choose-cover-from-screenshot-folder="emit('choose-cover-from-screenshot-folder')"
+                @use-first-cover="emit('use-first-cover')"
+                @clear-cover="emit('clear-cover')"
+              />
             </n-form-item>
           </n-form>
         </div>
@@ -389,65 +353,28 @@ const showDuplicateResourceHint = computed(() =>
           label="封面图"
           path="cover"
         >
-          <div class="cover-field">
-            <div class="cover-preview">
-              <img v-if="coverPreviewSrc" :src="coverPreviewSrc" alt="封面预览" class="cover-preview__image" />
-              <span v-else class="cover-preview__label">{{ coverPreviewLabel }}</span>
-            </div>
-            <n-space size="small" wrap>
-              <n-button size="small" @click="emit('choose-custom-cover')">选择自定义封面</n-button>
-              <n-button
-                v-if="showWebsiteCoverFetchButton"
-                size="small"
-                @click="emit('fetch-website-cover')"
-              >
-                自动获取页面图片
-              </n-button>
-              <n-button
-                v-if="extendTable === 'audio_meta'"
-                size="small"
-                @click="emit('fetch-album-cover')"
-              >
-                获取专辑封面
-              </n-button>
-              <n-button
-                v-if="extendTable === 'video_meta'"
-                size="small"
-                :loading="videoCoverFrameLoading"
-                :disabled="!hasBasePath || videoCoverFrameLoading"
-                @click="emit('use-video-random-frame-cover')"
-              >
-                使用随机帧
-              </n-button>
-              <n-button
-                v-if="showScreenshotCoverButton"
-                size="small"
-                :disabled="!hasBasePath"
-                @click="emit('use-screenshot-cover')"
-              >
-                使用截图作为封面
-              </n-button>
-              <n-button
-                v-if="showScreenshotFolderButton"
-                size="small"
-                :disabled="!editingResourceId"
-                @click="emit('choose-cover-from-screenshot-folder')"
-              >
-                从截图文件夹选择
-              </n-button>
-              <n-button
-                v-if="extendTable === 'multi_image_meta'"
-                size="small"
-                :disabled="!hasBasePath"
-                @click="emit('use-first-cover')"
-              >
-                选择第一张封面
-              </n-button>
-              <n-button size="small" type="error" quaternary :disabled="!hasCoverPath" @click="emit('clear-cover')">
-                清除封面
-              </n-button>
-            </n-space>
-          </div>
+          <CoverSelectorPanel
+            :preview-src="coverPreviewSrc"
+            :preview-label="coverPreviewLabel"
+            :video-cover-frame-loading="videoCoverFrameLoading"
+            :has-base-path="hasBasePath"
+            :has-editing-resource-id="Boolean(editingResourceId)"
+            :has-cover-path="hasCoverPath"
+            :show-website-cover-fetch-button="showWebsiteCoverFetchButton"
+            :show-album-cover-fetch-button="extendTable === 'audio_meta'"
+            :show-video-random-frame-button="extendTable === 'video_meta'"
+            :show-screenshot-cover-button="showScreenshotCoverButton"
+            :show-screenshot-folder-button="showScreenshotFolderButton"
+            :show-first-cover-button="extendTable === 'multi_image_meta'"
+            @choose-custom-cover="emit('choose-custom-cover')"
+            @fetch-website-cover="emit('fetch-website-cover')"
+            @fetch-album-cover="emit('fetch-album-cover')"
+            @use-video-random-frame-cover="emit('use-video-random-frame-cover')"
+            @use-screenshot-cover="emit('use-screenshot-cover')"
+            @choose-cover-from-screenshot-folder="emit('choose-cover-from-screenshot-folder')"
+            @use-first-cover="emit('use-first-cover')"
+            @clear-cover="emit('clear-cover')"
+          />
         </n-form-item>
       </n-form>
     </template>
@@ -484,42 +411,6 @@ const showDuplicateResourceHint = computed(() =>
   gap: 12px;
   padding-top: 20px;
   border-top: 1px solid rgba(128, 128, 128, 0.2);
-}
-
-.cover-field {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.cover-preview {
-  min-height: 108px;
-  border: 1px dashed rgba(128, 128, 128, 0.32);
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  box-sizing: border-box;
-  background: rgba(127, 127, 127, 0.06);
-  overflow: hidden;
-}
-
-.cover-preview__label {
-  font-size: 13px;
-  line-height: 1.5;
-  text-align: center;
-  opacity: 0.72;
-  word-break: break-all;
-}
-
-.cover-preview__image {
-  width: 100%;
-  height: 100%;
-  max-height: 180px;
-  object-fit: contain;
-  display: block;
 }
 
 .path-field {

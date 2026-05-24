@@ -83,7 +83,8 @@ export const useCategoryPreviewAssets = (options: UseCategoryPreviewAssetsOption
         maxWidth: 64,
         maxHeight: 64,
         fit: 'cover',
-        quality: 80
+        quality: 80,
+        fallbackToFileUrl: true
       }, normalizeWebsiteIconSource)
     } catch {
       return ''

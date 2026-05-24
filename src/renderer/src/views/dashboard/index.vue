@@ -824,6 +824,7 @@ const persistNextPlaySessionCache = () => {
 const normalizeNextPlayPool = (pool: NextPlayCard[]) => {
   return [...pool]
     .filter((item) => String(item?.id ?? '').trim())
+    .filter((item) => !Boolean(item?.missingStatus))
     .sort((left, right) => {
       const leftOrder = Number.isFinite(Number(left?.order)) ? Number(left.order) : Number.MAX_SAFE_INTEGER
       const rightOrder = Number.isFinite(Number(right?.order)) ? Number(right.order) : Number.MAX_SAFE_INTEGER
@@ -934,6 +935,7 @@ const loadNextPlayCards = async (forceRefresh = false) => {
     })
     nextPlayPool.value = cachedState.pool
       .filter((item: any) => String(item?.id ?? '').trim())
+      .filter((item: any) => !Boolean(item?.missingStatus))
       .map((item: any, index: number) => ({
         ...item,
         order: Math.max(1, Number(item?.order ?? index + 1)),
@@ -1681,7 +1683,8 @@ const getRatingComment = (rating: number | null | undefined) => {
   if (normalizedRating >= 3.1) return '顶级'
   if (normalizedRating >= 2.1) return '人上人'
   if (normalizedRating >= 1.1) return 'NPC'
-  return '路边'
+  if (normalizedRating >= 0.6) return '拉完了'
+  return '区'
 }
 
 const getRatingEmoji = (rating: number | null | undefined) => {

@@ -8,6 +8,8 @@ export type NotificationCenterItem = {
   title: string
   content: string
   createdAt: number
+  aggregateKey?: string
+  aggregateCount?: number
 }
 
 export type OngoingCenterItem = {
@@ -15,6 +17,7 @@ export type OngoingCenterItem = {
   title: string
   content: string
   progress?: number
+  progressText?: string
   kind?: 'default' | 'audio-player'
   meta?: Record<string, any>
   createdAt: number
@@ -34,6 +37,22 @@ export function useNotificationCenterStore() {
 }
 
 export function pushNotificationCenterItem(item: Omit<NotificationCenterItem, 'id' | 'createdAt'>) {
+  const aggregateKey = String(item.aggregateKey ?? '').trim()
+  if (aggregateKey) {
+    const existingIndex = notifications.value.findIndex((current) => String(current.aggregateKey ?? '').trim() === aggregateKey)
+    if (existingIndex >= 0) {
+      const existing = notifications.value[existingIndex]
+      const nextItem: NotificationCenterItem = {
+        ...existing,
+        ...item,
+        id: existing.id,
+        createdAt: Date.now()
+      }
+      notifications.value = notifications.value.map((current, index) => index === existingIndex ? nextItem : current)
+      return existing.id
+    }
+  }
+
   const nextItem: NotificationCenterItem = {
     id: createId(),
     createdAt: Date.now(),

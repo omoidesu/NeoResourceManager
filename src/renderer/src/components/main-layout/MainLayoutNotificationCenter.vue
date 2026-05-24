@@ -165,8 +165,8 @@ const handleClearAllNotifications = () => {
                 v-for="item in notificationCenterStore.ongoingItems.value"
                 :key="item.id"
                 class="notification-center__item notification-center__item--ongoing"
-                :class="{ 'notification-center__item--cover': item.kind === 'audio-player' && Boolean(item.meta?.coverSrc) }"
-                :style="item.kind === 'audio-player' && item.meta?.coverSrc ? { backgroundImage: `linear-gradient(180deg, rgba(12, 14, 18, 0.97) 0%, rgba(12, 14, 18, 0.92) 16%, rgba(16, 18, 24, 0.84) 50%, rgba(12, 14, 18, 0.92) 84%, rgba(12, 14, 18, 0.97) 100%), url(${item.meta.coverSrc})` } : undefined"
+                :class="{ 'notification-center__item--cover': Boolean(item.meta?.coverSrc) }"
+                :style="item.meta?.coverSrc ? { backgroundImage: `linear-gradient(180deg, rgba(12, 14, 18, 0.97) 0%, rgba(12, 14, 18, 0.92) 16%, rgba(16, 18, 24, 0.84) 50%, rgba(12, 14, 18, 0.92) 84%, rgba(12, 14, 18, 0.97) 100%), url(${item.meta.coverSrc})` } : undefined"
                 @click="item.kind === 'audio-player' ? handleReopenAudioPlayer() : item.onClick?.()"
               >
                 <template v-if="item.kind === 'audio-player'">
@@ -227,18 +227,40 @@ const handleClearAllNotifications = () => {
                 </template>
                 <template v-else>
                   <div class="notification-center__item-header">
-                    <div class="notification-center__item-title">{{ item.title }}</div>
+                    <div class="notification-center__item-title-wrap">
+                      <img
+                        v-if="item.meta?.iconSrc"
+                        :src="item.meta.iconSrc"
+                        alt=""
+                        class="notification-center__item-favicon"
+                      />
+                      <div class="notification-center__item-title">{{ item.title }}</div>
+                    </div>
                     <div class="notification-center__item-time">{{ formatNotificationTime(item.createdAt) }}</div>
                   </div>
                   <div class="notification-center__item-content notification-center__item-content--single-line">
-                    {{ getOngoingPrimaryText(item.content) }}
+                    {{ item.meta?.summaryLine || getOngoingPrimaryText(item.content) }}
                   </div>
                   <div
-                    v-if="getOngoingSecondaryText(item.content)"
-                    class="notification-center__item-content notification-center__item-content--single-line"
-                    :title="getOngoingSecondaryText(item.content)"
+                    v-if="item.meta?.detailProgressLabel"
+                    class="notification-center__item-detail-row"
                   >
-                    {{ getOngoingSecondaryText(item.content) }}
+                    <div
+                      class="notification-center__item-content notification-center__item-content--single-line notification-center__item-detail-title"
+                      :title="item.meta?.detailTitle || item.meta?.detailLine || getOngoingSecondaryText(item.content)"
+                    >
+                      {{ item.meta?.detailTitle || item.meta?.detailLine || getOngoingSecondaryText(item.content) }}
+                    </div>
+                    <div class="notification-center__item-detail-progress">
+                      {{ item.meta?.detailProgressLabel }}
+                    </div>
+                  </div>
+                  <div
+                    v-else-if="getOngoingSecondaryText(item.content)"
+                    class="notification-center__item-content notification-center__item-content--single-line"
+                    :title="item.meta?.detailLine || getOngoingSecondaryText(item.content)"
+                  >
+                    {{ item.meta?.detailLine || getOngoingSecondaryText(item.content) }}
                   </div>
                   <n-progress
                     v-if="typeof item.progress === 'number'"
@@ -422,6 +444,15 @@ const handleClearAllNotifications = () => {
   flex: 0 0 auto;
 }
 
+.notification-center__item-favicon {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  border-radius: 4px;
+  object-fit: contain;
+  background: rgba(255, 255, 255, 0.08);
+}
+
 .notification-center__item-time {
   font-size: 12px;
   opacity: 0.6;
@@ -440,6 +471,27 @@ const handleClearAllNotifications = () => {
   overflow: hidden;
   text-overflow: ellipsis;
   word-break: normal;
+}
+
+.notification-center__item-detail-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.notification-center__item-detail-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-top: 0;
+}
+
+.notification-center__item-detail-progress {
+  flex: 0 0 auto;
+  font-size: 13px;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.86);
 }
 
 .notification-center__progress {

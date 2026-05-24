@@ -1,7 +1,7 @@
 import type { ComputedRef, Ref } from 'vue'
 import { createBatchImportItemEnricher } from './batch-import-helpers'
 
-type BatchImportMode = 'game' | 'manga' | 'asmr'
+type BatchImportMode = 'game' | 'manga' | 'asmr' | 'website'
 
 function formatDebugPayload(payload: Record<string, any>) {
   try {
@@ -24,6 +24,7 @@ interface UseCategoryBatchImportWorkflowOptions {
   isNovelCategory: ComputedRef<boolean>
   isVideoCategory: ComputedRef<boolean>
   isVideoFolderCategory: ComputedRef<boolean>
+  isWebsiteCategory: ComputedRef<boolean>
   batchImportItems: Ref<any[]>
   batchImportFetchInfoEnabled: Ref<boolean>
   isBatchImportSubmitting: Ref<boolean>
@@ -50,6 +51,7 @@ interface UseCategoryBatchImportWorkflowOptions {
   handleBatchImportNovelFiles: () => Promise<void>
   handleBatchImportVideoFiles: () => Promise<void>
   handleBatchImportAnimeDirectories: () => Promise<void>
+  handleBatchImportWebsites: () => Promise<void>
   analyzeBatchImportComicDirectories?: never
   BATCH_ANALYZE_CONCURRENCY: number
 }
@@ -63,10 +65,18 @@ const getBatchImportMode = (options: UseCategoryBatchImportWorkflowOptions): Bat
     return 'asmr'
   }
 
+  if (options.isWebsiteCategory.value) {
+    return 'website'
+  }
+
   return 'game'
 }
 
 const buildBatchImportResultKey = (item: any, mode: BatchImportMode) => {
+  if (mode === 'website') {
+    return String(item?.url ?? '').trim()
+  }
+
   if (mode === 'manga' || mode === 'asmr') {
     return String(item?.directoryPath ?? '').trim()
   }
@@ -204,6 +214,11 @@ export const useCategoryBatchImportWorkflow = (options: UseCategoryBatchImportWo
 
       if (options.isVideoFolderCategory.value) {
         await options.handleBatchImportAnimeDirectories()
+        return
+      }
+
+      if (options.isWebsiteCategory.value) {
+        await options.handleBatchImportWebsites()
         return
       }
 
@@ -351,6 +366,17 @@ export const useCategoryBatchImportWorkflow = (options: UseCategoryBatchImportWo
             }
           }
 
+          if (mode === 'website') {
+            return {
+              title: item.title,
+              url: item.url,
+              favicon: item.favicon,
+              folder: item.folder,
+              source: item.source,
+              fetchInfoEnabled: options.batchImportFetchInfoEnabled.value
+            }
+          }
+
           return {
             directoryPath: item.directoryPath,
             launchFilePath: item.launchFilePath,
@@ -361,7 +387,7 @@ export const useCategoryBatchImportWorkflow = (options: UseCategoryBatchImportWo
         })
 
       if (!selectedItems.length) {
-        options.showNotifyByType('warning', '批量导入', '请至少选择一个可导入的目录')
+        options.showNotifyByType('warning', '批量导入', `请至少选择一个可导入的${mode === 'website' ? '网站' : '目录'}`)
         return
       }
 
@@ -383,7 +409,9 @@ export const useCategoryBatchImportWorkflow = (options: UseCategoryBatchImportWo
           ? await window.api.service.importBatchMultiImageDirectories(targetCategoryId, selectedItems)
           : mode === 'asmr'
             ? await window.api.service.importBatchAsmrDirectories(targetCategoryId, selectedItems)
-            : await window.api.service.importBatchGameDirectories(targetCategoryId, selectedItems)
+            : mode === 'website'
+              ? await window.api.service.importBatchWebsiteBookmarks(targetCategoryId, selectedItems)
+              : await window.api.service.importBatchGameDirectories(targetCategoryId, selectedItems)
         const resultType = result?.type ?? 'info'
         const resultMessage = result?.message ?? '批量导入完成'
         const resultItems = Array.isArray(result?.data) ? result.data : []

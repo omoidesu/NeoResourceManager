@@ -113,6 +113,53 @@ export class EverythingService {
     return this.createUnavailableClient()
   }
 
+  static async testHttpServer(options?: {
+    host?: string
+    port?: string
+    username?: string
+    password?: string
+  }) {
+    const host = String(options?.host ?? '').trim() || '127.0.0.1'
+    const port = String(options?.port ?? '').trim() || '80'
+    const username = String(options?.username ?? '').trim()
+    const password = String(options?.password ?? '').trim()
+    const baseUrl = `http://${host}:${port}`
+    const searchId = String(Date.now())
+
+    try {
+      const markerPaths = await this.searchMarkerPaths(
+        {
+          available: true,
+          mode: 'http',
+          cliPath: '',
+          baseUrl,
+          username,
+          password
+        },
+        searchId
+      )
+
+      return {
+        type: 'success' as const,
+        message: `Everything HTTP 服务器连接成功：${baseUrl}`,
+        data: {
+          baseUrl,
+          searchId,
+          markerCount: markerPaths.length
+        }
+      }
+    } catch (error) {
+      return {
+        type: 'error' as const,
+        message: error instanceof Error ? error.message : 'Everything HTTP 服务器连接失败',
+        data: {
+          baseUrl,
+          searchId
+        }
+      }
+    }
+  }
+
   private static async detectHttpClient(): Promise<EverythingClientInfo> {
     const interfaceSetting = await DatabaseService.getSetting(Settings.EVERYTHING_INTERFACE)
     const portSetting = await DatabaseService.getSetting(Settings.EVERYTHING_HTTP_PORT)
@@ -155,15 +202,26 @@ export class EverythingService {
       throw new Error(stderr || `Everything search failed with exit code ${result.status ?? 'unknown'}`)
     }
 
-    return String(result.stdout ?? '')
+    const rawCandidatePaths = String(result.stdout ?? '')
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean)
+    const markerPaths = rawCandidatePaths
       .filter((candidatePath) => {
         const normalizedPath = path.normalize(candidatePath)
         return isMarkerFileNameMatched(path.basename(normalizedPath), resourceId)
           && path.basename(path.dirname(normalizedPath)).toLowerCase() === '.nrm'
       })
+
+    logger.debug('everything cli marker search finished', {
+      resourceId,
+      cliPath: client.cliPath,
+      rawCandidateCount: rawCandidatePaths.length,
+      markerCount: markerPaths.length,
+      markerPaths,
+    })
+
+    return markerPaths
   }
 
   private static async searchMarkerPathsByHttp(client: EverythingClientInfo, resourceId: string) {
@@ -182,18 +240,29 @@ export class EverythingService {
       }
     })
 
-    return (payload.results ?? [])
+    const rawCandidatePaths = (payload.results ?? [])
       .map((item) => {
         const parentPath = String(item.path ?? '').trim()
         const name = String(item.name ?? '').trim()
         return parentPath && name ? path.join(parentPath, name) : ''
       })
       .filter(Boolean)
+    const markerPaths = rawCandidatePaths
       .filter((candidatePath) => {
         const normalizedPath = path.normalize(candidatePath)
         return isMarkerFileNameMatched(path.basename(normalizedPath), resourceId)
           && path.basename(path.dirname(normalizedPath)).toLowerCase() === '.nrm'
       })
+
+    logger.debug('everything http marker search finished', {
+      resourceId,
+      baseUrl: client.baseUrl,
+      rawCandidateCount: rawCandidatePaths.length,
+      markerCount: markerPaths.length,
+      markerPaths,
+    })
+
+    return markerPaths
   }
 
   private static async checkHttpConnectivity(baseUrl: string, username: string, password: string) {

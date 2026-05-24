@@ -15,6 +15,8 @@ import { ResourceRuntimeMonitorService } from './service/resource-runtime-monito
 import { FetchPluginService } from './service/fetch-plugin.service';
 import { WindowScreenshotService } from './service/window-screenshot.service';
 import { DatabaseService } from './service/database.service';
+import { ResourceService } from './service/resource.service';
+import { ApiServer } from './api';
 
 type WindowState = {
   bounds: {
@@ -427,6 +429,13 @@ async function shutdownApp(reason: string) {
   }
 
   try {
+    await ApiServer.stop()
+    logger.info('api server disposed')
+  } catch (error) {
+    logger.error('failed to dispose api server', error)
+  }
+
+  try {
     await ResourceWatcher.getInstance().stop()
     logger.info('resource watcher stopped')
   } catch (error) {
@@ -459,6 +468,13 @@ async function shutdownApp(reason: string) {
     logger.info('window screenshot service disposed')
   } catch (error) {
     logger.error('failed to dispose window screenshot service', error)
+  }
+
+  try {
+    await ResourceService.dispose()
+    logger.info('resource service disposed')
+  } catch (error) {
+    logger.error('failed to dispose resource service', error)
   }
 
   logActiveRuntimeState(`after cleanup (${reason})`)
@@ -955,6 +971,8 @@ app.whenReady().then(async () => {
 
   await migrateDb()
   await seedDatabase()
+  await DatabaseService.ensureCategoryArchivePolicyDefaultsOnStartup()
+  await ApiServer.start()
   const recoveredLogCount = await DatabaseService.markActiveResourceLogsAsUnknownEnded()
   if (recoveredLogCount > 0) {
     logger.warn('recovered dangling active resource logs on startup', { count: recoveredLogCount })

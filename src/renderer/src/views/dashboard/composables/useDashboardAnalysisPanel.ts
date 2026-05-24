@@ -458,7 +458,7 @@ export function useDashboardAnalysisPanel(options: {
 
   const longUnvisitedBucketItems = computed(() => {
     const riskPalette = ['#d89a49', '#df8434', '#cf6427', '#d44f33']
-    const compactLabels = ['近 3 个月', '3 - 6 个月', '6 - 12 个月', '1 年以上']
+    const compactLabels = ['超 1 个月', '3 - 6 个月', '6 - 12 个月', '1 年以上']
     const preciseLabels = ['30 - 90 天', '90 - 180 天', '180 - 365 天', '365 天以上']
 
     return dashboardLongUnvisitedBuckets.value.map((item, index) => ({
@@ -498,7 +498,7 @@ export function useDashboardAnalysisPanel(options: {
       }
 
       if (peakIndexes.includes(0) && peakIndexes.includes(1)) {
-        return '近 3 个月与 3 - 6 个月分布接近，当前更适合先观察再逐步整理'
+        return '超 1 个月与 3 - 6 个月分布接近，当前更适合先观察再逐步整理'
       }
 
       return '沉睡资源分布较分散，建议先从中长期区间开始整理'
@@ -506,7 +506,7 @@ export function useDashboardAnalysisPanel(options: {
 
     switch (peakIndexes[0]) {
       case 0:
-        return '沉睡资源主要集中在近 3 个月，可先观察，不必急着清理'
+        return '沉睡资源主要集中在超 1 个月，可先观察，不必急着清理'
       case 1:
         return '当前沉睡资源主要集中在 3 - 6 个月，建议优先从这一段开始整理'
       case 2:

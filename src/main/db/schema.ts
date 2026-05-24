@@ -50,6 +50,36 @@ export const resourceIssueIgnore = sqliteTable('resource_issue_ignore', {
   pk: primaryKey({ columns: [t.resourceId, t.issueType] }),
 }))
 
+export const archivePackage = sqliteTable('archive_package', {
+  id: text('id').primaryKey(),
+  packageTitle: text('package_title').notNull(),
+  archivePath: text('archive_path').notNull(),
+  archiveFormat: text('archive_format').notNull(),
+  archiveLevel: integer('archive_level').default(9),
+  passwordEnabled: integer('password_enabled', { mode: 'boolean' }).default(false),
+  archivePassword: text('archive_password'),
+  splitSizeMb: integer('split_size_mb'),
+  multithreadEnabled: integer('multithread_enabled', { mode: 'boolean' }).default(false),
+  threadCount: integer('thread_count'),
+  sourceTotalSize: integer('source_total_size'),
+  archiveSize: integer('archive_size'),
+  resourceCount: integer('resource_count').default(1),
+  status: text('status').default('completed'),
+  archivedAt: integer('archived_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
+  isDeleted: integer('is_deleted', { mode: 'boolean' }).default(false),
+})
+
+export const archivePackageItem = sqliteTable('archive_package_item', {
+  id: text('id').primaryKey(),
+  packageId: text('package_id').notNull().references(() => archivePackage.id),
+  resourceId: text('resource_id').notNull().references(() => resource.id),
+  archiveEntryPath: text('archive_entry_path').notNull(),
+  sourcePath: text('source_path').notNull(),
+  sourceSize: integer('source_size'),
+  sortOrder: integer('sort_order').default(0),
+  isDeleted: integer('is_deleted', { mode: 'boolean' }).default(false),
+})
+
 // --- 3. 统计信息 ---
 
 export const resourceStat = sqliteTable('resource_stat', {
@@ -250,6 +280,8 @@ export const dictData = sqliteTable('dict_data', {
   extra: text('extra', {mode: 'json'}).$type<{
     extendTable?: string;
     resourcePathType?: string | null;
+    archiveEnabled?: boolean;
+    archiveMode?: 'file' | 'directory' | 'none';
     extensions?: string[];
     addFirst?: string;
     authorText?: string;

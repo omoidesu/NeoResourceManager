@@ -5,6 +5,7 @@ import materialSymbolsLightIcons from '@iconify-json/material-symbols-light/icon
 import mdiIcons from '@iconify-json/mdi/icons.json'
 import {
   AlertCircleOutline,
+  ArchiveOutline,
   CheckmarkCircleOutline,
   CheckmarkDoneOutline,
   CreateOutline,
@@ -63,6 +64,7 @@ export const useResourceCardContextMenu = (params: {
   showCompletedToggle: ComputedRef<boolean>
   showScreenshotFolder: ComputedRef<boolean>
   isWebsiteCategory: ComputedRef<boolean>
+  archiveEnabled: ComputedRef<boolean>
   completedStateLabel: ComputedRef<string>
   canLaunch: ComputedRef<boolean>
   canToggleFavorite: ComputedRef<boolean>
@@ -83,6 +85,7 @@ export const useResourceCardContextMenu = (params: {
   onDefaultAppPlay: (resource: any) => void
   onAddToPlaylist: (resource: any) => void
   onOpenScreenshotFolder: (resource: any) => void
+  onArchive: (resource: any) => void
   onDelete: (resource: any) => void
   onDeleteFiles: (resource: any) => void
 }) => {
@@ -103,6 +106,7 @@ export const useResourceCardContextMenu = (params: {
     showCompletedToggle,
     showScreenshotFolder,
     isWebsiteCategory,
+    archiveEnabled,
     completedStateLabel,
     canLaunch,
     canToggleFavorite,
@@ -123,6 +127,7 @@ export const useResourceCardContextMenu = (params: {
     onDefaultAppPlay,
     onAddToPlaylist,
     onOpenScreenshotFolder,
+    onArchive,
     onDelete,
     onDeleteFiles
   } = params
@@ -250,6 +255,12 @@ export const useResourceCardContextMenu = (params: {
       key: 'delete-files',
       disabled: Boolean(resource.value?.missingStatus) || !Boolean(resource.value?.basePath),
       icon: renderMenuIcon(TrashOutline)
+    }] : []),
+    ...(archiveEnabled.value ? [{
+      label: renderDangerLabel('删除文件并归档'),
+      key: 'archive',
+      disabled: Boolean(resource.value?.missingStatus) || !Boolean(resource.value?.basePath) || !Boolean(resource.value?.id),
+      icon: renderMenuIcon(ArchiveOutline)
     }] : [])
   ].filter((item: any) => item?.label !== null)))
 
@@ -318,6 +329,11 @@ export const useResourceCardContextMenu = (params: {
 
     if (key === 'open-screenshot-folder') {
       onOpenScreenshotFolder(resource.value)
+      return
+    }
+
+    if (key === 'archive') {
+      onArchive(resource.value)
       return
     }
 

@@ -149,6 +149,8 @@ export const resolveCategoryProfile = (input: CategoryProfileInput): CategoryPro
     batchImportResourceLabel = '电影'
   } else if (isSingleImage) {
     batchImportResourceLabel = '图片'
+  } else if (isWebsite) {
+    batchImportResourceLabel = '网站'
   }
 
   return {
@@ -168,7 +170,7 @@ export const resolveCategoryProfile = (input: CategoryProfileInput): CategoryPro
       isWebsite
     },
     features: {
-      showBatchImportButton: ['game_meta', 'single_image_meta', 'multi_image_meta', 'video_meta', 'asmr_meta', 'audio_meta', 'novel_meta'].includes(extendTable),
+      showBatchImportButton: ['game_meta', 'single_image_meta', 'multi_image_meta', 'video_meta', 'asmr_meta', 'audio_meta', 'novel_meta', 'website_meta'].includes(extendTable),
       showZoneLaunch: isGame,
       showAdminLaunch: isSoftware,
       showMtoolLaunch: isGame,

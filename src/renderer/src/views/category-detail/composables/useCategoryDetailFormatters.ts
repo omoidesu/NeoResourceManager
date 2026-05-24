@@ -100,6 +100,19 @@ export const useCategoryDetailFormatters = () => {
     return ''
   }
 
+  const getRatingComment = (rating: number | null | undefined) => {
+    const normalizedRating = Number(rating ?? -1)
+
+    if (normalizedRating < 0) return ''
+    if (normalizedRating >= 4.6) return '夯爆了'
+    if (normalizedRating >= 4.1) return '夯'
+    if (normalizedRating >= 3.1) return '顶级'
+    if (normalizedRating >= 2.1) return '人上人'
+    if (normalizedRating >= 1.1) return 'NPC'
+    if (normalizedRating >= 0.6) return '拉完了'
+    return '区'
+  }
+
   const formatAudioBitrate = (bitrate: number | null | undefined) => {
     const normalized = Number(bitrate ?? 0)
     if (!Number.isFinite(normalized) || normalized <= 0) {
@@ -147,6 +160,7 @@ export const useCategoryDetailFormatters = () => {
     formatLogDuration,
     formatLaunchMode,
     getRatingEmoji,
+    getRatingComment,
     formatAudioBitrate,
     formatAudioSampleRate,
     formatFrameRate,

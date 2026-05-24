@@ -21,6 +21,13 @@ const MAX_IMAGE_DATA_URL_BYTES = 64 * 1024 * 1024
 const MAX_IMAGE_PREVIEW_PIXELS = 100_000_000
 const MAX_IMAGE_THUMBNAIL_PIXELS = 2_000_000_000
 
+type BookmarkExportItem = {
+  title?: string
+  url?: string
+  folder?: string
+  favicon?: string
+}
+
 function encodeBase64Url(input: string) {
   return Buffer.from(input, 'utf8')
     .toString('base64')
@@ -40,6 +47,120 @@ function toAudioTranscodeProtocolUrl(filePath: string) {
 function toVideoTranscodeProtocolUrl(filePath: string, startTime = 0) {
   const normalizedStartTime = Math.max(0, Number(startTime ?? 0) || 0)
   return `${VIDEO_TRANSCODE_PROTOCOL}://transcode/${encodeBase64Url(filePath)}?start=${encodeURIComponent(normalizedStartTime)}`
+}
+
+function escapeBookmarkHtmlText(input: string) {
+  return String(input ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
+function escapeBookmarkHtmlAttribute(input: string) {
+  return escapeBookmarkHtmlText(input).replace(/"/g, '&quot;')
+}
+
+function normalizeBookmarkExportUrl(input: string) {
+  const normalizedInput = String(input ?? '').trim()
+  if (!normalizedInput) {
+    return ''
+  }
+
+  try {
+    const parsedUrl = new URL(normalizedInput)
+    return ['http:', 'https:'].includes(parsedUrl.protocol) ? parsedUrl.toString() : ''
+  } catch {
+    return ''
+  }
+}
+
+function normalizeBookmarkFolderParts(folder: string) {
+  return String(folder ?? '')
+    .split('/')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function getBookmarkFaviconAttribute(favicon: string) {
+  const normalizedFavicon = String(favicon ?? '').trim()
+  if (!normalizedFavicon) {
+    return ''
+  }
+
+  if (/^data:/i.test(normalizedFavicon)) {
+    return ` ICON="${escapeBookmarkHtmlAttribute(normalizedFavicon)}"`
+  }
+
+  if (/^(https?:)?\/\//i.test(normalizedFavicon)) {
+    return ` ICON_URI="${escapeBookmarkHtmlAttribute(normalizedFavicon)}"`
+  }
+
+  return ''
+}
+
+type BookmarkExportNode = {
+  folders: Map<string, BookmarkExportNode>
+  bookmarks: Array<Required<Pick<BookmarkExportItem, 'title' | 'url'>> & { favicon: string }>
+}
+
+function createBookmarkExportNode(): BookmarkExportNode {
+  return {
+    folders: new Map(),
+    bookmarks: []
+  }
+}
+
+function buildBookmarkExportHtml(items: BookmarkExportItem[]) {
+  const root = createBookmarkExportNode()
+  const addDate = Math.floor(Date.now() / 1000)
+
+  for (const item of items ?? []) {
+    const url = normalizeBookmarkExportUrl(String(item?.url ?? ''))
+    if (!url) {
+      continue
+    }
+
+    let currentNode = root
+    for (const folderName of normalizeBookmarkFolderParts(String(item?.folder ?? ''))) {
+      if (!currentNode.folders.has(folderName)) {
+        currentNode.folders.set(folderName, createBookmarkExportNode())
+      }
+      currentNode = currentNode.folders.get(folderName)!
+    }
+
+    currentNode.bookmarks.push({
+      title: String(item?.title ?? '').trim() || url,
+      url,
+      favicon: String(item?.favicon ?? '').trim()
+    })
+  }
+
+  const lines = [
+    '<!DOCTYPE NETSCAPE-Bookmark-file-1>',
+    '<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">',
+    '<TITLE>Bookmarks</TITLE>',
+    '<H1>Bookmarks</H1>',
+    '<DL><p>'
+  ]
+
+  const writeNode = (node: BookmarkExportNode, depth: number) => {
+    const indent = '    '.repeat(depth)
+    for (const [folderName, childNode] of node.folders.entries()) {
+      lines.push(`${indent}<DT><H3 ADD_DATE="${addDate}" LAST_MODIFIED="${addDate}">${escapeBookmarkHtmlText(folderName)}</H3>`)
+      lines.push(`${indent}<DL><p>`)
+      writeNode(childNode, depth + 1)
+      lines.push(`${indent}</DL><p>`)
+    }
+
+    for (const bookmark of node.bookmarks) {
+      const faviconAttribute = getBookmarkFaviconAttribute(bookmark.favicon)
+      lines.push(`${indent}<DT><A HREF="${escapeBookmarkHtmlAttribute(bookmark.url)}" ADD_DATE="${addDate}"${faviconAttribute}>${escapeBookmarkHtmlText(bookmark.title)}</A>`)
+    }
+  }
+
+  writeNode(root, 1)
+  lines.push('</DL><p>')
+  return `${lines.join('\n')}\n`
 }
 
 async function readImageProbe(filePath: string) {
@@ -523,6 +644,68 @@ export class DialogService {
     }
 
     return result.filePaths
+  }
+
+  static async selectBookmarkFile() {
+    const result = await dialog.showOpenDialog({
+      title: '请选择 Chrome 书签导出文件',
+      filters: [
+        { name: 'Chrome 书签文件', extensions: ['html', 'htm', 'json'] },
+        { name: '所有文件', extensions: ['*'] }
+      ],
+      properties: ['openFile']
+    })
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return null
+    }
+
+    return result.filePaths[0]
+  }
+
+  static async exportBookmarkHtmlFile(items: BookmarkExportItem[] = []) {
+    const validItems = (items ?? []).filter((item) => normalizeBookmarkExportUrl(String(item?.url ?? '')))
+    if (!validItems.length) {
+      return {
+        type: 'warning',
+        message: '没有可导出的书签'
+      }
+    }
+
+    const now = new Date()
+    const pad = (value: number) => String(value).padStart(2, '0')
+    const defaultName = `网站书签-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.html`
+    const result = await dialog.showSaveDialog({
+      title: '导出 HTML 书签',
+      defaultPath: defaultName,
+      filters: [
+        { name: 'HTML 书签文件', extensions: ['html', 'htm'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    })
+
+    if (result.canceled || !result.filePath) {
+      return {
+        type: 'info',
+        message: '已取消导出'
+      }
+    }
+
+    const outputPath = /\.(html?|HTML?)$/.test(result.filePath)
+      ? result.filePath
+      : `${result.filePath}.html`
+    const html = buildBookmarkExportHtml(validItems)
+    await fs.promises.mkdir(path.dirname(outputPath), { recursive: true })
+    await fs.promises.writeFile(outputPath, html, 'utf8')
+
+    return {
+      type: 'success',
+      message: `已导出 ${validItems.length} 个书签`,
+      data: {
+        filePath: outputPath,
+        count: validItems.length
+      }
+    }
   }
 
   static async selectGameLaunchFile(directoryPath: string) {

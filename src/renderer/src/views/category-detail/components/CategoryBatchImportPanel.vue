@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { CloseOutline } from '@vicons/ionicons5'
+import { computed, ref, watch } from 'vue'
 import type { PropType } from 'vue'
+import BackgroundProgressToast from '../../../components/BackgroundProgressToast.vue'
 
 const props = defineProps({
   showLoading: {
@@ -72,6 +73,10 @@ const props = defineProps({
     required: true
   },
   detailIsAsmr: {
+    type: Boolean,
+    required: true
+  },
+  detailIsWebsite: {
     type: Boolean,
     required: true
   },
@@ -168,6 +173,89 @@ const props = defineProps({
     required: true
   }
 })
+
+const batchImportSearchKeyword = ref('')
+
+const normalizedBatchImportSearchKeyword = computed(() =>
+  batchImportSearchKeyword.value.trim().toLowerCase()
+)
+
+const getBatchImportItemSearchText = (item: any) => [
+  item?.title,
+  item?.url,
+  item?.folder,
+  item?.source,
+  item?.directoryName,
+  item?.directoryPath,
+  item?.launchFilePath,
+  item?.launchFileName,
+  item?.websiteType,
+  item?.gameId,
+  item?.importResultMessage,
+  item?.errorMessage
+].map((value) => String(value ?? '').toLowerCase()).join('\n')
+
+const filteredBatchImportEntries = computed(() => {
+  const keyword = normalizedBatchImportSearchKeyword.value
+  return props.batchImportItems
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => !keyword || getBatchImportItemSearchText(item).includes(keyword))
+})
+
+const hasBatchImportSearchKeyword = computed(() => Boolean(normalizedBatchImportSearchKeyword.value))
+
+const visibleSelectableBatchImportCount = computed(() =>
+  filteredBatchImportEntries.value.filter(({ item }) =>
+    !item?.exists && !item?.errorMessage && props.isBatchImportItemImportable(item)
+  ).length
+)
+
+const handleSelectAllVisible = () => {
+  if (!hasBatchImportSearchKeyword.value) {
+    props.onSelectAll()
+    return
+  }
+
+  filteredBatchImportEntries.value.forEach(({ item, index }) => {
+    props.onSetItemChecked(index, !item?.exists && !item?.errorMessage && props.isBatchImportItemImportable(item))
+  })
+}
+
+const handleDeselectAllVisible = () => {
+  if (!hasBatchImportSearchKeyword.value) {
+    props.onDeselectAll()
+    return
+  }
+
+  filteredBatchImportEntries.value.forEach(({ index }) => {
+    props.onSetItemChecked(index, false)
+  })
+}
+
+const handleInvertVisible = () => {
+  if (!hasBatchImportSearchKeyword.value) {
+    props.onInvert()
+    return
+  }
+
+  filteredBatchImportEntries.value.forEach(({ item, index }) => {
+    props.onSetItemChecked(
+      index,
+      !item?.exists && !item?.errorMessage && props.isBatchImportItemImportable(item)
+        ? !item.checked
+        : false
+    )
+  })
+}
+
+watch(
+  () => props.showPreview,
+  (showPreview) => {
+    if (!showPreview) {
+      batchImportSearchKeyword.value = ''
+    }
+  }
+)
 </script>
 
 <template>
@@ -201,7 +289,7 @@ const props = defineProps({
           <span class="batch-import-loading__title-text">
             {{ batchProgressStage === 'import'
               ? `正在导入第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${batchImportResourceLabel}`
-              : `正在分析第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个目录` }}
+              : `正在分析第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${detailIsWebsite ? '书签' : '目录'}` }}
           </span>
           <span class="batch-import-loading__title-directory" :title="currentDirectoryName">
             {{ currentDirectoryName }}
@@ -223,46 +311,20 @@ const props = defineProps({
     </template>
   </n-modal>
 
-  <div
-    v-if="showProgressToast"
-    class="batch-import-toast"
+  <BackgroundProgressToast
+    :show="showProgressToast"
+    :progress="batchAnalyzePercent"
+    :title="batchProgressStage === 'import' ? `正在后台导入${batchImportResourceLabel}` : `正在后台分析${batchImportResourceLabel}${detailIsWebsite ? '书签' : '目录'}`"
+    :subtitle-lines="[
+      batchProgressStage === 'import'
+        ? `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${batchImportResourceLabel}`
+        : `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${detailIsWebsite ? '书签' : '目录'}`,
+      currentDirectoryName
+    ]"
+    clickable
     @click="onReopenProgress"
-  >
-    <n-button
-      quaternary
-      circle
-      size="tiny"
-      class="batch-import-toast__close"
-      @click.stop="onDismissProgressToast"
-    >
-      <template #icon>
-        <n-icon>
-          <CloseOutline />
-        </n-icon>
-      </template>
-    </n-button>
-    <div class="batch-import-toast__progress">
-      <n-progress
-        type="circle"
-        status="info"
-        :stroke-width="8"
-        :percentage="batchAnalyzePercent"
-        :show-indicator="false"
-      />
-      <div class="batch-import-toast__progress-text">{{ batchAnalyzePercent }}%</div>
-    </div>
-    <div class="batch-import-toast__content">
-      <div class="batch-import-toast__title">{{ batchProgressStage === 'import' ? `正在后台导入${batchImportResourceLabel}` : `正在后台分析${batchImportResourceLabel}目录` }}</div>
-      <div class="batch-import-toast__subtitle">
-        {{ batchProgressStage === 'import'
-          ? `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${batchImportResourceLabel}`
-          : `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个目录` }}
-      </div>
-      <div class="batch-import-toast__subtitle" :title="currentDirectoryName">
-        {{ currentDirectoryName }}
-      </div>
-    </div>
-  </div>
+    @close="onDismissProgressToast"
+  />
 
   <n-modal
     :show="showPreview"
@@ -278,20 +340,32 @@ const props = defineProps({
     <template #default>
       <div class="batch-import-modal">
         <div class="batch-import-modal__toolbar">
-          <n-space>
-            <n-button size="small" @click="onSelectAll">全选</n-button>
-            <n-button size="small" @click="onDeselectAll">取消全选</n-button>
-            <n-button size="small" @click="onInvert">反选</n-button>
-          </n-space>
+          <div class="batch-import-modal__toolbar-main">
+            <n-input
+              v-model:value="batchImportSearchKeyword"
+              clearable
+              size="small"
+              placeholder="搜索标题、地址、文件夹或来源"
+              class="batch-import-modal__search"
+            />
+            <n-space>
+              <n-button size="small" @click="handleSelectAllVisible">全选</n-button>
+              <n-button size="small" @click="handleDeselectAllVisible">取消全选</n-button>
+              <n-button size="small" @click="handleInvertVisible">反选</n-button>
+            </n-space>
+          </div>
           <div class="batch-import-modal__summary">
-            已选择 {{ selectedBatchImportCount }} / {{ selectableBatchImportCount }} 个可导入目录
+            已选择 {{ selectedBatchImportCount }} / {{ selectableBatchImportCount }} 个可导入{{ detailIsWebsite ? '网站' : '目录' }}
+            <template v-if="hasBatchImportSearchKeyword">
+              · 筛选 {{ visibleSelectableBatchImportCount }} / {{ filteredBatchImportEntries.length }}
+            </template>
           </div>
         </div>
         <AppScrollbar class="batch-import-modal__scrollbar">
           <div class="batch-import-modal__list">
             <div
-              v-for="(item, index) in batchImportItems"
-              :key="item.directoryPath"
+              v-for="{ item, index } in filteredBatchImportEntries"
+              :key="item.url || item.directoryPath"
               class="batch-import-item"
               :class="{
                 'batch-import-item--clickable': canToggleBatchImportItem(item),
@@ -307,8 +381,12 @@ const props = defineProps({
                   @update:checked="(value: boolean) => onSetItemChecked(index, value)"
                 />
                 <div class="batch-import-item__main">
-                  <div class="batch-import-item__title">{{ item.directoryName || item.directoryPath }}</div>
-                  <div class="batch-import-item__path">{{ item.directoryPath }}</div>
+                  <div class="batch-import-item__title">
+                    {{ detailIsWebsite ? (item.title || item.url) : (item.directoryName || item.directoryPath) }}
+                  </div>
+                  <div class="batch-import-item__path">
+                    {{ detailIsWebsite ? item.url : item.directoryPath }}
+                  </div>
                 </div>
                 <n-space align="center" size="small">
                   <n-tag v-if="item.exists" type="warning" size="small">已存在</n-tag>
@@ -320,14 +398,17 @@ const props = defineProps({
                   >
                     {{ item.importResultType === 'success' ? '已导入' : item.importResultType === 'error' ? '导入失败' : '已跳过' }}
                   </n-tag>
-                  <n-button v-if="!detailIsManga && !detailIsAsmr" size="small" @click.stop="onSelectLaunchFile(index)">
+                  <n-button v-if="!detailIsManga && !detailIsAsmr && !detailIsWebsite" size="small" @click.stop="onSelectLaunchFile(index)">
                     手动选择
                   </n-button>
                 </n-space>
               </div>
               <div class="batch-import-item__detail">
-                <div class="batch-import-item__label">{{ detailIsManga ? '漫画图片' : (detailIsAsmr ? '音频文件' : '启动文件') }}</div>
-                <div v-if="detailIsManga" class="batch-import-item__value">
+                <div class="batch-import-item__label">{{ detailIsWebsite ? '网站地址' : (detailIsManga ? '漫画图片' : (detailIsAsmr ? '音频文件' : '启动文件')) }}</div>
+                <div v-if="detailIsWebsite" class="batch-import-item__value">
+                  {{ item.folder ? `${item.folder} · ${item.source || '书签'}` : (item.source || '书签') }}
+                </div>
+                <div v-else-if="detailIsManga" class="batch-import-item__value">
                   {{ item.imageCount ? `共 ${item.imageCount} 张图片` : '目录中未找到可用图片' }}
                 </div>
                 <div v-else-if="detailIsAsmr" class="batch-import-item__value">
@@ -345,7 +426,7 @@ const props = defineProps({
                 <div v-else class="batch-import-item__value batch-import-item__value--error">
                   {{ item.errorMessage || (detailIsAsmr ? '目录中未找到可用音频文件' : '未分析出可用启动文件，请手动选择') }}
                 </div>
-                <div v-if="showBatchImportButton && !detailIsManga" class="batch-import-item__fields">
+                <div v-if="showBatchImportButton && !detailIsManga && !detailIsWebsite" class="batch-import-item__fields">
                   <div class="batch-import-item__field">
                     <div class="batch-import-item__label">贩售网站</div>
                     <n-select
@@ -379,6 +460,11 @@ const props = defineProps({
                 </div>
               </div>
             </div>
+            <n-empty
+              v-if="!filteredBatchImportEntries.length"
+              description="没有匹配的导入项"
+              class="batch-import-modal__empty"
+            />
           </div>
         </AppScrollbar>
       </div>
@@ -390,7 +476,7 @@ const props = defineProps({
             :checked="batchImportFetchInfoEnabled"
             @update:checked="(value: boolean) => onUpdateFetchInfoEnabled(value)"
           >
-            通过插件获取作品信息
+            {{ detailIsWebsite ? '导入后后台获取网站图标和封面' : '通过插件获取作品信息' }}
           </n-checkbox>
           <n-space justify="end">
             <n-button @click="onClosePreview">退出</n-button>
@@ -499,79 +585,6 @@ const props = defineProps({
   line-height: 1;
 }
 
-.batch-import-toast {
-  position: fixed;
-  top: 20px;
-  right: 20px;
-  z-index: 40;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  width: 375px;
-  max-width: 375px;
-  padding: 14px 16px;
-  border: 1px solid rgba(128, 128, 128, 0.18);
-  border-radius: 16px;
-  background: rgba(32, 32, 32, 0.96);
-  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.26);
-  cursor: pointer;
-}
-
-.batch-import-toast__close {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 1;
-}
-
-.batch-import-toast__progress {
-  position: relative;
-  flex: 0 0 auto;
-  width: 52px;
-  height: 52px;
-  overflow: hidden;
-}
-
-.batch-import-toast__progress::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 4px solid rgba(255, 255, 255, 0.08);
-  border-top-color: rgba(99, 226, 183, 0.95);
-  border-right-color: rgba(99, 226, 183, 0.28);
-  animation: batch-import-spin 1s linear infinite;
-  box-sizing: border-box;
-}
-
-.batch-import-toast__progress :deep(.n-progress) {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 34px !important;
-  height: 34px !important;
-  transform: translate(-50%, -50%);
-}
-
-.batch-import-toast__progress :deep(.n-progress-graph) {
-  width: 100% !important;
-  height: 100% !important;
-}
-
-.batch-import-toast__progress-text {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 34px;
-  height: 34px;
-  transform: translate(-50%, -50%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  font-weight: 700;
-}
-
 @keyframes batch-import-spin {
   from {
     transform: rotate(0deg);
@@ -580,35 +593,6 @@ const props = defineProps({
   to {
     transform: rotate(360deg);
   }
-}
-
-.batch-import-toast__content {
-  min-width: 0;
-  flex: 1;
-  padding-right: 18px;
-  overflow: hidden;
-}
-
-.batch-import-toast__title {
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.4;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.batch-import-toast__subtitle {
-  margin-top: 4px;
-  font-size: 12px;
-  opacity: 0.72;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.batch-import-toast__subtitle:last-child {
-  max-width: 240px;
 }
 
 .batch-import-modal {
@@ -632,6 +616,20 @@ const props = defineProps({
   background: rgb(36, 36, 36);
 }
 
+.batch-import-modal__toolbar-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1 1 520px;
+  min-width: 0;
+}
+
+.batch-import-modal__search {
+  width: 280px;
+  flex: 1 1 280px;
+  max-width: 360px;
+}
+
 .batch-import-modal__summary {
   font-size: 12px;
   opacity: 0.72;
@@ -647,6 +645,10 @@ const props = defineProps({
   flex-direction: column;
   gap: 12px;
   padding-right: 8px;
+}
+
+.batch-import-modal__empty {
+  padding: 48px 0;
 }
 
 .batch-import-item {

@@ -40,6 +40,7 @@ const props = defineProps<{
   showDefaultAppPlay?: boolean
   defaultAppActionText?: string
   showAddToPlaylist?: boolean
+  archiveEnabled?: boolean
 }>()
 const emit = defineEmits<{
   (event: 'launch', resource: any): void
@@ -58,6 +59,7 @@ const emit = defineEmits<{
   (event: 'toggle-top', resource: any): void
   (event: 'toggle-home-pin', resource: any): void
   (event: 'toggle-select', resource: any): void
+  (event: 'archive', resource: any): void
   (event: 'delete', resource: any): void
   (event: 'delete-files', resource: any): void
   (event: 'modify-order', resource: any): void
@@ -123,6 +125,9 @@ const {
   logCardTiming,
   ...previewLoadStrategy
 })
+const handleWebsiteFaviconImageError = () => {
+  websiteFaviconSrc.value = ''
+}
 const {
   showStopConfirm,
   launchButtonStyle,
@@ -179,6 +184,7 @@ const {
   showCompletedToggle: computed(() => Boolean(props.showCompletedToggle)),
   showScreenshotFolder: computed(() => Boolean(props.showScreenshotFolder)),
   isWebsiteCategory,
+  archiveEnabled: computed(() => Boolean(props.archiveEnabled)),
   completedStateLabel,
   canLaunch,
   canToggleFavorite,
@@ -199,6 +205,7 @@ const {
   onDefaultAppPlay: (resource) => emit('default-app-play', resource),
   onAddToPlaylist: (resource) => emit('add-to-playlist', resource),
   onOpenScreenshotFolder: (resource) => emit('open-screenshot-folder', resource),
+  onArchive: (resource) => emit('archive', resource),
   onDelete: (resource) => emit('delete', resource),
   onDeleteFiles: (resource) => emit('delete-files', resource)
 })
@@ -265,6 +272,7 @@ watch(
                       :alt="resource.title"
                       class="resource-card__website-cover-icon"
                       draggable="false"
+                      @error="handleWebsiteFaviconImageError"
                     />
                   </div>
                 </div>
@@ -309,6 +317,7 @@ watch(
                     :alt="resource.title"
                     class="resource-card__title-icon-image resource-card__title-icon-image--favicon"
                     draggable="false"
+                    @error="handleWebsiteFaviconImageError"
                   />
                 </span>
                 <span v-else-if="isWebsiteCategory" class="resource-card__title-icon resource-card__title-icon--emoji">

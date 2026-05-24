@@ -36,6 +36,10 @@ src/renderer/components.d.ts
 .env.production.local
 
 # --- 编辑器与系统文件 ---
+.codex/
+.gemini/
+.playwright-mcp/
+
 # JetBrains (IntelliJ, WebStorm, PyCharm 等)
 .idea/
 *.iws
@@ -64,4 +68,8 @@ yarn-error.log*
 # --- 本地运行数据 ---
 cache/
 data.db
+data.db.bak-*
+data.game.db
+doc/
+tmp/
 tmp-smilegamebuilder-logo.png

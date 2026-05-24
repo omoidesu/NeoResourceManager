@@ -12,6 +12,8 @@ import {
   resourceType, dictType, author, authorWork, storeWork,
   actor, gameMeta, softwareMeta, singleImageMeta, multiImageMeta, videoMeta, mediaSub, asmrMeta, audioMeta, novelMeta, websiteMeta, homePin,
   resourceIssueIgnore,
+  archivePackage,
+  archivePackageItem,
 } from '../db/schema'
 import {and, asc, count, desc, eq, inArray, not, or, sql} from 'drizzle-orm'
 import {generateId} from '../util/id-generator'
@@ -40,12 +42,14 @@ type ResourceQueryParams = {
   sortBy?: string
 }
 
-type GovernanceIssueType = 'brokenPath' | 'missingCover' | 'longUnvisited'
+type GovernanceIssueType = 'brokenPath' | 'missingCover' | 'longUnvisited' | 'duplicateResource'
 type BrokenPathSubtypeKey = 'directoryMissing' | 'launchFileMissing'
+type LongUnvisitedBucketKey = 'over1Month' | 'threeToSixMonths' | 'sixToTwelveMonths' | 'overOneYear'
 
 type GovernanceIssueQuery = {
   issueType?: GovernanceIssueType | 'ignored' | 'all'
   brokenPathSubtype?: BrokenPathSubtypeKey | 'all'
+  longUnvisitedBucket?: LongUnvisitedBucketKey | 'all'
   keyword?: string
   category?: string
   tag?: string
@@ -63,6 +67,12 @@ type GovernanceBaseResourceRow = {
   categoryName: string
   categoryEmoji: string | null
   categoryPillColor: string | null
+  categoryExtra?: {
+    extendTable?: string | null
+    resourcePathType?: string | null
+    archiveEnabled?: boolean
+    archiveMode?: 'file' | 'directory' | 'none' | string | null
+  } | null
   coverPath: string | null
   description: string | null
   basePath: string
@@ -72,6 +82,7 @@ type GovernanceBaseResourceRow = {
   missingStatus: boolean | null
   createTime: Date | null
   lastAccessTime: Date | null
+  isWebsiteResource: boolean | null
   tagsText: string | null
 }
 
@@ -97,6 +108,135 @@ export class DatabaseService {
   private static mediaSubSchemaReady = false
   private static resourceSearchTextColumnReady = false
   private static resourceIssueIgnoreSchemaReady = false
+  private static archivePackageSchemaReady = false
+  private static categoryArchivePolicyExtraReady = false
+
+  private static resolveDefaultArchivePolicy(extra: {
+    extendTable?: string | null
+    resourcePathType?: string | null
+  } | null | undefined) {
+    const extendTable = String(extra?.extendTable ?? '').trim()
+    const resourcePathType = String(extra?.resourcePathType ?? '').trim()
+
+    if (extendTable === 'software_meta' || extendTable === 'website_meta') {
+      return {
+        archiveEnabled: false,
+        archiveMode: 'none' as const
+      }
+    }
+
+    if (
+      extendTable === 'game_meta'
+      || extendTable === 'multi_image_meta'
+      || extendTable === 'asmr_meta'
+    ) {
+      return {
+        archiveEnabled: true,
+        archiveMode: 'directory' as const
+      }
+    }
+
+    if (extendTable === 'video_meta') {
+      return {
+        archiveEnabled: true,
+        archiveMode: resourcePathType === 'folder' ? 'directory' as const : 'file' as const
+      }
+    }
+
+    if (
+      extendTable === 'single_image_meta'
+      || extendTable === 'audio_meta'
+      || extendTable === 'novel_meta'
+    ) {
+      return {
+        archiveEnabled: true,
+        archiveMode: 'file' as const
+      }
+    }
+
+    return {
+      archiveEnabled: false,
+      archiveMode: 'none' as const
+    }
+  }
+
+  private static async ensureCategoryArchivePolicyExtra() {
+    if (this.categoryArchivePolicyExtraReady) {
+      return
+    }
+
+    const rows = await db
+      .select({
+        id: dictData.id,
+        extra: dictData.extra
+      })
+      .from(dictData)
+      .where(eq(dictData.isDeleted, false))
+
+    for (const row of rows) {
+      const currentExtra = (row.extra && typeof row.extra === 'object' ? row.extra : {}) as Record<string, any>
+      const hasArchiveEnabled = typeof currentExtra.archiveEnabled === 'boolean'
+      const hasArchiveMode = currentExtra.archiveMode === 'file'
+        || currentExtra.archiveMode === 'directory'
+        || currentExtra.archiveMode === 'none'
+
+      if (hasArchiveEnabled && hasArchiveMode) {
+        continue
+      }
+
+      const defaultPolicy = this.resolveDefaultArchivePolicy(currentExtra)
+      await db
+        .update(dictData)
+        .set({
+          extra: {
+            ...currentExtra,
+            archiveEnabled: hasArchiveEnabled ? currentExtra.archiveEnabled : defaultPolicy.archiveEnabled,
+            archiveMode: hasArchiveMode ? currentExtra.archiveMode : defaultPolicy.archiveMode
+          }
+        })
+        .where(eq(dictData.id, row.id))
+    }
+
+    this.categoryArchivePolicyExtraReady = true
+  }
+
+  static async ensureCategoryArchivePolicyDefaultsOnStartup() {
+    this.categoryArchivePolicyExtraReady = false
+
+    const rows = await db
+      .select({
+        id: dictData.id,
+        extra: dictData.extra
+      })
+      .from(dictData)
+      .where(eq(dictData.isDeleted, false))
+
+    for (const row of rows) {
+      const currentExtra = (row.extra && typeof row.extra === 'object' ? row.extra : {}) as Record<string, any>
+      const hasArchiveEnabled = typeof currentExtra.archiveEnabled === 'boolean'
+      const hasArchiveMode = currentExtra.archiveMode === 'file'
+        || currentExtra.archiveMode === 'directory'
+        || currentExtra.archiveMode === 'none'
+
+      if (hasArchiveEnabled && hasArchiveMode) {
+        continue
+      }
+
+      const defaultPolicy = this.resolveDefaultArchivePolicy(currentExtra)
+      await db
+        .update(dictData)
+        .set({
+          extra: {
+            ...currentExtra,
+            archiveEnabled: hasArchiveEnabled ? currentExtra.archiveEnabled : defaultPolicy.archiveEnabled,
+            archiveMode: hasArchiveMode ? currentExtra.archiveMode : defaultPolicy.archiveMode
+          }
+        })
+        .where(eq(dictData.id, row.id))
+    }
+
+    this.categoryArchivePolicyExtraReady = false
+  }
   private static logger = createLogger('database-service')
 
   private static logCategoryQueryDuration(label: string, categoryId: string, startedAt: number, extra?: Record<string, any>) {
@@ -336,24 +476,88 @@ export class DatabaseService {
     this.resourceIssueIgnoreSchemaReady = true
   }
 
+  private static async ensureArchivePackageSchema() {
+    if (this.archivePackageSchemaReady) {
+      return
+    }
+
+    await db.run(sql`
+      CREATE TABLE IF NOT EXISTS archive_package (
+        id text PRIMARY KEY NOT NULL,
+        package_title text NOT NULL,
+        archive_path text NOT NULL,
+        archive_format text NOT NULL,
+        archive_level integer DEFAULT 9,
+        password_enabled integer DEFAULT 0,
+        archive_password text,
+        split_size_mb integer,
+        multithread_enabled integer DEFAULT 0,
+        thread_count integer,
+        source_total_size integer,
+        archive_size integer,
+        resource_count integer DEFAULT 1,
+        status text DEFAULT 'completed',
+        archived_at integer DEFAULT (strftime('%s', 'now')),
+        is_deleted integer DEFAULT 0
+      )
+    `)
+    await db.run(sql`
+      CREATE TABLE IF NOT EXISTS archive_package_item (
+        id text PRIMARY KEY NOT NULL,
+        package_id text NOT NULL,
+        resource_id text NOT NULL,
+        archive_entry_path text NOT NULL,
+        source_path text NOT NULL,
+        source_size integer,
+        sort_order integer DEFAULT 0,
+        is_deleted integer DEFAULT 0,
+        FOREIGN KEY (package_id) REFERENCES archive_package(id),
+        FOREIGN KEY (resource_id) REFERENCES resource(id)
+      )
+    `)
+    await db.run(sql`CREATE INDEX IF NOT EXISTS idx_archive_package_path ON archive_package (archive_path)`)
+    await db.run(sql`CREATE INDEX IF NOT EXISTS idx_archive_package_archived_at ON archive_package (archived_at)`)
+    await db.run(sql`CREATE INDEX IF NOT EXISTS idx_archive_package_item_package_id ON archive_package_item (package_id)`)
+    await db.run(sql`CREATE INDEX IF NOT EXISTS idx_archive_package_item_resource_id ON archive_package_item (resource_id)`)
+
+    const packageRows = await db.all(sql`PRAGMA table_info('archive_package')`) as Array<{ name?: string }>
+    const packageColumns = new Set(packageRows.map((row) => String(row.name ?? '').trim()))
+    if (!packageColumns.has('archive_password')) {
+      await db.run(sql`ALTER TABLE archive_package ADD archive_password text`)
+    }
+
+    const itemRows = await db.all(sql`PRAGMA table_info('archive_package_item')`) as Array<{ name?: string }>
+    const itemColumns = new Set(itemRows.map((row) => String(row.name ?? '').trim()))
+    if (!itemColumns.has('archive_entry_path')) {
+      await db.run(sql`ALTER TABLE archive_package_item ADD archive_entry_path text`)
+      await db.run(sql`UPDATE archive_package_item SET archive_entry_path = source_path WHERE archive_entry_path IS NULL OR trim(archive_entry_path) = ''`)
+    }
+
+    this.archivePackageSchemaReady = true
+  }
+
+
   private static buildGovernanceIssueDetail(issueType: GovernanceIssueType, row: GovernanceBaseResourceRow, thresholdDays: number) {
     if (issueType === 'brokenPath') {
-      const pathLabel = String(row.fileName ?? '').trim() || String(row.basePath ?? '').trim() || '目标路径'
-      return `启动路径或资源目录当前不可用，建议重新扫描或重定位。当前记录：${pathLabel}`
+      return '启动路径当前不可用，建议重新扫描或重定位。'
     }
 
     if (issueType === 'missingCover') {
-      return '当前资源缺少封面，无法在封面墙与最近添加等依赖封面的场景中正常展示。'
+      return '当前资源缺少封面，无法在封面墙与最近添加中正常展示。'
+    }
+
+    if (issueType === 'duplicateResource') {
+      return '当前资源与同分类其他资源名称相同，建议核对是否重复导入、重名版本或需合并整理。'
     }
 
     const anchorTime = row.lastAccessTime ?? row.createTime
     const elapsedDays = anchorTime
       ? Math.max(0, Math.floor((Date.now() - anchorTime.getTime()) / (24 * 60 * 60 * 1000)))
       : thresholdDays
-    return `已超过 ${thresholdDays} 天未访问，当前约 ${elapsedDays} 天未使用，建议判断是否归档或移出主视图。`
+    return `当前资源已超过 ${thresholdDays} 天未访问，约 ${elapsedDays} 天未使用，建议判断是否归档或移出主视图。`
   }
 
-  private static buildGovernanceIssueActions(issueType: GovernanceIssueType, ignored: boolean) {
+  private static buildGovernanceIssueActions(issueType: GovernanceIssueType, ignored: boolean, archiveEnabled = false) {
     const restoreActions = ignored
       ? [{ label: '恢复待处理', tone: 'primary' as const }]
       : [{ label: '忽略', tone: 'default' as const }]
@@ -363,22 +567,35 @@ export class DatabaseService {
         { label: '查看详情', tone: 'default' as const },
         { label: '重新扫描', tone: 'primary' as const },
         { label: '重定位资源', tone: 'warning' as const },
+        { label: '移除资源', tone: 'error' as const },
+        { label: '移除并删除本地资源', tone: 'error' as const },
         ...restoreActions
       ]
     }
 
     if (issueType === 'missingCover') {
       return [
-        { label: '手动选择封面', tone: 'primary' as const },
+        { label: '选择封面', tone: 'primary' as const },
         { label: '查看详情', tone: 'default' as const },
+        { label: '移除资源', tone: 'error' as const },
+        { label: '移除并删除本地资源', tone: 'error' as const },
+        ...restoreActions
+      ]
+    }
+
+    if (issueType === 'duplicateResource') {
+      return [
+        { label: '查看详情', tone: 'default' as const },
+        { label: '移除资源', tone: 'error' as const },
         ...restoreActions
       ]
     }
 
     return [
       { label: '查看详情', tone: 'default' as const },
-      { label: '归档并删除本地资源', tone: 'warning' as const },
+      ...(archiveEnabled ? [{ label: '归档', tone: 'primary' as const }] : []),
       { label: '移除资源', tone: 'error' as const },
+      { label: '移除并删除本地资源', tone: 'error' as const },
       ...restoreActions
     ]
   }
@@ -387,32 +604,74 @@ export class DatabaseService {
     if (ignored) return 'ignored'
     if (issueType === 'brokenPath') return 'broken'
     if (issueType === 'missingCover') return 'missing'
+    if (issueType === 'duplicateResource') return 'duplicate'
     return 'idle'
   }
 
-  private static async resolveBrokenPathSubtype(row: GovernanceBaseResourceRow): Promise<BrokenPathSubtypeKey> {
+  private static shouldSkipGovernanceBrokenPathCheck(row: GovernanceBaseResourceRow) {
+    if (Boolean(row.isWebsiteResource)) {
+      return true
+    }
+
+    const resourcePathType = String(row.categoryExtra?.resourcePathType ?? '').trim().toLowerCase()
+    return resourcePathType === 'url'
+  }
+
+  private static async resolveGovernanceBrokenPathState(row: GovernanceBaseResourceRow): Promise<{
+    checked: boolean
+    missing: boolean
+    subtype: BrokenPathSubtypeKey | null
+  }> {
+    if (this.shouldSkipGovernanceBrokenPathCheck(row)) {
+      return {
+        checked: false,
+        missing: false,
+        subtype: null
+      }
+    }
+
     const normalizedBasePath = String(row.basePath ?? '').trim()
     const normalizedFileName = String(row.fileName ?? '').trim()
 
     if (!normalizedBasePath) {
-      return 'directoryMissing'
+      return {
+        checked: true,
+        missing: true,
+        subtype: 'directoryMissing'
+      }
     }
 
     try {
       const basePathExists = await fs.pathExists(normalizedBasePath)
       if (!basePathExists) {
-        return 'directoryMissing'
+        return {
+          checked: true,
+          missing: true,
+          subtype: 'directoryMissing'
+        }
       }
 
       if (!normalizedFileName) {
-        return 'directoryMissing'
+        return {
+          checked: true,
+          missing: false,
+          subtype: null
+        }
       }
 
       const launchPath = path.join(normalizedBasePath, normalizedFileName)
       const launchFileExists = await fs.pathExists(launchPath)
-      return launchFileExists ? 'directoryMissing' : 'launchFileMissing'
+      return {
+        checked: true,
+        missing: !launchFileExists,
+        subtype: launchFileExists ? null : 'launchFileMissing'
+      }
     } catch {
-      return normalizedFileName ? 'launchFileMissing' : 'directoryMissing'
+      return {
+        checked: true,
+        missing: true,
+        subtype: normalizedFileName ? 'launchFileMissing' : 'directoryMissing'
+      }
     }
   }
 
@@ -545,7 +804,10 @@ export class DatabaseService {
   }
 
   static async getCategory() {
-    await this.ensureCategoryPillColorColumn()
+    await Promise.all([
+      this.ensureCategoryPillColorColumn(),
+      this.ensureCategoryArchivePolicyExtra()
+    ])
 
     const queryCategory = () => db
         .select({
@@ -574,7 +836,10 @@ export class DatabaseService {
   }
 
   static async getCategoryById(id: string) {
-    await this.ensureCategoryPillColorColumn()
+    await Promise.all([
+      this.ensureCategoryPillColorColumn(),
+      this.ensureCategoryArchivePolicyExtra()
+    ])
 
     return await db.query.category.findFirst({
       where: and(
@@ -588,7 +853,10 @@ export class DatabaseService {
   }
 
   static async getCategoryByName(name: string) {
-    await this.ensureCategoryPillColorColumn()
+    await Promise.all([
+      this.ensureCategoryPillColorColumn(),
+      this.ensureCategoryArchivePolicyExtra()
+    ])
 
     return await db.query.category.findFirst({
       where: and(
@@ -1009,6 +1277,7 @@ export class DatabaseService {
     const excludedIds = recentLogRows.map((item) => String(item.resourceId ?? '')).filter(Boolean)
     const baseConditions = [
       eq(resource.isDeleted, false),
+      eq(resource.missingStatus, false),
       eq(category.isDeleted, false),
       excludedIds.length ? not(inArray(resource.id, excludedIds)) : undefined
     ].filter(Boolean) as any[]
@@ -1536,6 +1805,48 @@ export class DatabaseService {
     }
   }
 
+  static async getApiStatusResourceSummary() {
+    const [totalResult, typeRows] = await Promise.all([
+      db
+        .select({ total: count(resource.id) })
+        .from(resource)
+        .innerJoin(category, eq(resource.categoryId, category.id))
+        .where(and(
+          eq(resource.isDeleted, false),
+          eq(category.isDeleted, false)
+        )),
+      db
+        .select({
+          id: category.id,
+          name: category.name,
+          emoji: category.emoji,
+          pillColor: category.pillColor,
+          sort: category.sort,
+          count: count(resource.id)
+        })
+        .from(category)
+        .leftJoin(resource, and(
+          eq(resource.categoryId, category.id),
+          eq(resource.isDeleted, false)
+        ))
+        .where(eq(category.isDeleted, false))
+        .groupBy(category.id, category.name, category.emoji, category.pillColor, category.sort)
+        .orderBy(asc(category.sort), asc(category.name))
+    ])
+
+    return {
+      total: Number(totalResult[0]?.total ?? 0),
+      types: typeRows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        emoji: row.emoji ?? '',
+        pillColor: row.pillColor ?? '',
+        sort: Number(row.sort ?? 0),
+        count: Number(row.count ?? 0)
+      }))
+    }
+  }
+
   static async getDashboardStats() {
     const longUnvisitedSetting = await this.getSetting(Settings.DASHBOARD_LONG_UNVISITED_DAYS)
     const configuredLongUnvisitedDays = Math.max(
@@ -1590,9 +1901,11 @@ export class DatabaseService {
       db
         .select({ total: count(resource.id) })
         .from(resource)
+        .leftJoin(websiteMeta, eq(websiteMeta.resourceId, resource.id))
         .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
         .where(and(
           eq(resource.isDeleted, false),
+          sql`${websiteMeta.resourceId} is null`,
           sql`(
             (${resourceStat.lastAccessTime} is not null and ${resourceStat.lastAccessTime} < strftime('%s', 'now', ${`-${configuredLongUnvisitedDays} days`}))
             or
@@ -1763,12 +2076,13 @@ export class DatabaseService {
         )`
 
       const whereClause = upperBoundCondition
-        ? and(eq(resource.isDeleted, false), lowerBoundCondition, upperBoundCondition)
-        : and(eq(resource.isDeleted, false), lowerBoundCondition)
+        ? and(eq(resource.isDeleted, false), sql`${websiteMeta.resourceId} is null`, lowerBoundCondition, upperBoundCondition)
+        : and(eq(resource.isDeleted, false), sql`${websiteMeta.resourceId} is null`, lowerBoundCondition)
 
       const rows = await db
         .select({ total: count(resource.id) })
         .from(resource)
+        .leftJoin(websiteMeta, eq(websiteMeta.resourceId, resource.id))
         .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
         .where(whereClause)
 
@@ -1785,6 +2099,8 @@ export class DatabaseService {
     await Promise.all([
       this.ensureCategoryPillColorColumn(),
       this.ensureResourceIssueIgnoreSchema(),
+      this.ensureArchivePackageSchema(),
+      this.ensureCategoryArchivePolicyExtra(),
     ])
 
     const longUnvisitedSetting = await this.getSetting(Settings.DASHBOARD_LONG_UNVISITED_DAYS)
@@ -1828,11 +2144,35 @@ export class DatabaseService {
       return elapsedMs >= thresholdDays * 24 * 60 * 60 * 1000
     }
 
+    const resolveLongUnvisitedBucket = (lastAccessTime: Date | null, createdAt: Date | null): LongUnvisitedBucketKey | null => {
+      const anchor = lastAccessTime ?? createdAt
+      if (!(anchor instanceof Date) || Number.isNaN(anchor.getTime())) {
+        return null
+      }
+
+      const elapsedDays = (Date.now() - anchor.getTime()) / (24 * 60 * 60 * 1000)
+      if (elapsedDays < thresholdDays) {
+        return null
+      }
+      if (elapsedDays < 90) {
+        return 'over1Month'
+      }
+      if (elapsedDays < 180) {
+        return 'threeToSixMonths'
+      }
+      if (elapsedDays < 365) {
+        return 'sixToTwelveMonths'
+      }
+      return 'overOneYear'
+    }
+
     const [
       baseRows,
       ignoredRows,
       totalTagRows,
+      totalTypeRows,
       totalCategoryRows,
+      archiveSummaryRows,
     ] = await Promise.all([
       db
         .select({
@@ -1842,6 +2182,7 @@ export class DatabaseService {
           categoryName: category.name,
           categoryEmoji: category.emoji,
           categoryPillColor: category.pillColor,
+          categoryExtra: dictData.extra,
           coverPath: resource.coverPath,
           description: resource.description,
           basePath: resource.basePath,
@@ -1851,6 +2192,7 @@ export class DatabaseService {
           missingStatus: resource.missingStatus,
           createTime: resource.createTime,
           lastAccessTime: resourceStat.lastAccessTime,
+          isWebsiteResource: sql<boolean>`case when ${websiteMeta.resourceId} is not null then 1 else 0 end`,
           tagsText: sql<string>`(
             select group_concat(${tag.name}, '||')
             from ${tagResource}
@@ -1861,6 +2203,8 @@ export class DatabaseService {
         })
         .from(resource)
         .innerJoin(category, eq(resource.categoryId, category.id))
+        .leftJoin(dictData, eq(category.referenceId, dictData.id))
+        .leftJoin(websiteMeta, eq(websiteMeta.resourceId, resource.id))
         .leftJoin(resourceStat, eq(resourceStat.resourceId, resource.id))
         .where(and(
           eq(resource.isDeleted, false),
@@ -1878,9 +2222,20 @@ export class DatabaseService {
         .from(tag)
         .where(eq(tag.isDeleted, false)),
       db
+        .select({ total: count(resourceType.id) })
+        .from(resourceType)
+        .where(eq(resourceType.isDeleted, false)),
+      db
         .select({ total: count(category.id) })
         .from(category)
-        .where(eq(category.isDeleted, false))
+        .where(eq(category.isDeleted, false)),
+      db
+        .select({
+          total: count(archivePackage.id),
+          totalSize: sql<number>`coalesce(sum(${archivePackage.archiveSize}), 0)`
+        })
+        .from(archivePackage)
+        .where(eq(archivePackage.isDeleted, false))
     ])
 
     const ignoredSet = new Set(
@@ -1893,21 +2248,75 @@ export class DatabaseService {
         .filter(Boolean)
     )
 
-    const issueEntries = (await Promise.all(baseRows.map(async (row) => {
+    const duplicateNameMap = baseRows
+      .map((row) => ({
+        id: String(row.id ?? '').trim(),
+        title: String(row.title ?? '').trim(),
+        key: `${String(row.categoryId ?? '').trim()}::${String(row.title ?? '').trim().toLowerCase()}`
+      }))
+      .filter((item) => item.id && item.title && item.key !== '::')
+      .reduce((map, item) => {
+        const current = map.get(item.key) ?? []
+        current.push(item.id)
+        map.set(item.key, current)
+        return map
+      }, new Map<string, string[]>())
+
+    const duplicateNameSet = new Set(
+      Array.from(duplicateNameMap.values())
+        .filter((ids) => ids.length > 1)
+        .flat()
+    )
+
+    const baseRowsWithBrokenState = await Promise.all(baseRows.map(async (row) => ({
+      row,
+      brokenPathState: await this.resolveGovernanceBrokenPathState(row)
+    })))
+
+    const missingStatusChanges = baseRowsWithBrokenState
+      .filter(({ row, brokenPathState }) => brokenPathState.checked && Boolean(row.missingStatus) !== brokenPathState.missing)
+      .map(({ row, brokenPathState }) => ({
+        resourceId: String(row.id ?? '').trim(),
+        missing: brokenPathState.missing
+      }))
+
+    if (missingStatusChanges.length) {
+      const missingTrueIds = missingStatusChanges.filter((item) => item.missing).map((item) => item.resourceId)
+      const missingFalseIds = missingStatusChanges.filter((item) => !item.missing).map((item) => item.resourceId)
+
+      if (missingTrueIds.length) {
+        await db
+          .update(resource)
+          .set({ missingStatus: true })
+          .where(inArray(resource.id, missingTrueIds))
+      }
+
+      if (missingFalseIds.length) {
+        await db
+          .update(resource)
+          .set({ missingStatus: false })
+          .where(inArray(resource.id, missingFalseIds))
+      }
+    }
+
+    const issueEntries = (await Promise.all(baseRowsWithBrokenState.map(async ({ row, brokenPathState }) => {
       const tags = String(row.tagsText ?? '')
         .split('||')
         .map((item) => item.trim())
         .filter(Boolean)
 
       const activeIssueTypes: GovernanceIssueType[] = []
-      if (Boolean(row.missingStatus)) {
+      if (brokenPathState.missing) {
         activeIssueTypes.push('brokenPath')
       }
       if (!String(row.coverPath ?? '').trim()) {
         activeIssueTypes.push('missingCover')
       }
-      if (isLongUnvisited(row.lastAccessTime, row.createTime)) {
+      if (!Boolean(row.isWebsiteResource) && isLongUnvisited(row.lastAccessTime, row.createTime)) {
         activeIssueTypes.push('longUnvisited')
+      }
+      if (duplicateNameSet.has(String(row.id ?? '').trim())) {
+        activeIssueTypes.push('duplicateResource')
       }
 
       return await Promise.all(activeIssueTypes.map(async (issueType) => {
@@ -1915,13 +2324,17 @@ export class DatabaseService {
         const numericRating = Number(row.rating ?? -1)
         const normalizedRating = Number.isFinite(numericRating) && numericRating >= 0 ? numericRating : 0
         const issueSubType = issueType === 'brokenPath'
-          ? await this.resolveBrokenPathSubtype(row)
+          ? (brokenPathState.subtype ?? 'directoryMissing')
+          : null
+        const longUnvisitedBucket = issueType === 'longUnvisited'
+          ? resolveLongUnvisitedBucket(row.lastAccessTime, row.createTime)
           : null
         const issueSubTypeLabel = issueSubType === 'directoryMissing'
           ? '目录失效'
           : issueSubType === 'launchFileMissing'
             ? '启动文件丢失'
             : ''
+        const archiveEnabled = Boolean(row.categoryExtra?.archiveEnabled)
 
         return {
           id: `${row.id}:${issueType}`,
@@ -1935,13 +2348,28 @@ export class DatabaseService {
           tags,
           issueType,
           issueSubType,
+          longUnvisitedBucket,
           issueSubTypeLabel,
           issueTypeLabel: issueType === 'brokenPath'
             ? '路径失效'
             : issueType === 'missingCover'
-              ? '无封面'
-              : '长期未访问',
+              ? '封面缺失'
+              : issueType === 'duplicateResource'
+                ? '疑似重复'
+              : '沉睡资源',
           issueDetail: this.buildGovernanceIssueDetail(issueType, row, thresholdDays),
+          currentRecordLabel: issueType === 'brokenPath'
+            ? (issueSubType === 'launchFileMissing' ? '当前启动路径' : '当前记录目录')
+            : '',
+          currentRecordPath: issueType === 'brokenPath'
+            ? (issueSubType === 'launchFileMissing'
+              ? path.join(String(row.basePath ?? '').trim(), String(row.fileName ?? '').trim())
+              : String(row.basePath ?? '').trim())
+            : '',
+          resourcePath: String(row.fileName ?? '').trim()
+            ? path.join(String(row.basePath ?? '').trim(), String(row.fileName ?? '').trim())
+            : String(row.basePath ?? '').trim(),
+          currentRecordDirectoryPath: issueType === 'brokenPath' ? String(row.basePath ?? '').trim() : '',
           recentAccess: formatDateTime(row.lastAccessTime),
           createdAt: formatDate(row.createTime),
           status: ignored ? '已忽略' : '待处理',
@@ -1949,36 +2377,50 @@ export class DatabaseService {
           coverLabel: ignored
             ? '已忽略'
             : issueType === 'brokenPath'
-              ? '失效'
+              ? '路径失效'
               : issueType === 'missingCover'
-                ? '无封面'
-                : '沉睡',
+              ? '缺封面'
+                : issueType === 'duplicateResource'
+                  ? '重复'
+                : '沉睡资源',
           rating: normalizedRating.toFixed(1),
           ratingValue: normalizedRating,
           favorite: Boolean(row.favorite),
           lastAccessTimestamp: row.lastAccessTime?.getTime?.() ?? 0,
           createdTimestamp: row.createTime?.getTime?.() ?? 0,
-          actions: this.buildGovernanceIssueActions(issueType, ignored)
+          actions: this.buildGovernanceIssueActions(issueType, ignored, archiveEnabled)
         }
       }))
     }))).flat()
 
+    const activeIssueEntries = issueEntries.filter((item) => item.status !== '已忽略')
+    const ignoredIssueEntries = issueEntries.filter((item) => item.status === '已忽略')
+
     const tabCounts = {
-      all: issueEntries.length,
-      brokenPath: issueEntries.filter((item) => item.issueType === 'brokenPath').length,
-      missingCover: issueEntries.filter((item) => item.issueType === 'missingCover').length,
-      longUnvisited: issueEntries.filter((item) => item.issueType === 'longUnvisited').length,
-      ignored: issueEntries.filter((item) => item.status === '已忽略').length
+      all: activeIssueEntries.length,
+      brokenPath: activeIssueEntries.filter((item) => item.issueType === 'brokenPath').length,
+      missingCover: activeIssueEntries.filter((item) => item.issueType === 'missingCover').length,
+      longUnvisited: activeIssueEntries.filter((item) => item.issueType === 'longUnvisited').length,
+      duplicateResource: activeIssueEntries.filter((item) => item.issueType === 'duplicateResource').length,
+      ignored: ignoredIssueEntries.length
     }
 
     const brokenPathSubCounts = {
-      all: issueEntries.filter((item) => item.issueType === 'brokenPath').length,
-      directoryMissing: issueEntries.filter((item) => item.issueType === 'brokenPath' && item.issueSubType === 'directoryMissing').length,
-      launchFileMissing: issueEntries.filter((item) => item.issueType === 'brokenPath' && item.issueSubType === 'launchFileMissing').length
+      all: activeIssueEntries.filter((item) => item.issueType === 'brokenPath').length,
+      directoryMissing: activeIssueEntries.filter((item) => item.issueType === 'brokenPath' && item.issueSubType === 'directoryMissing').length,
+      launchFileMissing: activeIssueEntries.filter((item) => item.issueType === 'brokenPath' && item.issueSubType === 'launchFileMissing').length
+    }
+    const longUnvisitedSubCounts = {
+      all: activeIssueEntries.filter((item) => item.issueType === 'longUnvisited').length,
+      over1Month: activeIssueEntries.filter((item) => item.issueType === 'longUnvisited' && item.longUnvisitedBucket === 'over1Month').length,
+      threeToSixMonths: activeIssueEntries.filter((item) => item.issueType === 'longUnvisited' && item.longUnvisitedBucket === 'threeToSixMonths').length,
+      sixToTwelveMonths: activeIssueEntries.filter((item) => item.issueType === 'longUnvisited' && item.longUnvisitedBucket === 'sixToTwelveMonths').length,
+      overOneYear: activeIssueEntries.filter((item) => item.issueType === 'longUnvisited' && item.longUnvisitedBucket === 'overOneYear').length
     }
 
     const normalizedIssueType = query.issueType ?? 'all'
     const normalizedBrokenPathSubtype = query.brokenPathSubtype ?? 'all'
+    const normalizedLongUnvisitedBucket = query.longUnvisitedBucket ?? 'all'
     const filteredItems = issueEntries
       .filter((item) => {
         const keyword = String(query.keyword ?? '').trim().toLowerCase()
@@ -1988,13 +2430,16 @@ export class DatabaseService {
         const normalizedRating = String(query.rating ?? 'all').trim()
 
         const matchesTab = normalizedIssueType === 'all'
-          ? true
+          ? item.status !== '已忽略'
           : normalizedIssueType === 'ignored'
             ? item.status === '已忽略'
-            : item.issueType === normalizedIssueType
+            : item.issueType === normalizedIssueType && item.status !== '已忽略'
         const matchesBrokenPathSubtype = normalizedIssueType !== 'brokenPath'
           || normalizedBrokenPathSubtype === 'all'
           || item.issueSubType === normalizedBrokenPathSubtype
+        const matchesLongUnvisitedBucket = normalizedIssueType !== 'longUnvisited'
+          || normalizedLongUnvisitedBucket === 'all'
+          || item.longUnvisitedBucket === normalizedLongUnvisitedBucket
 
         const matchesKeyword = !keyword || [
           item.title,
@@ -2016,6 +2461,7 @@ export class DatabaseService {
 
         return matchesTab
           && matchesBrokenPathSubtype
+          && matchesLongUnvisitedBucket
           && matchesKeyword
           && matchesCategory
           && matchesTag
@@ -2058,7 +2504,7 @@ export class DatabaseService {
       .orderBy(asc(category.sort), asc(category.name))
 
     const visibleCategoryNames = new Set(
-      issueEntries
+      activeIssueEntries
         .map((item) => String(item.category ?? '').trim())
         .filter(Boolean)
     )
@@ -2071,7 +2517,7 @@ export class DatabaseService {
     const categoryOptions = [...orderedCategoryNames, ...missingCategoryNames]
       .map((name) => ({ label: name, value: name }))
 
-    const tagOptions = Array.from(new Set(issueEntries.flatMap((item) => item.tags)))
+    const tagOptions = Array.from(new Set(activeIssueEntries.flatMap((item) => item.tags)))
       .filter(Boolean)
       .sort((left, right) => left.localeCompare(right, 'zh-Hans-CN'))
       .map((name) => ({ label: name, value: name }))
@@ -2082,16 +2528,21 @@ export class DatabaseService {
         brokenPathCount: tabCounts.brokenPath,
         missingCoverCount: tabCounts.missingCover,
         longUnvisitedCount: tabCounts.longUnvisited,
+        duplicateResourceCount: tabCounts.duplicateResource,
         ignoredCount: tabCounts.ignored,
         totalTagCount: Number(totalTagRows[0]?.total ?? 0),
+        totalTypeCount: Number(totalTypeRows[0]?.total ?? 0),
         totalCategoryCount: Number(totalCategoryRows[0]?.total ?? 0),
-        archiveCandidateCount: tabCounts.longUnvisited
+        archiveCandidateCount: tabCounts.longUnvisited,
+        archivePackageCount: Number(archiveSummaryRows[0]?.total ?? 0),
+        archiveStorageSizeBytes: Number(archiveSummaryRows[0]?.totalSize ?? 0)
       },
       tabs: [
         { key: 'all', label: '全部', count: tabCounts.all },
         { key: 'brokenPath', label: '路径失效', count: tabCounts.brokenPath },
-        { key: 'missingCover', label: '无封面', count: tabCounts.missingCover },
-        { key: 'longUnvisited', label: '长期未访问', count: tabCounts.longUnvisited },
+        { key: 'missingCover', label: '封面缺失', count: tabCounts.missingCover },
+        { key: 'longUnvisited', label: '沉睡资源', count: tabCounts.longUnvisited },
+        { key: 'duplicateResource', label: '疑似重复', count: tabCounts.duplicateResource },
         { key: 'ignored', label: '已忽略问题', count: tabCounts.ignored }
       ],
       brokenPathSubTabs: [
@@ -2099,11 +2550,254 @@ export class DatabaseService {
         { key: 'directoryMissing', label: '目录失效', count: brokenPathSubCounts.directoryMissing },
         { key: 'launchFileMissing', label: '启动文件丢失', count: brokenPathSubCounts.launchFileMissing }
       ],
+      longUnvisitedSubTabs: [
+        { key: 'all', label: '全部', count: longUnvisitedSubCounts.all },
+        { key: 'over1Month', label: '超 1 个月', count: longUnvisitedSubCounts.over1Month },
+        { key: 'threeToSixMonths', label: '3 - 6 个月', count: longUnvisitedSubCounts.threeToSixMonths },
+        { key: 'sixToTwelveMonths', label: '6 - 12 个月', count: longUnvisitedSubCounts.sixToTwelveMonths },
+        { key: 'overOneYear', label: '1 年以上', count: longUnvisitedSubCounts.overOneYear }
+      ],
       filters: {
         categories: [{ label: '全部分类', value: 'all' }, ...categoryOptions],
         tags: [{ label: '全部标签', value: 'all' }, ...tagOptions]
       },
       items: filteredItems
+    }
+  }
+
+  static async getGovernanceTagWorkbench() {
+    await Promise.all([
+      this.ensureCategoryPillColorColumn(),
+      this.ensureCategoryArchivePolicyExtra()
+    ])
+
+    const tagResourceCount = count(resource.id)
+    const typeResourceCount = count(resource.id)
+
+    const categoryRows = await db
+      .select({
+        id: category.id,
+        name: category.name,
+        emoji: category.emoji,
+        pillColor: category.pillColor,
+        sort: category.sort
+      })
+      .from(category)
+      .where(eq(category.isDeleted, false))
+      .orderBy(asc(category.sort), asc(category.name))
+
+    const tagRows = await db
+      .select({
+        id: tag.id,
+        name: tag.name,
+        categoryId: tag.categoryId,
+        categoryName: category.name,
+        categoryEmoji: category.emoji,
+        categoryColor: category.pillColor,
+        resourceCount: tagResourceCount
+      })
+      .from(tag)
+      .innerJoin(category, eq(tag.categoryId, category.id))
+      .leftJoin(tagResource, eq(tagResource.tagId, tag.id))
+      .leftJoin(resource, and(
+        eq(resource.id, tagResource.resourceId),
+        eq(resource.isDeleted, false)
+      ))
+      .where(and(
+        eq(tag.isDeleted, false),
+        eq(category.isDeleted, false)
+      ))
+      .groupBy(tag.id, tag.name, tag.categoryId, category.name, category.emoji, category.pillColor, category.sort)
+      .orderBy(asc(category.sort), asc(tag.name))
+
+    const typeRows = await db
+      .select({
+        id: resourceType.id,
+        name: resourceType.name,
+        categoryId: resourceType.categoryId,
+        categoryName: category.name,
+        categoryEmoji: category.emoji,
+        categoryColor: category.pillColor,
+        resourceCount: typeResourceCount
+      })
+      .from(resourceType)
+      .innerJoin(category, eq(resourceType.categoryId, category.id))
+      .leftJoin(typeResource, eq(typeResource.typeId, resourceType.id))
+      .leftJoin(resource, and(
+        eq(resource.id, typeResource.resourceId),
+        eq(resource.isDeleted, false)
+      ))
+      .where(and(
+        eq(resourceType.isDeleted, false),
+        eq(category.isDeleted, false)
+      ))
+      .groupBy(resourceType.id, resourceType.name, resourceType.categoryId, category.name, category.emoji, category.pillColor, category.sort)
+      .orderBy(asc(category.sort), asc(resourceType.name))
+
+    const categories = categoryRows.map((item) => ({
+      id: item.id,
+      name: item.name,
+      emoji: item.emoji,
+      categoryColor: item.pillColor,
+      sort: Number(item.sort ?? 0)
+    }))
+
+    const tags = tagRows.map((item) => ({
+      id: item.id,
+      name: item.name,
+      categoryId: item.categoryId,
+      categoryName: item.categoryName,
+      categoryEmoji: item.categoryEmoji,
+      categoryColor: item.categoryColor,
+      resourceCount: Number(item.resourceCount ?? 0)
+    }))
+
+    const types = typeRows.map((item) => ({
+      id: item.id,
+      name: item.name,
+      categoryId: item.categoryId,
+      categoryName: item.categoryName,
+      categoryEmoji: item.categoryEmoji,
+      categoryColor: item.categoryColor,
+      resourceCount: Number(item.resourceCount ?? 0)
+    }))
+
+    return {
+      summary: {
+        totalTagCount: tags.length,
+        totalTypeCount: types.length,
+        unusedTagCount: tags.filter((item) => item.resourceCount <= 0).length,
+        unusedTypeCount: types.filter((item) => item.resourceCount <= 0).length
+      },
+      filters: {
+        categories: [
+          { label: '全部分类', value: 'all' },
+          ...categories.map((item) => ({ label: item.name, value: item.id }))
+        ]
+      },
+      tags,
+      types
+    }
+  }
+
+  static async renameGovernanceTagEntity(kind: 'tag' | 'type', id: string, name: string) {
+    const normalizedKind = kind === 'type' ? 'type' : 'tag'
+    const normalizedId = String(id ?? '').trim()
+    const normalizedName = String(name ?? '').trim()
+
+    if (!normalizedId || !normalizedName) {
+      return {
+        type: 'warning',
+        message: '名称不能为空'
+      }
+    }
+
+    const targetTable = normalizedKind === 'tag' ? tag : resourceType
+    const current = await db
+      .select({
+        id: targetTable.id,
+        categoryId: targetTable.categoryId
+      })
+      .from(targetTable)
+      .where(and(
+        eq(targetTable.id, normalizedId),
+        eq(targetTable.isDeleted, false)
+      ))
+      .limit(1)
+
+    if (!current.length) {
+      return {
+        type: 'warning',
+        message: normalizedKind === 'tag' ? '标签不存在或已删除' : '分类不存在或已删除'
+      }
+    }
+
+    const duplicated = await db
+      .select({ id: targetTable.id })
+      .from(targetTable)
+      .where(and(
+        eq(targetTable.categoryId, current[0].categoryId),
+        eq(targetTable.name, normalizedName),
+        eq(targetTable.isDeleted, false),
+        not(eq(targetTable.id, normalizedId))
+      ))
+      .limit(1)
+
+    if (duplicated.length) {
+      return {
+        type: 'warning',
+        message: normalizedKind === 'tag' ? '同分类下已存在同名标签' : '同分类下已存在同名分类'
+      }
+    }
+
+    await db
+      .update(targetTable)
+      .set({ name: normalizedName })
+      .where(eq(targetTable.id, normalizedId))
+
+    return {
+      type: 'success',
+      message: '重命名成功'
+    }
+  }
+
+  static async deleteGovernanceTagEntity(kind: 'tag' | 'type', id: string) {
+    const normalizedKind = kind === 'type' ? 'type' : 'tag'
+    const normalizedId = String(id ?? '').trim()
+
+    if (!normalizedId) {
+      return {
+        type: 'warning',
+        message: '请选择要删除的项目'
+      }
+    }
+
+    await db.transaction(async (tx) => {
+      if (normalizedKind === 'tag') {
+        await tx.delete(tagResource).where(eq(tagResource.tagId, normalizedId))
+        await tx.update(tag).set({ isDeleted: true }).where(eq(tag.id, normalizedId))
+        return
+      }
+
+      await tx.delete(typeResource).where(eq(typeResource.typeId, normalizedId))
+      await tx.update(resourceType).set({ isDeleted: true }).where(eq(resourceType.id, normalizedId))
+    })
+
+    return {
+      type: 'success',
+      message: normalizedKind === 'tag' ? '标签已删除' : '分类已删除'
+    }
+  }
+
+  static async deleteGovernanceTagEntities(kind: 'tag' | 'type', ids: string[]) {
+    const normalizedKind = kind === 'type' ? 'type' : 'tag'
+    const normalizedIds = Array.from(new Set(
+      (Array.isArray(ids) ? ids : [])
+        .map((id) => String(id ?? '').trim())
+        .filter(Boolean)
+    ))
+
+    if (!normalizedIds.length) {
+      return {
+        type: 'warning',
+        message: '请选择要删除的项目'
+      }
+    }
+
+    await db.transaction(async (tx) => {
+      if (normalizedKind === 'tag') {
+        await tx.delete(tagResource).where(inArray(tagResource.tagId, normalizedIds))
+        await tx.update(tag).set({ isDeleted: true }).where(inArray(tag.id, normalizedIds))
+        return
+      }
+
+      await tx.delete(typeResource).where(inArray(typeResource.typeId, normalizedIds))
+      await tx.update(resourceType).set({ isDeleted: true }).where(inArray(resourceType.id, normalizedIds))
+    })
+
+    return {
+      type: 'success',
+      message: `已删除 ${normalizedIds.length} 个${normalizedKind === 'tag' ? '标签' : '分类'}`
     }
   }
 
@@ -3068,6 +3762,14 @@ export class DatabaseService {
     })
   }
 
+  static async getResourceArchiveSourceResourceById(resourceId: string) {
+    await this.ensureResourceTopAndHomePinSchema()
+
+    return await db.query.resource.findFirst({
+      where: eq(resource.id, resourceId)
+    })
+  }
+
   static async getResourcesByIds(resourceIds: string[]) {
     await this.ensureResourceTopAndHomePinSchema()
 
@@ -3082,6 +3784,230 @@ export class DatabaseService {
         eq(resource.isDeleted, false)
       )
     })
+  }
+
+  static async getResourceArchiveByResourceId(resourceId: string, tx?: DbExecutor) {
+    await this.ensureArchivePackageSchema()
+    const executor = tx ?? db
+    const rows = await executor
+      .select({
+        id: archivePackage.id,
+        archivePath: archivePackage.archivePath,
+        archiveFormat: archivePackage.archiveFormat,
+        status: archivePackage.status,
+        archivedAt: archivePackage.archivedAt,
+        packageTitle: archivePackage.packageTitle,
+        resourceCount: archivePackage.resourceCount,
+        sourceTotalSize: archivePackage.sourceTotalSize,
+        archiveSize: archivePackage.archiveSize,
+      })
+      .from(archivePackageItem)
+      .innerJoin(archivePackage, eq(archivePackageItem.packageId, archivePackage.id))
+      .where(and(
+        eq(archivePackageItem.resourceId, resourceId),
+        eq(archivePackageItem.isDeleted, false),
+        eq(archivePackage.isDeleted, false)
+      ))
+      .orderBy(desc(archivePackage.archivedAt), desc(archivePackage.id))
+
+    return rows[0] ?? null
+  }
+
+  static async getResourceArchiveById(archiveId: string, tx?: DbExecutor) {
+    await this.ensureArchivePackageSchema()
+    const executor = tx ?? db
+    return await executor.query.archivePackage.findFirst({
+      where: and(
+        eq(archivePackage.id, archiveId),
+        eq(archivePackage.isDeleted, false)
+      )
+    })
+  }
+
+  static async listResourceArchiveItemsByArchiveId(archiveId: string, tx?: DbExecutor) {
+    await this.ensureArchivePackageSchema()
+    const executor = tx ?? db
+    return await executor
+      .select()
+      .from(archivePackageItem)
+      .where(and(
+        eq(archivePackageItem.packageId, archiveId),
+        eq(archivePackageItem.isDeleted, false)
+      ))
+      .orderBy(asc(archivePackageItem.sortOrder), asc(archivePackageItem.id))
+  }
+
+  static async insertResourceArchive(params: {
+    packageData: typeof archivePackage.$inferInsert
+    itemDataList: Array<typeof archivePackageItem.$inferInsert>
+  }, tx?: DbExecutor) {
+    await this.ensureArchivePackageSchema()
+    const executor = tx ?? db
+    await executor.insert(archivePackage).values(params.packageData)
+    if (params.itemDataList.length) {
+      await executor.insert(archivePackageItem).values(params.itemDataList)
+    }
+  }
+
+  static async restoreResourceArchive(archiveId: string, resourceIds: string[], tx?: DbExecutor) {
+    await this.ensureArchivePackageSchema()
+    const executor = tx ?? db
+    const normalizedResourceIds = resourceIds.map((item) => String(item ?? '').trim()).filter(Boolean)
+    if (normalizedResourceIds.length) {
+      await executor
+        .update(resource)
+        .set({
+          isDeleted: false,
+          missingStatus: false
+        })
+        .where(inArray(resource.id, normalizedResourceIds))
+    }
+    await executor
+      .update(archivePackageItem)
+      .set({
+        isDeleted: true
+      })
+      .where(eq(archivePackageItem.packageId, archiveId))
+    await executor
+      .update(archivePackage)
+      .set({
+        status: 'restored',
+        isDeleted: true
+      })
+      .where(eq(archivePackage.id, archiveId))
+  }
+
+  static async logicalDeleteResourceArchive(archiveId: string, tx?: DbExecutor) {
+    await this.ensureArchivePackageSchema()
+    const executor = tx ?? db
+    await executor
+      .update(archivePackageItem)
+      .set({
+        isDeleted: true
+      })
+      .where(eq(archivePackageItem.packageId, archiveId))
+    await executor
+      .update(archivePackage)
+      .set({
+        status: 'deleted',
+        isDeleted: true
+      })
+      .where(eq(archivePackage.id, archiveId))
+  }
+
+  static async listArchivedPackages() {
+    await this.ensureArchivePackageSchema()
+
+    const rows = await db
+      .select({
+        id: archivePackage.id,
+        packageTitle: archivePackage.packageTitle,
+        archivePath: archivePackage.archivePath,
+        archiveFormat: archivePackage.archiveFormat,
+        archiveLevel: archivePackage.archiveLevel,
+        passwordEnabled: archivePackage.passwordEnabled,
+        archivePassword: archivePackage.archivePassword,
+        sourceTotalSize: archivePackage.sourceTotalSize,
+        archiveSize: archivePackage.archiveSize,
+        resourceCount: archivePackage.resourceCount,
+        status: archivePackage.status,
+        archivedAt: archivePackage.archivedAt,
+        itemSourcePath: archivePackageItem.sourcePath,
+        itemResourceId: archivePackageItem.resourceId,
+        itemCoverPath: resource.coverPath,
+        title: resource.title,
+        categoryId: resource.categoryId,
+        categoryName: category.name,
+        categoryEmoji: category.emoji,
+        categoryPillColor: category.pillColor,
+      })
+      .from(archivePackage)
+      .innerJoin(archivePackageItem, and(
+        eq(archivePackageItem.packageId, archivePackage.id),
+        eq(archivePackageItem.isDeleted, false)
+      ))
+      .innerJoin(resource, eq(archivePackageItem.resourceId, resource.id))
+      .leftJoin(category, eq(resource.categoryId, category.id))
+      .where(eq(archivePackage.isDeleted, false))
+      .orderBy(desc(archivePackage.archivedAt), desc(archivePackage.id), asc(archivePackageItem.sortOrder))
+
+    const packageMap = new Map<string, {
+      id: string
+      resourceId: string
+      archivePath: string
+      archiveFormat: string
+      archiveLevel: number | null
+      passwordEnabled: boolean | null
+      archivePassword: string | null
+      sourcePath: string
+      sourceSize: number | null
+      archiveSize: number | null
+      resourceCount: number
+      status: string | null
+      archivedAt: Date | null
+      title: string
+      categoryId: string
+      categoryName: string
+      categoryEmoji: string
+      categoryColor: string
+      items: Array<{
+        resourceId: string
+        title: string
+        coverPath: string
+        sourcePath: string
+        categoryId: string
+        categoryName: string
+        categoryEmoji: string
+        categoryColor: string
+      }>
+    }>()
+
+    for (const row of rows) {
+      const packageId = String(row.id ?? '').trim()
+      if (!packageId) {
+        continue
+      }
+      const itemRecord = {
+        resourceId: String(row.itemResourceId ?? '').trim(),
+        title: String(row.title ?? '').trim() || '未命名资源',
+        coverPath: String(row.itemCoverPath ?? '').trim(),
+        sourcePath: String(row.itemSourcePath ?? '').trim(),
+        categoryId: String(row.categoryId ?? '').trim(),
+        categoryName: String(row.categoryName ?? '').trim() || '未分类',
+        categoryEmoji: String(row.categoryEmoji ?? '').trim(),
+        categoryColor: String(row.categoryPillColor ?? '').trim() || '#737373',
+      }
+
+      const existingPackage = packageMap.get(packageId)
+      if (existingPackage) {
+        existingPackage.items.push(itemRecord)
+        continue
+      }
+
+      packageMap.set(packageId, {
+        id: packageId,
+        resourceId: itemRecord.resourceId,
+        archivePath: String(row.archivePath ?? '').trim(),
+        archiveFormat: String(row.archiveFormat ?? '').trim(),
+        archiveLevel: row.archiveLevel ?? null,
+        passwordEnabled: row.passwordEnabled ?? null,
+        archivePassword: row.archivePassword ?? null,
+        sourcePath: itemRecord.sourcePath,
+        sourceSize: row.sourceTotalSize ?? null,
+        archiveSize: row.archiveSize ?? null,
+        resourceCount: Math.max(1, Number(row.resourceCount ?? 1)),
+        status: row.status ?? null,
+        archivedAt: row.archivedAt ?? null,
+        title: String(row.packageTitle ?? row.title ?? '').trim() || '未命名归档包',
+        categoryId: itemRecord.categoryId,
+        categoryName: itemRecord.categoryName,
+        categoryEmoji: itemRecord.categoryEmoji,
+        categoryColor: itemRecord.categoryColor,
+        items: [itemRecord]
+      })
+    }
+
+    return Array.from(packageMap.values())
   }
 
   static async getRunningResourceIdsByResourceIds(resourceIds: string[]) {

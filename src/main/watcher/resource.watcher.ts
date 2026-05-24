@@ -50,6 +50,104 @@ export class ResourceWatcher {
     return ResourceWatcher.instance
   }
 
+  async relocateMissingResourceNow(resourceId: string) {
+    const normalizedResourceId = String(resourceId ?? '').trim()
+    if (!normalizedResourceId) {
+      return {
+        type: 'warning' as const,
+        message: '资源ID无效'
+      }
+    }
+
+    if (!this.watcher) {
+      await this.start()
+    }
+
+    const resource = this.resourcesById.get(normalizedResourceId)
+    if (!resource) {
+      return {
+        type: 'warning' as const,
+        message: '当前资源未纳入监听或已被删除'
+      }
+    }
+
+    if (!resource.missingStatus) {
+      await this.markMissing(normalizedResourceId)
+    }
+
+    await this.scheduleRelocation(normalizedResourceId, 'manual')
+
+    const refreshedResource = this.resourcesById.get(normalizedResourceId)
+    if (refreshedResource && !refreshedResource.missingStatus) {
+      return {
+        type: 'success' as const,
+        message: '已重新定位到新的资源路径'
+      }
+    }
+
+    return {
+      type: 'warning' as const,
+      message: '未找到新的资源路径，请手动处理'
+    }
+  }
+
+  async relocateMissingResourcesNow(resourceIds: string[]) {
+    const normalizedResourceIds = Array.isArray(resourceIds)
+      ? Array.from(new Set(resourceIds.map((resourceId) => String(resourceId ?? '').trim()).filter(Boolean)))
+      : []
+
+    if (!normalizedResourceIds.length) {
+      return {
+        type: 'warning' as const,
+        message: '未选择有效的资源'
+      }
+    }
+
+    const results = await Promise.all(
+      normalizedResourceIds.map(async (resourceId) => {
+        const result = await this.relocateMissingResourceNow(resourceId)
+        return {
+          resourceId,
+          ...result
+        }
+      })
+    )
+
+    const successIds = results.filter((item) => item.type === 'success').map((item) => item.resourceId)
+    const failedItems = results.filter((item) => item.type !== 'success')
+
+    if (!failedItems.length) {
+      return {
+        type: 'success' as const,
+        message: `已完成 ${successIds.length} 项资源的重新扫描`,
+        data: {
+          successIds,
+          failedItems
+        }
+      }
+    }
+
+    if (!successIds.length) {
+      return {
+        type: 'warning' as const,
+        message: failedItems[0]?.message ?? '未找到新的资源路径，请手动处理',
+        data: {
+          successIds,
+          failedItems
+        }
+      }
+    }
+
+    return {
+      type: 'warning' as const,
+      message: `已成功 ${successIds.length} 项，未成功 ${failedItems.length} 项`,
+      data: {
+        successIds,
+        failedItems
+      }
+    }
+  }
+
   /**
    * 启动资源监听器。
    * - 读取数据库中的所有资源路径并建立监听
@@ -160,6 +258,33 @@ export class ResourceWatcher {
       })
 
     this.scheduleInitialMissingScan()
+  }
+
+  public async syncEverythingClientFromSettings() {
+    return this.refreshEverythingClient()
+  }
+
+  private async refreshEverythingClient() {
+    if (process.platform !== 'win32') {
+      this.everythingClient = {
+        available: false,
+        mode: '',
+        cliPath: '',
+        baseUrl: '',
+        username: '',
+        password: '',
+      }
+      return this.everythingClient
+    }
+
+    this.everythingClient = await EverythingService.detectClient()
+    logWatcher('everything client refreshed', {
+      available: this.everythingClient.available,
+      mode: this.everythingClient.mode,
+      cliPath: this.everythingClient.cliPath,
+      baseUrl: this.everythingClient.baseUrl,
+    })
+    return this.everythingClient
   }
 
   /**
@@ -352,10 +477,13 @@ export class ResourceWatcher {
       missingStatus: true,
     })
 
+    const everythingEnabled = await this.isEverythingEnabled()
     NotificationQueueService.getInstance().enqueue(
       'warning',
       '检测到资源失效',
-      `资源“${resource.fileName || path.basename(resource.basePath)}”已失效，正在尝试重新定位。`
+      everythingEnabled
+        ? `资源“${resource.fileName || path.basename(resource.basePath)}”已失效，正在尝试重新定位。`
+        : `资源“${resource.fileName || path.basename(resource.basePath)}”已失效，请手动处理。`
     )
   }
 
@@ -363,14 +491,14 @@ export class ResourceWatcher {
    * 为资源安排一次重定位任务。
    * 同一资源同一时间只允许存在一个重定位任务，避免重复扫描。
    */
-  private scheduleRelocation(resourceId: string) {
+  private scheduleRelocation(resourceId: string, mode: 'auto' | 'manual' = 'auto') {
     if (this.pendingRelocations.has(resourceId)) {
-      logWatcher('relocation already pending', { resourceId })
+      logWatcher('relocation already pending', { resourceId, mode })
       return this.pendingRelocations.get(resourceId)
     }
 
-    logWatcher('schedule relocation', { resourceId })
-    const task = this.relocateResource(resourceId)
+    logWatcher('schedule relocation', { resourceId, mode })
+    const task = this.relocateResource(resourceId, mode)
       .catch((error) => {
         logger.error(`relocate failed for ${resourceId}`, error)
       })
@@ -387,24 +515,39 @@ export class ResourceWatcher {
    * - 仅在 Everything 可用时尝试通过 marker 自动重定位
    * - Everything 不可用或查询失败时，只提示用户，不再执行本地扫盘
    */
-  private async relocateResource(resourceId: string) {
-    logWatcher('relocation waiting before scan', { resourceId, delayMs: 1500 })
+  private async relocateResource(resourceId: string, mode: 'auto' | 'manual' = 'auto') {
+    logWatcher('relocation waiting before scan', { resourceId, mode, delayMs: 1500 })
     await delay(1500)
 
     const resource = this.resourcesById.get(resourceId)
     if (!resource || !resource.missingStatus) {
       logWatcher('relocation skipped after delay', {
         resourceId,
+        mode,
         resourceFound: Boolean(resource),
         missingStatus: resource?.missingStatus ?? null,
       })
       return
     }
 
+    const everythingEnabled = await this.isEverythingEnabled()
+    if (mode === 'auto' && !everythingEnabled) {
+      logWatcher('relocation skipped: everything disabled for automatic relocation', {
+        resourceId,
+        fileName: resource.fileName,
+      })
+      return
+    }
+
+    if (everythingEnabled && mode === 'manual') {
+      await this.refreshEverythingClient()
+    }
+
     if (!this.everythingClient.available) {
-      if (!await this.isEverythingEnabled()) {
+      if (!everythingEnabled) {
         logWatcher('relocation skipped: everything disabled in settings', {
           resourceId,
+          mode,
           fileName: resource.fileName,
         })
         return
@@ -417,6 +560,7 @@ export class ResourceWatcher {
       )
       logWatcher('relocation skipped: everything unavailable', {
         resourceId,
+        mode,
         fileName: resource.fileName,
       })
       return
@@ -424,6 +568,7 @@ export class ResourceWatcher {
 
     logWatcher('relocation using everything', {
       resourceId,
+      mode,
       fileName: resource.fileName,
     })
     const relocatedBasePath = await this.findResourceWithEverything(resourceId, resource.fileName, resource.basePath)
@@ -458,6 +603,11 @@ export class ResourceWatcher {
    */
   private async findResourceWithEverything(resourceId: string, fileName: string | null, basePath: string) {
     try {
+      logWatcher('everything marker search started', {
+        resourceId,
+        currentBasePath: basePath,
+        expectedFileName: fileName,
+      })
       const markerPaths = await EverythingService.searchMarkerPaths(this.everythingClient, resourceId)
 
       logWatcher('everything search result', {
@@ -466,10 +616,24 @@ export class ResourceWatcher {
         markerPaths,
       })
 
+      if (!markerPaths.length) {
+        logWatcher('everything search returned no marker candidates', {
+          resourceId,
+          currentBasePath: basePath,
+          expectedFileName: fileName,
+        })
+      }
+
       for (const markerPath of markerPaths) {
-        const basePath = path.dirname(path.dirname(markerPath))
-        if (await validateMarkerCandidate(markerPath, resourceId, fileName, basePath)) {
-          return basePath
+        const candidateBasePath = path.dirname(path.dirname(markerPath))
+        logWatcher('validating marker candidate', {
+          resourceId,
+          markerPath,
+          candidateBasePath,
+          expectedFileName: fileName,
+        })
+        if (await validateMarkerCandidate(markerPath, resourceId, fileName, candidateBasePath)) {
+          return candidateBasePath
         }
       }
     } catch (error) {
@@ -846,9 +1010,21 @@ async function validateMarkerCandidate(
   const markerFileEntry = markerPayload.files.find((entry) => entry.name === fileName) ?? null
   const targetFilePath = path.join(basePath, fileName)
 
+  if (!markerFileEntry) {
+    logWatcher('marker matched but launch file entry missing in marker payload', {
+      resourceId,
+      markerPath,
+      expectedFileName: fileName,
+      markerFileNames: markerPayload.files.map((entry) => entry.name),
+    })
+  }
+
   if (!fs.existsSync(targetFilePath)) {
     logWatcher('marker matched but target file missing', {
       resourceId,
+      markerPath,
+      basePath,
+      expectedFileName: fileName,
       expectedFilePath: targetFilePath,
     })
     return false
@@ -863,6 +1039,8 @@ async function validateMarkerCandidate(
 
   logWatcher('marker fingerprint validation', {
     resourceId,
+    markerPath,
+    targetFilePath,
     fileName,
     matched,
   })
