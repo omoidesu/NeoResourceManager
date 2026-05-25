@@ -25,6 +25,7 @@ import type { ChildProcess } from 'child_process'
 import crypto from 'crypto'
 
 const fs = require('fs-extra')
+const originalFs = require('original-fs')
 const hidefile = require('hidefile')
 const ffmpegPath = require('ffmpeg-static') as string | null
 const ffprobeStatic = require('ffprobe-static') as { path?: string }
@@ -4228,6 +4229,7 @@ export class ResourceService {
     const queueCurrent = queuePositionIndex + 1
     const queueTotal = Math.max(queueSnapshot.length, queueCurrent, 1)
     let generatedArchivePath = ''
+    let insertedArchivePackageId = ''
     let cleanupPaths: string[] = []
     const queueItem = ResourceService.findArchiveQueueItem(queueItemId)
     if (!queueItem) {
@@ -4401,7 +4403,7 @@ export class ResourceService {
         return
       }
 
-      const sourceExists = await fs.pathExists(sourcePath)
+      const sourceExists = await pathExistsPhysical(sourcePath)
       if (!sourceExists) {
         await pushProgress({
           current: queueCurrent,
@@ -4542,21 +4544,6 @@ export class ResourceService {
       generatedArchivePath = await resolveArchiveOutputPath(archivePlan.outputPath)
       const archiveSize = await calculateArchiveOutputSize(generatedArchivePath)
 
-      await pushProgress({
-        current: queueCurrent,
-        total: queueTotal,
-        progress: 94,
-        message: `正在清理 ${resourceTitleRef.value} 的源文件`
-      })
-
-      await ResourceWatcher.getInstance().untrackResource(resourceId)
-      await removeResourceMarker({
-        id: resourceId,
-        basePath: existingResource.basePath,
-        fileName: existingResource.fileName ?? null
-      })
-      await fs.remove(sourcePath)
-
       const archivePackageId = generateId()
       await DatabaseService.insertResourceArchive({
         packageData: {
@@ -4588,6 +4575,22 @@ export class ResourceService {
           isDeleted: false
         }]
       })
+      insertedArchivePackageId = archivePackageId
+
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 94,
+        message: `正在清理 ${resourceTitleRef.value} 的源文件`
+      })
+
+      await ResourceWatcher.getInstance().untrackResource(resourceId)
+      await removeResourceMarker({
+        id: resourceId,
+        basePath: existingResource.basePath,
+        fileName: existingResource.fileName ?? null
+      })
+      await removePhysicalPath(sourcePath)
       await DatabaseService.logicalDeleteResource(resourceId)
 
       notificationQueue.pushResourceStateChanged({
@@ -4608,6 +4611,18 @@ export class ResourceService {
         archivePath: generatedArchivePath
       })
     } catch (error) {
+      if (insertedArchivePackageId) {
+        try {
+          await DatabaseService.logicalDeleteResourceArchive(insertedArchivePackageId)
+        } catch (cleanupError) {
+          ResourceService.logger.warn('archiveResource cleanup archive record failed', {
+            resourceId,
+            archivePackageId: insertedArchivePackageId,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          })
+        }
+      }
+
       if (generatedArchivePath) {
         try {
           await removeArchiveOutputs(generatedArchivePath)
@@ -4658,6 +4673,7 @@ export class ResourceService {
     const queueTotal = Math.max(queueSnapshot.length, queueCurrent, 1)
     const queueItem = ResourceService.findArchiveQueueItem(queueItemId)
     let generatedArchivePath = ''
+    let insertedArchivePackageId = ''
     let cleanupPaths: string[] = []
     if (!queueItem) {
       return
@@ -4840,7 +4856,7 @@ export class ResourceService {
           })
           return
         }
-        if (!await fs.pathExists(sourcePath)) {
+        if (!await pathExistsPhysical(sourcePath)) {
           await pushProgress({
             current: queueCurrent,
             total: queueTotal,
@@ -5001,24 +5017,6 @@ export class ResourceService {
       generatedArchivePath = await resolveArchiveOutputPath(archivePlan.outputPath)
       const archiveSize = await calculateArchiveOutputSize(generatedArchivePath)
 
-      await pushProgress({
-        current: queueCurrent,
-        total: queueTotal,
-        progress: 94,
-        message: `正在清理 ${packageTitle} 的源文件`,
-        categoryId
-      })
-
-      for (const target of targets) {
-        await ResourceWatcher.getInstance().untrackResource(target.resourceId)
-        await removeResourceMarker({
-          id: target.resourceId,
-          basePath: target.basePath,
-          fileName: target.fileName ?? null
-        })
-        await fs.remove(target.sourcePath)
-      }
-
       const archivePackageId = generateId()
       await DatabaseService.insertResourceArchive({
         packageData: {
@@ -5050,6 +5048,25 @@ export class ResourceService {
           isDeleted: false
         }))
       })
+      insertedArchivePackageId = archivePackageId
+
+      await pushProgress({
+        current: queueCurrent,
+        total: queueTotal,
+        progress: 94,
+        message: `正在清理 ${packageTitle} 的源文件`,
+        categoryId
+      })
+
+      for (const target of targets) {
+        await ResourceWatcher.getInstance().untrackResource(target.resourceId)
+        await removeResourceMarker({
+          id: target.resourceId,
+          basePath: target.basePath,
+          fileName: target.fileName ?? null
+        })
+        await removePhysicalPath(target.sourcePath)
+      }
       await DatabaseService.logicalDeleteResources(targets.map((item) => item.resourceId))
 
       for (const target of targets) {
@@ -5073,6 +5090,18 @@ export class ResourceService {
         categoryId
       })
     } catch (error) {
+      if (insertedArchivePackageId) {
+        try {
+          await DatabaseService.logicalDeleteResourceArchive(insertedArchivePackageId)
+        } catch (cleanupError) {
+          ResourceService.logger.warn('archiveResourcesAsPackage cleanup archive record failed', {
+            resourceIds,
+            archivePackageId: insertedArchivePackageId,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          })
+        }
+      }
+
       if (generatedArchivePath) {
         try {
           await removeArchiveOutputs(generatedArchivePath)
@@ -5328,7 +5357,7 @@ export class ResourceService {
           return
         }
 
-        if (await fs.pathExists(target.targetSourcePath)) {
+        if (await pathExistsPhysical(target.targetSourcePath)) {
           await pushProgress({
             current: queueCurrent,
             total: queueTotal,
@@ -5373,7 +5402,7 @@ export class ResourceService {
       try {
         for (const target of restoreTargets) {
           const extractedSourcePath = resolveArchiveExtractedItemPath(restoreTempDirectory, String(target.item.archiveEntryPath ?? ''), target.targetSourcePath)
-          if (!await fs.pathExists(extractedSourcePath)) {
+          if (!await pathExistsPhysical(extractedSourcePath)) {
             await pushProgress({
               current: queueCurrent,
               total: queueTotal,
@@ -5387,10 +5416,10 @@ export class ResourceService {
           }
 
           await fs.ensureDir(path.dirname(target.targetSourcePath))
-          await fs.move(extractedSourcePath, target.targetSourcePath, { overwrite: false })
+          await movePhysicalPath(extractedSourcePath, target.targetSourcePath)
         }
       } finally {
-        await fs.remove(restoreTempDirectory)
+        await removePhysicalPath(restoreTempDirectory)
       }
 
       await pushProgress({
@@ -5462,9 +5491,9 @@ export class ResourceService {
         archivePath
       })
     } catch (error) {
-      if (sourcePath && await fs.pathExists(sourcePath)) {
+      if (sourcePath && await pathExistsPhysical(sourcePath)) {
         try {
-          await fs.remove(sourcePath)
+          await removePhysicalPath(sourcePath)
         } catch (cleanupError) {
           ResourceService.logger.warn('restoreArchivedPackage cleanup partial restore failed', {
             archiveId,
@@ -9864,7 +9893,7 @@ async function extractArchivedPackageToDirectory(options: {
       }
     )
 
-    const extractedEntries = await fs.readdir(tempDirectory)
+    const extractedEntries = await originalFs.promises.readdir(tempDirectory)
     const tarFileName = extractedEntries.find((entry) => entry.toLowerCase().endsWith('.tar')) ?? extractedEntries[0]
     if (!tarFileName) {
       throw new Error('解压 tar.xz 后未找到 tar 文件')
@@ -9884,7 +9913,7 @@ async function extractArchivedPackageToDirectory(options: {
       }
     )
   } finally {
-    await fs.remove(tempDirectory)
+    await removePhysicalPath(tempDirectory)
   }
 }
 
@@ -10067,17 +10096,72 @@ async function resolveArchiveOutputPath(outputPath: string) {
   throw new Error('压缩完成后未找到归档包')
 }
 
+async function pathExistsPhysical(targetPath: string) {
+  if (!targetPath) {
+    return false
+  }
+
+  try {
+    await originalFs.promises.access(targetPath, originalFs.constants.F_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function removePhysicalPath(targetPath: string) {
+  if (!targetPath || !await pathExistsPhysical(targetPath)) {
+    return
+  }
+
+  await originalFs.promises.rm(targetPath, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100
+  })
+}
+
+async function movePhysicalPath(sourcePath: string, targetPath: string) {
+  if (!sourcePath || !targetPath || !await pathExistsPhysical(sourcePath)) {
+    return
+  }
+
+  if (await pathExistsPhysical(targetPath)) {
+    throw new Error(`目标路径已存在，无法还原：${targetPath}`)
+  }
+
+  try {
+    await originalFs.promises.rename(sourcePath, targetPath)
+    return
+  } catch (error) {
+    const errorCode = typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: string }).code ?? '')
+      : ''
+    if (errorCode !== 'EXDEV') {
+      throw error
+    }
+  }
+
+  await originalFs.promises.cp(sourcePath, targetPath, {
+    recursive: true,
+    errorOnExist: true,
+    force: false
+  })
+  await removePhysicalPath(sourcePath)
+}
+
 async function calculateDirectorySize(targetPath: string): Promise<number | null> {
-  if (!targetPath || !await fs.pathExists(targetPath)) {
+  if (!targetPath || !await pathExistsPhysical(targetPath)) {
     return null
   }
 
-  const stat = await fs.stat(targetPath)
+  const stat = await originalFs.promises.stat(targetPath)
   if (!stat.isDirectory()) {
     return stat.size
   }
 
-  const entries = await fs.readdir(targetPath)
+  const entries = await originalFs.promises.readdir(targetPath)
   let totalSize = 0
   for (const entry of entries) {
     const childPath = path.join(targetPath, entry)

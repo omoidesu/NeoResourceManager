@@ -204,6 +204,10 @@ const calculateProgress = (): number => {
     if (viewport) {
       const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
       chunkScrollProgress = maxScrollTop ? Math.max(0, Math.min(1, viewport.scrollTop / maxScrollTop)) : 0
+
+      if (!chunk.hasNext && (!maxScrollTop || viewport.scrollTop >= maxScrollTop - 1)) {
+        return 1
+      }
     }
 
     return Math.max(0, Math.min(1, (chunk.offset + chunkBytes * chunkScrollProgress) / chunk.fileSize))
@@ -216,7 +220,7 @@ const calculateProgress = (): number => {
 
   const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
   if (!maxScrollTop) {
-    return 0
+    return content.value.trim() ? 1 : 0
   }
 
   return Math.max(0, Math.min(1, viewport.scrollTop / maxScrollTop))
@@ -812,6 +816,7 @@ onBeforeUnmount(() => {
 }
 
 .text-reader__title {
+  flex: 1 1 auto;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -835,7 +840,8 @@ onBeforeUnmount(() => {
 }
 
 .text-reader__actions {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -849,7 +855,7 @@ onBeforeUnmount(() => {
 }
 
 .text-reader__encoding span {
-  max-width: 94px;
+  max-width: 168px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

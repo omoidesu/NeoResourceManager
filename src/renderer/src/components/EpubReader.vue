@@ -35,6 +35,8 @@ const emit = defineEmits<{
 type ReaderState = 'idle' | 'loading' | 'ready' | 'error'
 type EpubLocationPoint = {
   cfi?: string
+  index?: number
+  location?: number
   percentage?: number
   displayed?: {
     page?: number
@@ -43,7 +45,16 @@ type EpubLocationPoint = {
 }
 type EpubLocationLike = {
   start?: EpubLocationPoint
+  end?: EpubLocationPoint
   percentage?: number
+}
+type StoredEpubLocation = {
+  cfi: string
+  index: number
+  page: number
+  total: number
+  progress: number
+  spinePageTotals: Record<number, number>
 }
 
 const state = ref<ReaderState>('idle')
@@ -53,13 +64,20 @@ const progress = ref(0)
 const fontSize = ref(18)
 const pageLabel = ref('')
 const locationsReady = ref(false)
+const spineItemCount = ref(0)
+const spinePageTotals = ref<Record<number, number>>({})
 const selectedReaderBackground = ref('')
 let book: Book | null = null
 let rendition: Rendition | null = null
 let loadRequestId = 0
 let progressTimer: number | null = null
+let resizeTimer: number | null = null
 let pageTurnInProgress = false
 let pageTurnCooldownTimer: number | null = null
+let lastKnownCfi = ''
+let lastKnownSpineIndex = 0
+let lastKnownPage = 1
+let resizeRestoreInProgress = false
 
 const appIsDark = inject<ComputedRef<boolean>>('appIsDark', computed(() => true))
 const normalizedFilePath = computed(() => String(props.filePath ?? '').trim())
@@ -68,7 +86,7 @@ const displayTitle = computed(() => props.title || fileName.value || 'EPUB 阅�
 const progressText = computed(
   () => `${Math.round(Math.max(0, Math.min(1, progress.value)) * 100)}%`
 )
-const progressLabel = computed(() => (locationsReady.value ? progressText.value : '进度索引生成中'))
+const progressLabel = computed(() => progressText.value)
 const fontSizeText = computed(() => `${fontSize.value}px`)
 const {
   readerBackgroundOptions,
@@ -79,6 +97,53 @@ const {
 
 const getLocationStart = (location: EpubLocationLike | EpubLocationPoint): EpubLocationPoint => {
   return 'start' in location && location.start ? location.start : location
+}
+
+const getProgressStorageKey = (): string => {
+  return `neo-resource-manager:epub-reader:cfi:${normalizedFilePath.value}`
+}
+
+const readStoredLocation = (): Partial<StoredEpubLocation> => {
+  try {
+    const value = window.localStorage.getItem(getProgressStorageKey()) || ''
+    if (!value) {
+      return {}
+    }
+
+    if (value.startsWith('epubcfi(')) {
+      return { cfi: value }
+    }
+
+    return JSON.parse(value) as Partial<StoredEpubLocation>
+  } catch {
+    return {}
+  }
+}
+
+const writeStoredLocation = (location: EpubLocationLike): void => {
+  try {
+    const start = location?.start
+    const cfi = String(start?.cfi ?? '').trim()
+    const normalizedCfi = String(cfi ?? '').trim()
+    const index = getLocationSpineIndex(location)
+    const page = getLocationDisplayedPage(location)
+    const total = getLocationDisplayedTotal(location)
+    if (!normalizedCfi && (!Number.isFinite(index) || page <= 0)) {
+      return
+    }
+
+    const payload: StoredEpubLocation = {
+      cfi: normalizedCfi,
+      index: Number.isFinite(index) ? Math.max(0, Math.floor(index)) : 0,
+      page: Math.max(1, Math.floor(page || 1)),
+      total: Math.max(1, Math.floor(total || 1)),
+      progress: Math.max(0, Math.min(1, progress.value)),
+      spinePageTotals: spinePageTotals.value
+    }
+    window.localStorage.setItem(getProgressStorageKey(), JSON.stringify(payload))
+  } catch {
+    // ignore local resume cache failures
+  }
 }
 
 const clearProgressTimer = (): void => {
@@ -96,6 +161,13 @@ const clearPageTurnLock = (): void => {
   pageTurnInProgress = false
 }
 
+const clearResizeTimer = (): void => {
+  if (resizeTimer) {
+    window.clearTimeout(resizeTimer)
+    resizeTimer = null
+  }
+}
+
 const emitProgress = (nextProgress = progress.value): void => {
   const normalizedProgress = Math.max(0, Math.min(1, Number(nextProgress ?? 0)))
   progress.value = normalizedProgress
@@ -110,19 +182,128 @@ const scheduleProgressSave = (nextProgress: number): void => {
   }, 400)
 }
 
+const getLocationSpineIndex = (location: EpubLocationLike | EpubLocationPoint): number => {
+  const start = getLocationStart(location)
+  const startIndex = Number(start?.index)
+  if (Number.isFinite(startIndex) && startIndex >= 0) {
+    return Math.floor(startIndex)
+  }
+
+  const cfi = String(start?.cfi ?? '').trim()
+  if (book?.spine && cfi) {
+    const section = book.spine.get(cfi) as unknown as { index?: number } | null
+    const sectionIndex = Number(section?.index)
+    if (Number.isFinite(sectionIndex) && sectionIndex >= 0) {
+      return Math.floor(sectionIndex)
+    }
+  }
+
+  return lastKnownSpineIndex
+}
+
+const getLocationDisplayedPage = (location: EpubLocationLike | EpubLocationPoint): number => {
+  const start = getLocationStart(location)
+  return Math.max(0, Number(start?.displayed?.page ?? 0))
+}
+
+const getLocationDisplayedTotal = (location: EpubLocationLike | EpubLocationPoint): number => {
+  const start = getLocationStart(location)
+  return Math.max(0, Number(start?.displayed?.total ?? 0))
+}
+
+const updateSpinePageTotal = (location: EpubLocationLike | EpubLocationPoint): void => {
+  const index = getLocationSpineIndex(location)
+  const displayedTotal = getLocationDisplayedTotal(location)
+  if (!Number.isFinite(index) || index < 0 || displayedTotal <= 0) {
+    return
+  }
+
+  spinePageTotals.value = {
+    ...spinePageTotals.value,
+    [index]: Math.max(Number(spinePageTotals.value[index] ?? 0), Math.floor(displayedTotal))
+  }
+}
+
+const resolveSpinePageProgress = (location: EpubLocationLike | EpubLocationPoint): number | null => {
+  updateSpinePageTotal(location)
+
+  const index = getLocationSpineIndex(location)
+  const total = Math.max(0, Number(spineItemCount.value ?? 0))
+  if (!Number.isFinite(index) || index < 0 || total <= 0) {
+    return null
+  }
+
+  const currentPage = Math.max(1, getLocationDisplayedPage(location) || 1)
+  const currentTotal = Math.max(1, getLocationDisplayedTotal(location) || Number(spinePageTotals.value[index] ?? 1))
+  const totals = Array.from({ length: total }, (_, itemIndex) => {
+    if (itemIndex === index) {
+      return currentTotal
+    }
+
+    return Math.max(1, Number(spinePageTotals.value[itemIndex] ?? 1))
+  })
+  const totalPages = totals.reduce((sum, itemTotal) => sum + itemTotal, 0)
+  if (totalPages <= 1) {
+    return 0
+  }
+
+  const completedBefore = totals
+    .slice(0, Math.max(0, Math.min(index, total)))
+    .reduce((sum, itemTotal) => sum + itemTotal, 0)
+  const pageOffset = Math.max(0, Math.min(currentTotal - 1, currentPage - 1))
+
+  return Math.max(0, Math.min(1, (completedBefore + pageOffset) / Math.max(1, totalPages - 1)))
+}
+
+const resolveSpinePageTarget = (nextProgress: number): { index: number; page: number } | null => {
+  const total = Math.max(0, Number(spineItemCount.value ?? 0))
+  if (total <= 0) {
+    return null
+  }
+
+  const totals = Array.from({ length: total }, (_, itemIndex) => Math.max(1, Number(spinePageTotals.value[itemIndex] ?? 1)))
+  const totalPages = totals.reduce((sum, itemTotal) => sum + itemTotal, 0)
+  if (totalPages <= 0) {
+    return null
+  }
+
+  let targetOffset = Math.round(Math.max(0, Math.min(1, nextProgress)) * Math.max(0, totalPages - 1))
+  for (let index = 0; index < totals.length; index += 1) {
+    const itemTotal = totals[index]
+    if (targetOffset < itemTotal || index === totals.length - 1) {
+      return {
+        index,
+        page: Math.max(1, Math.min(itemTotal, targetOffset + 1))
+      }
+    }
+    targetOffset -= itemTotal
+  }
+
+  return null
+}
+
+const hasUsefulSpinePageTotals = (): boolean => {
+  return Object.values(spinePageTotals.value).some((value) => Number(value) > 1)
+}
+
 const resolveLocationProgress = (location: EpubLocationLike | EpubLocationPoint): number => {
   const start = getLocationStart(location)
   const cfi = String(start?.cfi ?? '').trim()
   const locationPercentage = Number(start?.percentage ?? location?.percentage)
+  const spinePageProgress = resolveSpinePageProgress(location)
+
+  if (spinePageProgress !== null) {
+    return spinePageProgress
+  }
 
   if (book?.locations && cfi) {
     const percentage = Number(book.locations.percentageFromCfi(cfi))
-    if (Number.isFinite(percentage)) {
+    if (Number.isFinite(percentage) && percentage > 0.001) {
       return Math.max(0, Math.min(1, percentage))
     }
   }
 
-  if (Number.isFinite(locationPercentage)) {
+  if (Number.isFinite(locationPercentage) && locationPercentage > 0.001) {
     return Math.max(0, Math.min(1, locationPercentage))
   }
 
@@ -130,8 +311,27 @@ const resolveLocationProgress = (location: EpubLocationLike | EpubLocationPoint)
 }
 
 const syncLocation = (location: EpubLocationLike): void => {
-  scheduleProgressSave(resolveLocationProgress(location))
+  if (resizeRestoreInProgress) {
+    return
+  }
+
   const start = location?.start
+  const cfi = String(start?.cfi ?? '').trim()
+  if (cfi) {
+    lastKnownCfi = cfi
+  }
+  const index = Number(start?.index)
+  const nextIndex = Number.isFinite(index) && index >= 0 ? index : getLocationSpineIndex(location)
+  if (Number.isFinite(nextIndex) && nextIndex >= 0) {
+    lastKnownSpineIndex = nextIndex
+  }
+  const nextPage = getLocationDisplayedPage(location)
+  if (nextPage > 0) {
+    lastKnownPage = Math.floor(nextPage)
+  }
+
+  scheduleProgressSave(resolveLocationProgress(location))
+  writeStoredLocation(location)
   const displayedPage = Number(start?.displayed?.page ?? 0)
   const displayedTotal = Number(start?.displayed?.total ?? 0)
   pageLabel.value =
@@ -234,8 +434,64 @@ const waitForViewerSize = async (host: HTMLDivElement): Promise<void> => {
   }
 }
 
+const waitForRenditionPaint = (): Promise<void> =>
+  new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => resolve())
+    })
+  })
+
+const getRenditionPageSize = (): number => {
+  const manager = (rendition as unknown as {
+    manager?: {
+      layout?: {
+        delta?: number
+        pageWidth?: number
+        width?: number
+      }
+    }
+  } | null)?.manager
+  const layout = manager?.layout
+  return Math.max(
+    1,
+    Number(layout?.delta ?? 0) ||
+      Number(layout?.pageWidth ?? 0) ||
+      Number(layout?.width ?? 0) ||
+      Number(viewerRef.value?.clientWidth ?? 0) ||
+      1
+  )
+}
+
+const displaySpinePage = async (spineIndex: number, page: number): Promise<void> => {
+  if (!rendition || state.value === 'error') {
+    return
+  }
+
+  const total = Math.max(0, Number(spineItemCount.value ?? 0))
+  const targetIndex = total > 0
+    ? Math.max(0, Math.min(total - 1, Math.floor(Number(spineIndex ?? 0) || 0)))
+    : Math.max(0, Math.floor(Number(spineIndex ?? 0) || 0))
+  const targetPage = Math.max(1, Math.floor(Number(page ?? 1) || 1))
+
+  await rendition.display(targetIndex)
+  await waitForRenditionPaint()
+
+  const pageSize = getRenditionPageSize()
+  ;(rendition as unknown as { moveTo: (offset: { left: number; top: number }) => void }).moveTo({
+    left: (targetPage - 1) * pageSize,
+    top: 0
+  })
+  await waitForRenditionPaint()
+
+  if (typeof rendition.reportLocation === 'function') {
+    resizeRestoreInProgress = false
+    await rendition.reportLocation()
+  }
+}
+
 const clearReader = (): void => {
   clearProgressTimer()
+  clearResizeTimer()
   clearPageTurnLock()
   if (rendition) {
     rendition.destroy()
@@ -256,8 +512,14 @@ const resetReader = (): void => {
   errorMessage.value = ''
   pageLabel.value = ''
   locationsReady.value = false
+  spineItemCount.value = 0
+  spinePageTotals.value = {}
   progress.value = Math.max(0, Math.min(1, Number(props.initialProgress ?? 0)))
   fontSize.value = 18
+  lastKnownCfi = ''
+  lastKnownSpineIndex = 0
+  lastKnownPage = 1
+  resizeRestoreInProgress = false
 }
 
 const displayInitialLocationForLoad = async (): Promise<void> => {
@@ -267,18 +529,37 @@ const displayInitialLocationForLoad = async (): Promise<void> => {
 
   const initialProgress = Math.max(0, Math.min(1, Number(props.initialProgress ?? 0)))
   progress.value = initialProgress
+  const storedLocation = readStoredLocation()
+  if (storedLocation.spinePageTotals && typeof storedLocation.spinePageTotals === 'object') {
+    spinePageTotals.value = {
+      ...spinePageTotals.value,
+      ...storedLocation.spinePageTotals
+    }
+  }
+
+  const storedIndex = Number(storedLocation.index)
+  const storedPage = Number(storedLocation.page)
+  if (Number.isFinite(storedIndex) && storedIndex >= 0 && Number.isFinite(storedPage) && storedPage > 1) {
+    await displaySpinePage(storedIndex, storedPage)
+    return
+  }
+
+  const storedCfi = String(storedLocation.cfi ?? '').trim()
+  if (storedCfi) {
+    try {
+      await rendition.display(storedCfi)
+      lastKnownCfi = storedCfi
+      return
+    } catch {
+      // fall back to percentage based restore
+    }
+  }
 
   if (initialProgress > 0) {
-    try {
-      await book.locations.generate(2400)
-      locationsReady.value = true
-      const cfi = book.locations.cfiFromPercentage(initialProgress)
-      if (cfi) {
-        await rendition.display(cfi)
-        return
-      }
-    } catch {
-      locationsReady.value = false
+    const total = Math.max(0, Number(spineItemCount.value ?? 0))
+    if (total > 0) {
+      await rendition.display(Math.max(0, Math.min(total - 1, Math.floor(initialProgress * total))))
+      return
     }
   }
 
@@ -293,7 +574,12 @@ const generateLocationsInBackground = async (requestId: number): Promise<void> =
   }
 
   try {
-    await currentBook.locations.generate(2400)
+    await Promise.race([
+      currentBook.locations.generate(2400),
+      new Promise((_, reject) => {
+        window.setTimeout(() => reject(new Error('EPUB 进度索引生成超时')), 5000)
+      })
+    ])
     if (requestId !== loadRequestId || currentBook !== book || currentRendition !== rendition) {
       return
     }
@@ -354,6 +640,15 @@ const loadEpub = async (): Promise<void> => {
     }
 
     book = nextBook
+    const spineItems = await nextBook.loaded.spine.catch(() => [])
+    if (requestId !== loadRequestId) {
+      nextBook.destroy()
+      return
+    }
+    spineItemCount.value = Array.isArray(spineItems) ? spineItems.length : 0
+    if (!spineItemCount.value) {
+      spineItemCount.value = Number((nextBook.spine as unknown as { spineItems?: unknown[] })?.spineItems?.length ?? 0)
+    }
     await nextTick()
     await waitForViewerSize(host)
 
@@ -439,19 +734,29 @@ const selectReaderBackground = (color: string): void => {
 const handleProgressUpdate = async (nextProgress: number): Promise<void> => {
   const normalizedProgress = Math.max(0, Math.min(1, Number(nextProgress ?? 0)))
   progress.value = normalizedProgress
-  if (
-    !book ||
-    !rendition ||
-    state.value !== 'ready' ||
-    !locationsReady.value ||
-    book.locations.length() <= 0
-  ) {
+  if (!book || !rendition || state.value !== 'ready') {
     return
   }
 
-  const cfi = book.locations.cfiFromPercentage(normalizedProgress)
+  if (hasUsefulSpinePageTotals()) {
+    const target = resolveSpinePageTarget(normalizedProgress)
+    if (target) {
+      await displaySpinePage(target.index, target.page)
+      return
+    }
+  }
+
+  const cfi = locationsReady.value && book.locations.length() > 0
+    ? book.locations.cfiFromPercentage(normalizedProgress)
+    : ''
   if (cfi) {
     await rendition.display(cfi)
+    return
+  }
+
+  const total = Math.max(0, Number(spineItemCount.value ?? 0))
+  if (total > 0) {
+    await rendition.display(Math.max(0, Math.min(total - 1, Math.floor(normalizedProgress * total))))
   }
 }
 
@@ -472,13 +777,63 @@ const openWithDefaultApp = async (): Promise<void> => {
   await window.api.dialog.openPath(normalizedFilePath.value)
 }
 
+const restoreRenditionPosition = async (
+  targetCfi: string,
+  targetIndex: number,
+  targetPage: number,
+  targetProgress: number
+): Promise<void> => {
+  if (!book || !rendition || state.value !== 'ready') {
+    return
+  }
+
+  if (Number.isFinite(targetIndex) && targetIndex >= 0 && Number.isFinite(targetPage) && targetPage > 1) {
+    await displaySpinePage(targetIndex, targetPage)
+    return
+  }
+
+  if (targetCfi) {
+    resizeRestoreInProgress = false
+    await rendition.display(targetCfi)
+    return
+  }
+
+  const cfi = locationsReady.value && book.locations.length() > 0
+    ? book.locations.cfiFromPercentage(Math.max(0, Math.min(1, targetProgress)))
+    : ''
+  if (cfi) {
+    resizeRestoreInProgress = false
+    await rendition.display(cfi)
+    return
+  }
+
+  const total = Math.max(0, Number(spineItemCount.value ?? 0))
+  if (total > 0 && Number.isFinite(targetIndex)) {
+    resizeRestoreInProgress = false
+    await rendition.display(Math.max(0, Math.min(total - 1, Math.floor(targetIndex))))
+  }
+}
+
 const handleResize = (): void => {
   const host = viewerRef.value
   if (!host || !rendition || typeof rendition.resize !== 'function') {
     return
   }
 
+  const targetCfi = lastKnownCfi
+  const targetIndex = lastKnownSpineIndex
+  const targetPage = lastKnownPage
+  const targetProgress = progress.value
+  resizeRestoreInProgress = true
   rendition.resize(Math.max(1, host.clientWidth), Math.max(1, host.clientHeight))
+
+  clearResizeTimer()
+  resizeTimer = window.setTimeout(() => {
+    resizeTimer = null
+    void restoreRenditionPosition(targetCfi, targetIndex, targetPage, targetProgress).finally(() => {
+      resizeRestoreInProgress = false
+    })
+  }, 120)
 }
 
 const handleKeydown = (event: KeyboardEvent): void => {

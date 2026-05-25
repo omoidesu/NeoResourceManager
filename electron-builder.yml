@@ -48,6 +48,8 @@ asarUnpack:
 extraResources:
   - from: drizzle
     to: drizzle
+  - from: resources/bin/7z.exe
+    to: bin/7z.exe
 extraFiles:
   - from: plugin
     to: plugin
