@@ -5,6 +5,8 @@ directories:
 afterPack: scripts/after-pack-prune-media-binaries.cjs
 files:
   - package.json
+  - LICENSE
+  - THIRD_PARTY_NOTICES.md
   - out/**
   - node_modules/**
   - '!**/.vscode/*'
