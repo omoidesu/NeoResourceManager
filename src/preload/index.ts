@@ -5,6 +5,15 @@ import {ResourceForm} from "../main/model/models";
 import type { AppNotificationMessage, BatchImportProgressMessage, ResourceArchiveProgressMessage, ResourceStateChangedMessage } from '../main/service/notification-queue.service'
 import type { WebsiteCoverProgressMessage } from '../main/service/notification-queue.service'
 
+type VideoTranscodeFailedMessage = {
+  sessionId: string
+  filePath: string
+  message: string
+  code?: number | null
+  signal?: string | null
+  stderr?: string
+}
+
 const sendRendererLog = (level: 'debug' | 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>) => {
   try {
     ipcRenderer.send('renderer:log', {
@@ -121,7 +130,8 @@ const api = {
     getImageFileUrl: (filePath: string) => ipcRenderer.invoke('dialog:get-image-file-url', filePath),
     getFileUrl: (filePath: string) => ipcRenderer.invoke('dialog:get-file-url', filePath),
     getAudioPlaybackUrl: (filePath: string) => ipcRenderer.invoke('dialog:get-audio-playback-url', filePath),
-    getVideoPlaybackUrl: (filePath: string, startTime?: number) => ipcRenderer.invoke('dialog:get-video-playback-url', filePath, startTime),
+    getVideoPlaybackUrl: (filePath: string, startTime?: number, fastSeek?: boolean, sessionId?: string) =>
+      ipcRenderer.invoke('dialog:get-video-playback-url', filePath, startTime, fastSeek, sessionId),
     readTextFile: (filePath: string, encoding?: string) => ipcRenderer.invoke('dialog:read-text-file', filePath, encoding),
     getTextFileInfo: (filePath: string) => ipcRenderer.invoke('dialog:get-text-file-info', filePath),
     readTextFileChunk: (filePath: string, options?: { offset?: number; length?: number; encoding?: string }) =>
@@ -254,10 +264,10 @@ const api = {
       ipcRenderer.invoke('service:archive-resources-as-package', resourceIds, packageTitle),
     listArchivedPackages: () =>
       ipcRenderer.invoke('service:list-archived-packages'),
-    restoreArchivedPackage: (archiveId: string) =>
-      ipcRenderer.invoke('service:restore-archived-package', archiveId),
-    restoreArchivedPackages: (archiveIds: string[]) =>
-      ipcRenderer.invoke('service:restore-archived-packages', archiveIds),
+    restoreArchivedPackage: (archiveId: string, options?: { restoreDirectory?: string }) =>
+      ipcRenderer.invoke('service:restore-archived-package', archiveId, options),
+    restoreArchivedPackages: (archiveIds: string[], options?: { restoreDirectory?: string }) =>
+      ipcRenderer.invoke('service:restore-archived-packages', archiveIds, options),
     deleteArchivedPackage: (archiveId: string) =>
       ipcRenderer.invoke('service:delete-archived-package', archiveId),
     deleteArchivedPackages: (archiveIds: string[]) =>
@@ -301,6 +311,20 @@ const api = {
         ipcRenderer.removeListener('service:resource-state-changed', wrappedListener)
       }
     },
+    onArchivePackageStateChanged: (listener: (message: import('../main/service/notification-queue.service').ArchivePackageStateChangedMessage) => void) => {
+      const wrappedListener = (
+        _event: Electron.IpcRendererEvent,
+        message: import('../main/service/notification-queue.service').ArchivePackageStateChangedMessage
+      ) => {
+        listener(message)
+      }
+
+      ipcRenderer.on('service:archive-package-state-changed', wrappedListener)
+
+      return () => {
+        ipcRenderer.removeListener('service:archive-package-state-changed', wrappedListener)
+      }
+    },
     onVideoFrameCaptureShortcut: (listener: () => void) => {
       const wrappedListener = () => {
         listener()
@@ -310,6 +334,17 @@ const api = {
 
       return () => {
         ipcRenderer.removeListener('service:video-frame-capture-shortcut', wrappedListener)
+      }
+    },
+    onVideoTranscodeFailed: (listener: (message: VideoTranscodeFailedMessage) => void) => {
+      const wrappedListener = (_event: Electron.IpcRendererEvent, message: VideoTranscodeFailedMessage) => {
+        listener(message)
+      }
+
+      ipcRenderer.on('video-transcode:failed', wrappedListener)
+
+      return () => {
+        ipcRenderer.removeListener('video-transcode:failed', wrappedListener)
       }
     },
     onBatchImportProgress: (listener: (message: BatchImportProgressMessage) => void) => {

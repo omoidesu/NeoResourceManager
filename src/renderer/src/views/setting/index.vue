@@ -3,7 +3,7 @@ import { computed, inject, onMounted, ref } from 'vue'
 import type { ComputedRef } from 'vue'
 import { NButton, NCard, NForm, NFormItem, NGrid, NGi, NInput, NInputNumber, NSelect, NSpace, NSwitch } from 'naive-ui'
 import { notify } from '../../utils/notification'
-import { PanicMode, PictureReadScrollMode, Settings } from '../../../../common/constants'
+import { PanicMode, PictureReadScrollMode, Settings, VideoTranscodeMode } from '../../../../common/constants'
 
 type SettingItem = typeof Settings[keyof typeof Settings]
 
@@ -32,6 +32,13 @@ const panicModeOptions = [
   { label: '打开网址', value: PanicMode.OPEN_URL },
   { label: '系统更新', value: PanicMode.SYSTEM_UPDATING },
   { label: '系统崩溃', value: PanicMode.SYSTEM_CRASH }
+]
+
+const videoTranscodeModeOptions = [
+  { label: '自动（优先硬件，必要时 CPU）', value: VideoTranscodeMode.AUTO },
+  { label: '仅硬件转码', value: VideoTranscodeMode.HARDWARE_ONLY },
+  { label: '仅 CPU 转码', value: VideoTranscodeMode.CPU_ONLY },
+  { label: '禁用转码', value: VideoTranscodeMode.DISABLED }
 ]
 
 const appearanceSettings = [
@@ -76,7 +83,11 @@ const proxySettings = [
 
 const playbackSettings = [
   Settings.AUDIO_PLAYBACK_RESUME_RESTART_THRESHOLD,
-  Settings.VIDEO_PLAYBACK_RESUME_RESTART_THRESHOLD
+  Settings.VIDEO_PLAYBACK_RESUME_RESTART_THRESHOLD,
+  Settings.VIDEO_ALLOW_AUTO_REMUX,
+  Settings.VIDEO_TRANSCODE_MODE,
+  Settings.VIDEO_FULL_CACHE_TRANSCODE_MAX_MB,
+  Settings.VIDEO_SHOW_PLAYBACK_MODE
 ]
 
 const apiSettings = [
@@ -95,7 +106,9 @@ const booleanSettingNames = [
   Settings.USE_EVERYTHING_HTTP.name,
   Settings.USE_EVERYTHING_CLI.name,
   Settings.ENABLE_PROXY.name,
-  Settings.BLUR_ALL_IMAGES.name
+  Settings.BLUR_ALL_IMAGES.name,
+  Settings.VIDEO_ALLOW_AUTO_REMUX.name,
+  Settings.VIDEO_SHOW_PLAYBACK_MODE.name
 ] as string[]
 const everythingSettingNames = new Set<string>(everythingSettings.map((setting) => setting.name))
 
@@ -123,6 +136,7 @@ const numberSettingNames = new Set<string>([
   Settings.ARCHIVE_SPLIT_SIZE_CUSTOM_MB.name,
   Settings.AUDIO_PLAYBACK_RESUME_RESTART_THRESHOLD.name,
   Settings.VIDEO_PLAYBACK_RESUME_RESTART_THRESHOLD.name,
+  Settings.VIDEO_FULL_CACHE_TRANSCODE_MAX_MB.name,
   Settings.API_PORT.name
 ])
 
@@ -173,6 +187,8 @@ const getSelectOptions = (setting: SettingItem) => {
       return pictureReadModeOptions
     case Settings.PANIC_MODE.name:
       return panicModeOptions
+    case Settings.VIDEO_TRANSCODE_MODE.name:
+      return videoTranscodeModeOptions
     case Settings.ARCHIVE_FORMAT.name:
       return [...archiveFormatOptions]
     case Settings.ARCHIVE_LEVEL.name:
@@ -225,6 +241,8 @@ const getSettingPlaceholder = (setting: SettingItem) => {
     case Settings.AUDIO_PLAYBACK_RESUME_RESTART_THRESHOLD.name:
     case Settings.VIDEO_PLAYBACK_RESUME_RESTART_THRESHOLD.name:
       return '0 到 100，默认 95'
+    case Settings.VIDEO_FULL_CACHE_TRANSCODE_MAX_MB.name:
+      return '默认 1024，设为 0 表示禁止完整缓存转码'
     case Settings.API_PORT.name:
       return '默认 14518，重启后生效'
     default:
@@ -341,6 +359,18 @@ const handlePickPath = (setting: SettingItem) => {
   void handleSelectExe(setting)
 }
 
+const getNumberSettingMax = (setting: SettingItem) => {
+  if (setting.name === Settings.ARCHIVE_THREAD_COUNT.name) {
+    return 128
+  }
+
+  if (setting.name === Settings.VIDEO_FULL_CACHE_TRANSCODE_MAX_MB.name) {
+    return 102400
+  }
+
+  return 100
+}
+
 const handleTestEverythingServer = async () => {
   testingEverything.value = true
 
@@ -444,14 +474,14 @@ onMounted(() => {
                     <n-input-number
                       :value="Number(getSettingValue(setting) || setting.default || 0)"
                       :min="setting.name === Settings.ARCHIVE_THREAD_COUNT.name ? 1 : 0"
-                      :max="setting.name === Settings.ARCHIVE_THREAD_COUNT.name ? 128 : 100"
+                      :max="getNumberSettingMax(setting)"
                       :precision="0"
                       :placeholder="getSettingPlaceholder(setting)"
                       style="width: 100%;"
                       @update:value="(value) => setSettingValue(setting, String(
                         setting.name === Settings.ARCHIVE_THREAD_COUNT.name
                           ? Math.max(1, Math.min(128, Number(value ?? setting.default ?? 16)))
-                          : Math.max(0, Math.min(100, Number(value ?? setting.default ?? 0)))
+                          : Math.max(0, Math.min(getNumberSettingMax(setting), Number(value ?? setting.default ?? 0)))
                       ))"
                     />
                   </template>

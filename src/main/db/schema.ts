@@ -7,6 +7,7 @@ import { ResourceLaunchMode } from '../../common/constants'
 export const category = sqliteTable('category', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
+  archiveName: text('archive_name'),
   emoji: text('emoji'),
   pillColor: text('pill_color'),
   referenceId: text('reference_id'),
@@ -54,6 +55,7 @@ export const archivePackage = sqliteTable('archive_package', {
   id: text('id').primaryKey(),
   packageTitle: text('package_title').notNull(),
   archivePath: text('archive_path').notNull(),
+  missingStatus: integer('missing_status', { mode: 'boolean' }).default(false),
   archiveFormat: text('archive_format').notNull(),
   archiveLevel: integer('archive_level').default(9),
   passwordEnabled: integer('password_enabled', { mode: 'boolean' }).default(false),
@@ -79,6 +81,8 @@ export const archivePackageItem = sqliteTable('archive_package_item', {
   sortOrder: integer('sort_order').default(0),
   isDeleted: integer('is_deleted', { mode: 'boolean' }).default(false),
 })
+
+
 
 // --- 3. 统计信息 ---
 

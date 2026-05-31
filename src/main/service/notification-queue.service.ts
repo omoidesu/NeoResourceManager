@@ -61,6 +61,13 @@ export type WebsiteCoverProgressMessage = {
   skippedCount?: number
 }
 
+export type ArchivePackageStateChangedMessage = {
+  archiveId: string
+  archivePath: string
+  missingStatus: boolean
+  changedAt: number
+}
+
 export class NotificationQueueService {
   private static instance: NotificationQueueService | null = null
 
@@ -189,6 +196,14 @@ export class NotificationQueueService {
     }
 
     this.targetWebContents.send('service:website-cover-progress', message)
+  }
+
+  pushArchivePackageStateChanged(message: ArchivePackageStateChangedMessage) {
+    if (!this.targetWebContents || this.targetWebContents.isDestroyed()) {
+      return
+    }
+
+    this.targetWebContents.send('service:archive-package-state-changed', message)
   }
 
   dispose() {

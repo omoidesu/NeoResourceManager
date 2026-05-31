@@ -177,7 +177,7 @@ export const useVideoSubtitleRuntime = ({
   getCurrentTrack
 }: UseVideoSubtitleRuntimeOptions) => {
   const subtitleCueList = ref<SubtitleCue[]>([])
-  const subtitleLoadState = ref<'idle' | 'loading' | 'ready' | 'empty'>('idle')
+  const subtitleLoadState = ref<'idle' | 'loading' | 'ready' | 'empty' | 'error'>('idle')
   const manualSubtitlePaths = ref<Record<string, string>>({})
 
   const currentSubtitleText = computed(() => {
@@ -204,28 +204,36 @@ export const useVideoSubtitleRuntime = ({
       ]).flat()
     ].filter(Boolean)
 
-    for (const subtitlePath of subtitleCandidates) {
-      const info = await window.api.dialog.getTextFileInfo(subtitlePath)
-      if (!info || info.size > MAX_SUBTITLE_FILE_BYTES) {
-        continue
-      }
+    try {
+      for (const subtitlePath of subtitleCandidates) {
+        const info = await window.api.dialog.getTextFileInfo(subtitlePath)
+        if (!info || info.size > MAX_SUBTITLE_FILE_BYTES) {
+          continue
+        }
 
-      const content = await window.api.dialog.readTextFile(subtitlePath, info.encoding)
-      if (requestId !== getLoadRequestId()) {
+        const content = await window.api.dialog.readTextFile(subtitlePath, info.encoding)
+        if (requestId !== getLoadRequestId()) {
+          return
+        }
+        if (!content) {
+          continue
+        }
+
+        const normalizedSubtitlePath = subtitlePath.toLowerCase()
+        const cues = normalizedSubtitlePath.endsWith('.ass')
+          ? parseAss(content)
+          : normalizedSubtitlePath.endsWith('.lrc')
+            ? parseLrc(content)
+            : parseSrtOrVtt(content)
+        subtitleCueList.value = cues
+        subtitleLoadState.value = cues.length ? 'ready' : 'empty'
         return
       }
-      if (!content) {
-        continue
+    } catch {
+      if (requestId === getLoadRequestId()) {
+        subtitleCueList.value = []
+        subtitleLoadState.value = 'error'
       }
-
-      const normalizedSubtitlePath = subtitlePath.toLowerCase()
-      const cues = normalizedSubtitlePath.endsWith('.ass')
-        ? parseAss(content)
-        : normalizedSubtitlePath.endsWith('.lrc')
-          ? parseLrc(content)
-          : parseSrtOrVtt(content)
-      subtitleCueList.value = cues
-      subtitleLoadState.value = cues.length ? 'ready' : 'empty'
       return
     }
 

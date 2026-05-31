@@ -9,14 +9,17 @@ import registerIpcHandlers from "./service/ipcHandle";
 import {migrateDb} from './db'
 import {seedDatabase} from './db/seed';
 import {ResourceWatcher} from "./watcher/resource.watcher";
+import {ArchivePackageWatcher} from "./watcher/archive-package.watcher";
 import { NotificationQueueService } from './service/notification-queue.service';
-import { createLogger } from './util/logger';
+import { createLogger, setLogFileAppender } from './util/logger';
 import { ResourceRuntimeMonitorService } from './service/resource-runtime-monitor.service';
-import { FetchPluginService } from './service/fetch-plugin.service';
 import { WindowScreenshotService } from './service/window-screenshot.service';
 import { DatabaseService } from './service/database.service';
 import { ResourceService } from './service/resource.service';
 import { ApiServer } from './api';
+import { buildVideoH264EncoderArgs, resolveVideoH264Encoder } from './service/video-transcode-capability';
+import { Settings, VideoTranscodeMode } from '../common/constants';
+import { getBundledFfmpegPath } from './util/media-binary-path';
 
 type WindowState = {
   bounds: {
@@ -33,11 +36,29 @@ let isQuitApproved = false
 let isQuitCheckInProgress = false
 let backgroundServicesInitializationTimer: NodeJS.Timeout | null = null
 let backgroundServicesInitializationStarted = false
+
+function initializeMainFileLogger() {
+  try {
+    const logDir = join(app.getPath('userData'), 'logs')
+    fs.mkdirSync(logDir, { recursive: true })
+    const logFilePath = join(logDir, 'main.log')
+
+    setLogFileAppender((line) => {
+      fs.appendFileSync(logFilePath, `${line}\n`, 'utf8')
+    })
+  } catch (error) {
+    console.error('[main] failed to initialize file logger', error)
+  }
+}
+
+initializeMainFileLogger()
+
 const logger = createLogger('main')
 const LOCAL_FILE_PROTOCOL = 'neo-resource-file'
 const AUDIO_TRANSCODE_PROTOCOL = 'neo-resource-audio'
 const VIDEO_TRANSCODE_PROTOCOL = 'neo-resource-video'
-const ffmpegPath = require('ffmpeg-static') as string | null
+const VIDEO_TRANSCODE_FAILURE_EVENT = 'video-transcode:failed'
+const VIDEO_TRANSCODE_ERROR_OUTPUT_LIMIT = 4000
 const DEFAULT_MAIN_WINDOW_BOUNDS = {
   width: 1024,
   height: 768
@@ -46,6 +67,8 @@ const MAIN_WINDOW_MIN_BOUNDS = {
   width: 1024,
   height: 768
 }
+
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 
 function getWindowStateFilePath() {
   return join(app.getPath('userData'), 'main-window-state.json')
@@ -182,7 +205,7 @@ function registerAudioTranscodeProtocol() {
       const requestUrl = new URL(request.url)
       const encodedPath = requestUrl.pathname.replace(/^\/+/, '')
       const filePath = normalize(decodeBase64Url(encodedPath))
-      const resolvedFfmpegPath = String(ffmpegPath ?? '').trim()
+      const resolvedFfmpegPath = getBundledFfmpegPath()
 
       if (!filePath || !fs.existsSync(filePath) || !resolvedFfmpegPath || !fs.existsSync(resolvedFfmpegPath)) {
         callback({ error: -6 })
@@ -246,16 +269,97 @@ function registerAudioTranscodeProtocol() {
   }
 }
 
+function emitVideoTranscodeFailure(payload: {
+  sessionId: string
+  filePath: string
+  message: string
+  code?: number | null
+  signal?: NodeJS.Signals | null
+  stderr?: string
+}) {
+  const sessionId = String(payload.sessionId ?? '').trim()
+  if (!sessionId) {
+    return
+  }
+
+  const message = {
+    ...payload,
+    sessionId,
+    stderr: String(payload.stderr ?? '').trim().slice(-VIDEO_TRANSCODE_ERROR_OUTPUT_LIMIT)
+  }
+
+  BrowserWindow.getAllWindows().forEach((window) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(VIDEO_TRANSCODE_FAILURE_EVENT, message)
+    }
+  })
+}
+
+function resolveVideoTranscodeMode(value: unknown) {
+  const normalizedValue = String(value ?? '').trim()
+  return Object.values(VideoTranscodeMode).includes(normalizedValue as typeof VideoTranscodeMode[keyof typeof VideoTranscodeMode])
+    ? normalizedValue
+    : VideoTranscodeMode.AUTO
+}
+
+function getVideoTranscodeModeCapabilities(mode: string) {
+  if (mode === VideoTranscodeMode.DISABLED) {
+    return {
+      allowHardwareTranscode: false,
+      allowCpuTranscode: false
+    }
+  }
+
+  if (mode === VideoTranscodeMode.HARDWARE_ONLY) {
+    return {
+      allowHardwareTranscode: true,
+      allowCpuTranscode: false
+    }
+  }
+
+  if (mode === VideoTranscodeMode.CPU_ONLY) {
+    return {
+      allowHardwareTranscode: false,
+      allowCpuTranscode: true
+    }
+  }
+
+  return {
+    allowHardwareTranscode: true,
+    allowCpuTranscode: true
+  }
+}
+
+async function getVideoTranscodePolicy() {
+  const transcodeModeSetting = await DatabaseService.getSetting(Settings.VIDEO_TRANSCODE_MODE)
+  return getVideoTranscodeModeCapabilities(resolveVideoTranscodeMode(transcodeModeSetting?.value))
+}
+
 function registerVideoTranscodeProtocol() {
   const registered = protocol.registerStreamProtocol(VIDEO_TRANSCODE_PROTOCOL, (request, callback) => {
+    void (async () => {
     try {
       const requestUrl = new URL(request.url)
       const encodedPath = requestUrl.pathname.replace(/^\/+/, '')
       const filePath = normalize(decodeBase64Url(encodedPath))
-      const resolvedFfmpegPath = String(ffmpegPath ?? '').trim()
+      const resolvedFfmpegPath = getBundledFfmpegPath()
       const requestedStartTime = Math.max(0, Number(requestUrl.searchParams.get('start') ?? 0) || 0)
+      const shouldFastSeek = requestedStartTime > 0 && requestUrl.searchParams.get('fastSeek') === '1'
+      const sessionId = String(requestUrl.searchParams.get('sessionId') ?? '').trim()
 
       if (!filePath || !fs.existsSync(filePath) || !resolvedFfmpegPath || !fs.existsSync(resolvedFfmpegPath)) {
+        logger.error('video transcode stream: input unavailable', {
+          sessionId,
+          filePath,
+          resolvedFfmpegPath,
+          fileExists: Boolean(filePath && fs.existsSync(filePath)),
+          ffmpegExists: Boolean(resolvedFfmpegPath && fs.existsSync(resolvedFfmpegPath))
+        })
+        emitVideoTranscodeFailure({
+          sessionId,
+          filePath,
+          message: 'video transcode input or ffmpeg executable is unavailable'
+        })
         callback({ error: -6 })
         return
       }
@@ -266,29 +370,68 @@ function registerVideoTranscodeProtocol() {
         'error',
       ]
 
+      if (shouldFastSeek) {
+        ffmpegArgs.push('-noaccurate_seek')
+      }
+
       if (requestedStartTime > 0) {
         ffmpegArgs.push('-ss', String(requestedStartTime))
       }
 
+      const videoTranscodePolicy = await getVideoTranscodePolicy()
+      const videoStreamEncoder = resolveVideoH264Encoder(resolvedFfmpegPath, {
+        allowHardware: videoTranscodePolicy.allowHardwareTranscode,
+        allowCpu: videoTranscodePolicy.allowCpuTranscode
+      })
+      if (!videoStreamEncoder) {
+        logger.error('video transcode stream: encoder unavailable', {
+          sessionId,
+          filePath,
+          requestedStartTime,
+          shouldFastSeek,
+          allowHardwareTranscode: videoTranscodePolicy.allowHardwareTranscode,
+          allowCpuTranscode: videoTranscodePolicy.allowCpuTranscode
+        })
+        emitVideoTranscodeFailure({
+          sessionId,
+          filePath,
+          message: 'video transcode encoder is disabled or unavailable'
+        })
+        callback({ error: -6 })
+        return
+      }
+
+      logger.info('video transcode stream: request', {
+        sessionId,
+        filePath,
+        requestedStartTime,
+        shouldFastSeek,
+        encoder: videoStreamEncoder,
+        allowHardwareTranscode: videoTranscodePolicy.allowHardwareTranscode,
+        allowCpuTranscode: videoTranscodePolicy.allowCpuTranscode
+      })
+
       ffmpegArgs.push(
         '-i',
         filePath,
+        '-map',
+        '0:v:0',
+        '-map',
+        '0:a:0?',
+        '-sn',
         '-map_metadata',
-        '0',
-        '-c:v',
-        'libx264',
-        '-preset',
-        'veryfast',
-        '-crf',
-        '23',
-        '-pix_fmt',
-        'yuv420p',
+        '0'
+      )
+
+      ffmpegArgs.push(...buildVideoH264EncoderArgs(videoStreamEncoder, { lowLatency: true }))
+
+      ffmpegArgs.push(
         '-c:a',
         'aac',
         '-b:a',
         '192k',
         '-movflags',
-        'frag_keyframe+empty_moov+default_base_moof',
+        '+frag_keyframe+empty_moov+default_base_moof',
         '-f',
         'mp4',
         'pipe:1'
@@ -305,8 +448,28 @@ function registerVideoTranscodeProtocol() {
       )
 
       let ffmpegErrorOutput = ''
+      let failureEmitted = false
+      const emitFailureOnce = (message: string, detail?: { code?: number | null; signal?: NodeJS.Signals | null }) => {
+        if (failureEmitted) {
+          return
+        }
+        failureEmitted = true
+        emitVideoTranscodeFailure({
+          sessionId,
+          filePath,
+          message,
+          code: detail?.code,
+          signal: detail?.signal,
+          stderr: ffmpegErrorOutput
+        })
+      }
 
       child.stdout.on('close', () => {
+        logger.info('video transcode stream: stdout-closed', {
+          sessionId,
+          filePath,
+          stderrLength: ffmpegErrorOutput.length
+        })
         if (!child.killed) {
           child.kill('SIGTERM')
         }
@@ -318,6 +481,7 @@ function registerVideoTranscodeProtocol() {
 
       child.on('error', (error) => {
         logger.error('failed to start video transcode stream', error)
+        emitFailureOnce(error instanceof Error ? error.message : 'failed to start video transcode stream')
       })
 
       child.on('exit', (code, signal) => {
@@ -329,6 +493,7 @@ function registerVideoTranscodeProtocol() {
             ffmpegArgs,
             stderr: ffmpegErrorOutput.trim()
           })
+          emitFailureOnce('video transcode process exited abnormally', { code, signal })
         }
       })
 
@@ -340,10 +505,24 @@ function registerVideoTranscodeProtocol() {
         },
         data: child.stdout
       })
+      logger.info('video transcode stream: response-started', {
+        sessionId,
+        filePath,
+        encoder: videoStreamEncoder,
+        ffmpegArgs
+      })
     } catch (error) {
-      logger.error('failed to resolve video transcode protocol request', error)
+      logger.error('failed to resolve video transcode protocol request', {
+        error: error instanceof Error
+          ? {
+              message: error.message,
+              stack: error.stack ?? ''
+            }
+          : String(error ?? '')
+      })
       callback({ error: -2 })
     }
+    })()
   })
 
   if (!registered) {
@@ -443,6 +622,13 @@ async function shutdownApp(reason: string) {
   }
 
   try {
+    await ArchivePackageWatcher.getInstance().stop()
+    logger.info('archive package watcher stopped')
+  } catch (error) {
+    logger.error('failed to stop archive package watcher', error)
+  }
+
+  try {
     NotificationQueueService.getInstance().dispose()
     logger.info('notification queue disposed')
   } catch (error) {
@@ -456,12 +642,6 @@ async function shutdownApp(reason: string) {
     logger.error('failed to dispose resource runtime monitor', error)
   }
 
-  try {
-    FetchPluginService.getInstance().dispose()
-    logger.info('fetch plugin service disposed')
-  } catch (error) {
-    logger.error('failed to dispose fetch plugin service', error)
-  }
 
   try {
     WindowScreenshotService.dispose()
@@ -877,9 +1057,9 @@ function scheduleBackgroundServicesInitialization(delayMs = 1800) {
     void (async () => {
       try {
         logger.info('background services initialization started')
-        await FetchPluginService.getInstance().initialize()
         await WindowScreenshotService.initialize()
         await ResourceWatcher.getInstance().start()
+        await ArchivePackageWatcher.getInstance().start()
         ResourceRuntimeMonitorService.getInstance().start()
         logger.info('background services initialized')
       } catch (error) {

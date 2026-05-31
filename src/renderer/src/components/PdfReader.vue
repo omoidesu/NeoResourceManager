@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ComputedRef } from 'vue'
-import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from 'pdfjs-dist'
-import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
+import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy, RenderTask } from 'pdfjs-dist'
+import { getDocument, GlobalWorkerOptions, PasswordResponses } from 'pdfjs-dist'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url'
 import {
   BookOutline,
@@ -33,7 +33,7 @@ const emit = defineEmits<{
   (event: 'progress-change', progress: number): void
 }>()
 
-type ReaderState = 'idle' | 'loading' | 'ready' | 'error'
+type ReaderState = 'idle' | 'loading' | 'password' | 'ready' | 'error'
 type FitMode = 'custom' | 'width'
 type ReaderScrollBehavior = 'auto' | 'smooth'
 type PageEntry = {
@@ -49,6 +49,9 @@ type PageEntry = {
 
 const state = ref<ReaderState>('idle')
 const errorMessage = ref('')
+const passwordInput = ref('')
+const passwordErrorMessage = ref('')
+const passwordRequestReason = ref<number | null>(null)
 const viewportRef = ref<HTMLDivElement | null>(null)
 const pagesRef = ref<HTMLDivElement | null>(null)
 const thumbRefs = ref<HTMLElement[]>([])
@@ -59,6 +62,8 @@ const isSeeking = ref(false)
 const currentPageNumber = ref(1)
 const pageCount = ref(0)
 let pdfDocument: PDFDocumentProxy | null = null
+let activeLoadingTask: PDFDocumentLoadingTask | null = null
+let pendingPasswordCallback: ((password: string) => void) | null = null
 let pageEntries: PageEntry[] = []
 let loadRequestId = 0
 let progressTimer: number | null = null
@@ -78,6 +83,16 @@ const progressText = computed(
 )
 const pageCountText = computed(() => (pageCount.value > 0 ? `${pageCount.value} 页` : ''))
 const zoomText = computed(() => `${Math.round(zoom.value * 100)}%`)
+const passwordTitle = computed(() =>
+  passwordRequestReason.value === PasswordResponses.INCORRECT_PASSWORD
+    ? '密码不正确'
+    : '此 PDF 需要密码'
+)
+const passwordHint = computed(() =>
+  passwordRequestReason.value === PasswordResponses.INCORRECT_PASSWORD
+    ? '请检查密码后重新输入。'
+    : '请输入文档密码以继续阅读。'
+)
 const readerThemeStyle = computed(() => {
   if (appIsDark.value) {
     return {
@@ -151,6 +166,11 @@ const clearPageEntries = (): void => {
 
 const clearPdfDocument = (): void => {
   clearPageEntries()
+  if (activeLoadingTask) {
+    void activeLoadingTask.destroy()
+    activeLoadingTask = null
+  }
+  pendingPasswordCallback = null
   if (pdfDocument) {
     void pdfDocument.destroy()
     pdfDocument = null
@@ -546,6 +566,9 @@ const resetReader = (): void => {
   clearProgressTimer()
   clearPdfDocument()
   errorMessage.value = ''
+  passwordInput.value = ''
+  passwordErrorMessage.value = ''
+  passwordRequestReason.value = null
   pageCount.value = 0
   currentPageNumber.value = 1
   progress.value = Math.max(0, Math.min(1, Number(props.initialProgress ?? 0)))
@@ -557,6 +580,48 @@ const resetReader = (): void => {
   }
   if (viewportRef.value) {
     viewportRef.value.scrollTop = 0
+  }
+}
+
+const requestPdfPassword = (
+  loadingTask: PDFDocumentLoadingTask,
+  requestId: number,
+  updatePassword: (password: string) => void,
+  reason: number
+): void => {
+  if (requestId !== loadRequestId || activeLoadingTask !== loadingTask) {
+    return
+  }
+
+  pendingPasswordCallback = updatePassword
+  passwordInput.value = ''
+  passwordRequestReason.value = reason
+  passwordErrorMessage.value = reason === PasswordResponses.INCORRECT_PASSWORD
+    ? '密码不正确，请重新输入'
+    : ''
+  state.value = 'password'
+}
+
+const loadPdfDocument = async (
+  source: Parameters<typeof getDocument>[0],
+  requestId: number
+): Promise<PDFDocumentProxy> => {
+  const loadingTask = getDocument(source)
+  activeLoadingTask = loadingTask
+  loadingTask.onPassword = (
+    updatePassword: (password: string) => void,
+    reason: number
+  ) => {
+    requestPdfPassword(loadingTask, requestId, updatePassword, reason)
+  }
+
+  try {
+    return await loadingTask.promise
+  } finally {
+    if (activeLoadingTask === loadingTask) {
+      activeLoadingTask = null
+      pendingPasswordCallback = null
+    }
   }
 }
 
@@ -579,10 +644,14 @@ const loadPdf = async (): Promise<void> => {
     let document: PDFDocumentProxy | null = null
     if (fileUrl) {
       try {
-        document = await getDocument({ url: fileUrl }).promise
+        document = await loadPdfDocument({ url: fileUrl }, requestId)
       } catch {
         document = null
       }
+    }
+
+    if (requestId !== loadRequestId) {
+      return
     }
 
     if (!document) {
@@ -595,7 +664,7 @@ const loadPdf = async (): Promise<void> => {
         throw new Error('无法读取 PDF 文件')
       }
 
-      document = await getDocument({ data: new Uint8Array(binaryData) }).promise
+      document = await loadPdfDocument({ data: new Uint8Array(binaryData) }, requestId)
     }
 
     if (requestId !== loadRequestId) {
@@ -628,6 +697,23 @@ const loadPdf = async (): Promise<void> => {
     errorMessage.value = error instanceof Error ? error.message : '加载 PDF 失败'
     state.value = 'error'
   }
+}
+
+const submitPdfPassword = (): void => {
+  const password = passwordInput.value
+  if (!pendingPasswordCallback) {
+    passwordErrorMessage.value = '当前没有等待密码的 PDF 加载任务'
+    return
+  }
+
+  if (!password) {
+    passwordErrorMessage.value = '请输入 PDF 密码'
+    return
+  }
+
+  passwordErrorMessage.value = ''
+  state.value = 'loading'
+  pendingPasswordCallback(password)
 }
 
 const rerenderWithProgress = async (nextZoom: number): Promise<void> => {
@@ -830,6 +916,27 @@ onMounted(() => {
 
       <div class="pdf-reader__body">
         <div v-if="state === 'loading'" class="pdf-reader__state">加载中</div>
+        <div v-else-if="state === 'password'" class="pdf-reader__state">
+          <div class="pdf-reader__password-card">
+            <div class="pdf-reader__password-title">{{ passwordTitle }}</div>
+            <div class="pdf-reader__password-hint">{{ passwordHint }}</div>
+            <n-input
+              v-model:value="passwordInput"
+              type="password"
+              show-password-on="click"
+              placeholder="请输入 PDF 密码"
+              :status="passwordErrorMessage ? 'error' : undefined"
+              @keyup.enter="submitPdfPassword"
+            />
+            <div v-if="passwordErrorMessage" class="pdf-reader__password-error">
+              {{ passwordErrorMessage }}
+            </div>
+            <div class="pdf-reader__password-actions">
+              <n-button @click="closeReader">取消</n-button>
+              <n-button type="primary" @click="submitPdfPassword">解锁 PDF</n-button>
+            </div>
+          </div>
+        </div>
         <div v-else-if="state === 'error'" class="pdf-reader__state pdf-reader__state--error">
           {{ errorMessage }}
         </div>
@@ -967,6 +1074,42 @@ onMounted(() => {
 
 .pdf-reader__state--error {
   color: #e88080;
+}
+
+.pdf-reader__password-card {
+  width: min(360px, calc(100% - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px;
+  border: 1px solid var(--reader-border-color);
+  border-radius: 12px;
+  background: var(--reader-surface-color);
+  box-shadow: 0 18px 50px var(--reader-shadow-color);
+}
+
+.pdf-reader__password-title {
+  font-size: 18px;
+  font-weight: 800;
+  opacity: 0.92;
+}
+
+.pdf-reader__password-hint {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--reader-muted-color);
+}
+
+.pdf-reader__password-error {
+  font-size: 12px;
+  color: #e88080;
+}
+
+.pdf-reader__password-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 4px;
 }
 
 .pdf-reader__reading-area {

@@ -8,6 +8,7 @@ import path from 'path'
 import sharp from "sharp";
 import {db} from '../db'
 import {ResourceWatcher} from "../watcher/resource.watcher";
+import {ArchivePackageWatcher} from "../watcher/archive-package.watcher";
 import { buildResourceMarkerPayload, getMarkerDirectory, getMarkerFilePath, getMarkerFilePathCandidates } from '../util/resource-marker'
 import { DialogService } from './dialog.service'
 import { NotificationQueueService } from './notification-queue.service'
@@ -19,6 +20,7 @@ import { WindowScreenshotService } from './window-screenshot.service'
 import { detectGameEngineProfile } from '../util/game-engine-detector'
 import { detectGameLaunchFile } from '../util/game-launch-file-detector'
 import { analyzeNovelFile } from '../util/novel-file-analyzer'
+import { getBundledFfmpegPath, getBundledFfprobePath } from '../util/media-binary-path'
 import { parseFile } from 'music-metadata'
 import { execFile, spawn } from 'child_process'
 import type { ChildProcess } from 'child_process'
@@ -27,8 +29,6 @@ import crypto from 'crypto'
 const fs = require('fs-extra')
 const originalFs = require('original-fs')
 const hidefile = require('hidefile')
-const ffmpegPath = require('ffmpeg-static') as string | null
-const ffprobeStatic = require('ffprobe-static') as { path?: string }
 const VIDEO_COVER_FRAME_COUNT = 5
 const MAX_COVER_PROCESS_PIXELS = 36_000_000
 const MAX_COVER_SOURCE_BYTES = 100 * 1024 * 1024
@@ -44,6 +44,8 @@ const WEBSITE_COVER_CAPTURE_WIDTH = 1440
 const WEBSITE_COVER_CAPTURE_HEIGHT = 900
 const WEBSITE_COVER_CAPTURE_TIMEOUT_MS = 20000
 const WEBSITE_COVER_STABILIZE_DELAY_MS = 1800
+const WEBSITE_COVER_VISUAL_READY_TIMEOUT_MS = 6000
+const WEBSITE_COVER_VISUAL_READY_STABLE_MS = 1200
 const WEBSITE_COVER_BACKFILL_CONCURRENCY = 5
 const WEBSITE_INFO_BACKFILL_TIMEOUT_MS = 45000
 const WEBSITE_COVER_BACKFILL_TIMEOUT_MS = 45000
@@ -74,6 +76,7 @@ type ArchiveQueueItem = {
   coverPath: string
   sourcePath: string
   sourcePaths: string[]
+  restoreDirectory?: string
   archivePath: string
   archiveFormat: string
   status: ArchiveQueueItemStatus
@@ -1320,15 +1323,25 @@ export class ResourceService {
       let contentType = ''
       let contentDisposition = ''
       let htmlText = ''
+      let headStatus = 0
+      let headStatusText = ''
+      let htmlStatus = 0
+      let htmlStatusText = ''
 
       try {
         const headResponse = await probeWebsiteResponse(normalizedInputUrl, 'head', 5000)
         finalUrl = getAxiosResponseUrl(headResponse, normalizedInputUrl)
         contentType = String(headResponse.headers?.['content-type'] ?? '').toLowerCase()
         contentDisposition = String(headResponse.headers?.['content-disposition'] ?? '')
+        headStatus = Number(headResponse.status ?? 0)
+        headStatusText = String(headResponse.statusText ?? '').trim()
       } catch (error) {
+        headStatus = extractAxiosErrorStatus(error)
+        headStatusText = extractAxiosErrorStatusText(error)
         ResourceService.logger.debug('fetchWebsiteInfo head probe failed', {
           url: normalizedInputUrl,
+          status: headStatus,
+          statusText: headStatusText,
           error: error instanceof Error ? error.message : String(error)
         })
       }
@@ -1359,7 +1372,11 @@ export class ResourceService {
         contentType = htmlPreview.contentType
         contentDisposition = htmlPreview.contentDisposition
         htmlText = htmlPreview.htmlText
+        htmlStatus = Number((htmlPreview as any).status ?? 0)
+        htmlStatusText = String((htmlPreview as any).statusText ?? '').trim()
       } catch (error) {
+        htmlStatus = extractAxiosErrorStatus(error)
+        htmlStatusText = extractAxiosErrorStatusText(error)
         const fallbackTitle = getHostnameLabel(finalUrl) || getHostnameLabel(normalizedInputUrl) || normalizedInputUrl
         data.website = finalUrl
         data.name = fallbackTitle
@@ -1369,8 +1386,19 @@ export class ResourceService {
         ResourceService.logger.warn('fetchWebsiteInfo html preview failed, fallback to basic website info', {
           url: normalizedInputUrl,
           finalUrl,
+          status: htmlStatus,
+          statusText: htmlStatusText,
           error: error instanceof Error ? error.message : String(error)
         })
+
+        const statusWarningMessage = buildWebsiteStatusWarningMessage(htmlStatus || headStatus, htmlStatusText || headStatusText)
+        if (statusWarningMessage) {
+          return {
+            type: 'warning',
+            message: statusWarningMessage,
+            data,
+          }
+        }
 
         return {
           type: 'warning',
@@ -1399,6 +1427,16 @@ export class ResourceService {
         return {
           type: 'warning',
           message: '已请求成功，但未获取到可回填的网站信息',
+          data,
+        }
+      }
+
+      const metadataWarningMessage = buildWebsiteStatusWarningMessage(htmlStatus || headStatus, htmlStatusText || headStatusText)
+        || detectAbnormalWebsiteMetadataTitle(String(data.name ?? '').trim())
+      if (metadataWarningMessage) {
+        return {
+          type: 'warning',
+          message: metadataWarningMessage,
           data,
         }
       }
@@ -1734,6 +1772,8 @@ export class ResourceService {
     let failedCount = 0
     let skippedCount = 0
     let completedCount = 0
+    let activeWorkerCount = 0
+    let peakWorkerCount = 0
 
     const pushProgress = (params: {
       current: number
@@ -1764,12 +1804,30 @@ export class ResourceService {
       })
     }
 
+    ResourceService.logger.info('website cover backfill: start', {
+      taskId,
+      total,
+      concurrencyLimit: WEBSITE_COVER_BACKFILL_CONCURRENCY
+    })
+
     pushProgress({
       current: 0,
       message: '正在准备获取网站图标和封面'
     })
 
     const processTask = async (task: typeof normalizedTasks[number]) => {
+      activeWorkerCount += 1
+      peakWorkerCount = Math.max(peakWorkerCount, activeWorkerCount)
+      ResourceService.logger.info('website cover backfill: task started', {
+        taskId,
+        resourceId: task.resourceId,
+        title: task.title,
+        url: task.url,
+        completedCount,
+        total,
+        activeWorkerCount,
+        peakWorkerCount
+      })
       pushProgress({
         current: completedCount,
         title: task.title,
@@ -1890,9 +1948,24 @@ export class ResourceService {
           url: task.url,
           error: error instanceof Error ? error.message : String(error)
         })
+      } finally {
+        activeWorkerCount = Math.max(0, activeWorkerCount - 1)
       }
 
       completedCount += 1
+      ResourceService.logger.info('website cover backfill: task finished', {
+        taskId,
+        resourceId: task.resourceId,
+        title: task.title,
+        url: task.url,
+        completedCount,
+        total,
+        activeWorkerCount,
+        peakWorkerCount,
+        successCount,
+        failedCount,
+        skippedCount
+      })
       pushProgress({
         current: completedCount,
         title: task.title,
@@ -1904,6 +1977,12 @@ export class ResourceService {
 
     let nextTaskIndex = 0
     const workerCount = Math.min(WEBSITE_COVER_BACKFILL_CONCURRENCY, normalizedTasks.length)
+    ResourceService.logger.info('website cover backfill: worker pool ready', {
+      taskId,
+      total,
+      workerCount,
+      concurrencyLimit: WEBSITE_COVER_BACKFILL_CONCURRENCY
+    })
     const worker = async () => {
       while (nextTaskIndex < normalizedTasks.length) {
         const task = normalizedTasks[nextTaskIndex]
@@ -1923,6 +2002,15 @@ export class ResourceService {
       message: '网站图标和封面后台处理完成',
       done: true,
       success: failedCount === 0
+    })
+    ResourceService.logger.info('website cover backfill: completed', {
+      taskId,
+      total,
+      workerCount,
+      peakWorkerCount,
+      successCount,
+      failedCount,
+      skippedCount
     })
   }
 
@@ -3570,8 +3658,8 @@ export class ResourceService {
     return result
   }
 
-  static async restoreArchivedPackage(archiveId: string) {
-    const result = await ResourceService.enqueueRestoreArchive(archiveId)
+  static async restoreArchivedPackage(archiveId: string, options?: { restoreDirectory?: string }) {
+    const result = await ResourceService.enqueueRestoreArchive(archiveId, options)
     if (result.type === 'success') {
       ResourceService.archiveCancellationRequested = false
       ResourceService.scheduleArchiveQueueProcessor()
@@ -3579,7 +3667,7 @@ export class ResourceService {
     return result
   }
 
-  static async restoreArchivedPackages(archiveIds: string[]) {
+  static async restoreArchivedPackages(archiveIds: string[], options?: { restoreDirectory?: string }) {
     const normalizedArchiveIds = Array.from(new Set((archiveIds ?? []).map((item) => String(item ?? '').trim()).filter(Boolean)))
     if (!normalizedArchiveIds.length) {
       return {
@@ -3603,7 +3691,7 @@ export class ResourceService {
       }
     }> = []
     for (const archiveId of normalizedArchiveIds) {
-      const result = await ResourceService.enqueueRestoreArchive(archiveId)
+      const result = await ResourceService.enqueueRestoreArchive(archiveId, options)
       results.push({
         archiveId,
         ...result
@@ -3631,10 +3719,14 @@ export class ResourceService {
 
   static async listArchivedPackages() {
     const items = await DatabaseService.listArchivedPackages()
-    return {
-      type: 'success',
-      message: '获取归档包列表成功',
-      data: items.map((item) => ({
+    const normalizedItems = items.map((item) => {
+      const archivePath = String(item.archivePath ?? '').trim()
+      const archiveMissing = Boolean(item.missingStatus)
+      const archiveMissingReason = archiveMissing
+        ? (archivePath ? '归档包文件不存在，可能已被手动移动或删除' : '归档记录缺少归档包路径')
+        : ''
+
+      return {
         id: String(item.id ?? '').trim(),
         resourceId: String(item.resourceId ?? '').trim(),
         title: String(item.title ?? '').trim() || '未命名资源',
@@ -3642,7 +3734,7 @@ export class ResourceService {
         categoryName: String(item.categoryName ?? '').trim() || '未分类',
         categoryEmoji: String(item.categoryEmoji ?? '').trim(),
         categoryColor: String(item.categoryColor ?? '').trim() || '#737373',
-        archivePath: String(item.archivePath ?? '').trim(),
+        archivePath,
         archiveFormat: String(item.archiveFormat ?? '').trim(),
         archiveLevel: Number(item.archiveLevel ?? 0),
         passwordEnabled: Boolean(item.passwordEnabled),
@@ -3653,6 +3745,9 @@ export class ResourceService {
         resourceCount: Math.max(1, Number(item.resourceCount ?? 1)),
         status: String(item.status ?? '').trim() || 'active',
         archivedAt: item.archivedAt instanceof Date ? item.archivedAt.getTime() : null,
+        missingStatus: archiveMissing,
+        archiveMissing,
+        archiveMissingReason,
         items: Array.isArray(item.items)
           ? item.items.map((entry) => ({
               resourceId: String(entry.resourceId ?? '').trim(),
@@ -3665,7 +3760,21 @@ export class ResourceService {
               categoryColor: String(entry.categoryColor ?? '').trim() || '#737373',
             }))
           : [],
-      }))
+      }
+    })
+
+    const invalidCount = normalizedItems.filter((item) => item.archiveMissing).length
+    if (invalidCount > 0) {
+      ResourceService.logger.warn('listArchivedPackages detected invalid archive packages', {
+        invalidCount,
+        packageIds: normalizedItems.filter((item) => item.archiveMissing).map((item) => item.id),
+      })
+    }
+
+    return {
+      type: 'success',
+      message: '获取归档包列表成功',
+      data: normalizedItems
     }
   }
 
@@ -3747,6 +3856,7 @@ export class ResourceService {
     }
 
     await DatabaseService.logicalDeleteResourceArchive(normalizedArchiveId)
+    await ArchivePackageWatcher.getInstance().untrackArchivePackage(normalizedArchiveId)
 
     return {
       type: 'success',
@@ -4097,7 +4207,7 @@ export class ResourceService {
     }
   }
 
-  private static async enqueueRestoreArchive(archiveId: string) {
+  private static async enqueueRestoreArchive(archiveId: string, options?: { restoreDirectory?: string }) {
     const normalizedArchiveId = String(archiveId ?? '').trim()
     if (!normalizedArchiveId) {
       return {
@@ -4118,6 +4228,16 @@ export class ResourceService {
       return {
         type: 'warning' as const,
         message: '归档包内没有可还原的资源项',
+      }
+    }
+    const restoreDirectory = path.normalize(String(options?.restoreDirectory ?? '').trim())
+    if (restoreDirectory) {
+      const parsedRestoreDirectory = path.parse(restoreDirectory)
+      if (!parsedRestoreDirectory.root || restoreDirectory.replace(/[\\\/]+$/, '').toLowerCase() === parsedRestoreDirectory.root.replace(/[\\\/]+$/, '').toLowerCase()) {
+        return {
+          type: 'warning' as const,
+          message: '请选择安全的还原目录',
+        }
       }
     }
 
@@ -4151,6 +4271,7 @@ export class ResourceService {
       coverPath: String(existingResource?.coverPath ?? '').trim(),
       sourcePath: String(primaryArchiveItem?.sourcePath ?? '').trim(),
       sourcePaths: [],
+      restoreDirectory,
       archivePath: String(archive.archivePath ?? '').trim(),
       archiveFormat: String(archive.archiveFormat ?? '').trim(),
       status: 'queued',
@@ -4490,8 +4611,10 @@ export class ResourceService {
         return
       }
 
-      const categoryName = sanitizeArchiveName(String(categoryInfo?.name ?? '未分类').trim() || '未分类')
-      const archiveDir = path.join(archiveRoot, categoryName)
+      const categoryArchiveName = sanitizeArchiveName(
+        String(categoryInfo?.archiveName ?? categoryInfo?.name ?? '未分类').trim() || '未分类'
+      )
+      const archiveDir = path.join(archiveRoot, categoryArchiveName)
       await fs.ensureDir(archiveDir)
 
       const archiveBaseName = sanitizeArchiveName(`${resourceTitleRef.value}-${resourceId}`)
@@ -4550,6 +4673,7 @@ export class ResourceService {
           id: archivePackageId,
           packageTitle: resourceTitleRef.value,
           archivePath: generatedArchivePath,
+          missingStatus: false,
           archiveFormat,
           archiveLevel,
           passwordEnabled: Boolean(archivePassword),
@@ -4576,6 +4700,11 @@ export class ResourceService {
         }]
       })
       insertedArchivePackageId = archivePackageId
+      ArchivePackageWatcher.getInstance().trackArchivePackage({
+        id: archivePackageId,
+        archivePath: generatedArchivePath,
+        missingStatus: false,
+      })
 
       await pushProgress({
         current: queueCurrent,
@@ -4614,6 +4743,7 @@ export class ResourceService {
       if (insertedArchivePackageId) {
         try {
           await DatabaseService.logicalDeleteResourceArchive(insertedArchivePackageId)
+          await ArchivePackageWatcher.getInstance().untrackArchivePackage(insertedArchivePackageId)
         } catch (cleanupError) {
           ResourceService.logger.warn('archiveResource cleanup archive record failed', {
             resourceId,
@@ -4957,11 +5087,13 @@ export class ResourceService {
         return
       }
 
-      const categoryName = sanitizeArchiveName(String(categoryInfo?.name ?? '未分类').trim() || '未分类')
-      const archiveDir = path.join(archiveRoot, categoryName)
+      const categoryArchiveName = sanitizeArchiveName(
+        String(categoryInfo?.archiveName ?? categoryInfo?.name ?? '未分类').trim() || '未分类'
+      )
+      const archiveDir = path.join(archiveRoot, categoryArchiveName)
       await fs.ensureDir(archiveDir)
 
-      const packageTitle = String(queueItem.title ?? '').trim() || `${categoryName}（${targets.length} 项）`
+      const packageTitle = String(queueItem.title ?? '').trim() || `${categoryArchiveName}（${targets.length} 项）`
       const archiveBaseName = sanitizeArchiveName(`${packageTitle}-${Date.now()}`)
       const plannedArchivePath = await allocateArchiveTargetPath(archiveDir, archiveBaseName, archiveFormat)
       const sourcePaths = targets.map((item) => item.sourcePath)
@@ -5023,6 +5155,7 @@ export class ResourceService {
           id: archivePackageId,
           packageTitle,
           archivePath: generatedArchivePath,
+          missingStatus: false,
           archiveFormat,
           archiveLevel,
           passwordEnabled: Boolean(archivePassword),
@@ -5049,6 +5182,11 @@ export class ResourceService {
         }))
       })
       insertedArchivePackageId = archivePackageId
+      ArchivePackageWatcher.getInstance().trackArchivePackage({
+        id: archivePackageId,
+        archivePath: generatedArchivePath,
+        missingStatus: false,
+      })
 
       await pushProgress({
         current: queueCurrent,
@@ -5093,6 +5231,7 @@ export class ResourceService {
       if (insertedArchivePackageId) {
         try {
           await DatabaseService.logicalDeleteResourceArchive(insertedArchivePackageId)
+          await ArchivePackageWatcher.getInstance().untrackArchivePackage(insertedArchivePackageId)
         } catch (cleanupError) {
           ResourceService.logger.warn('archiveResourcesAsPackage cleanup archive record failed', {
             resourceIds,
@@ -5305,7 +5444,7 @@ export class ResourceService {
         return
       }
 
-      if (!await fs.pathExists(archivePath)) {
+      if (ArchivePackageWatcher.isTargetPathMissing(archivePath)) {
         await pushProgress({
           current: queueCurrent,
           total: queueTotal,
@@ -5318,17 +5457,27 @@ export class ResourceService {
         return
       }
 
+      const restoreDirectory = path.normalize(String(queueItem.restoreDirectory ?? '').trim())
       const restoreTargets = archiveItems.map((item, index) => {
-        const targetSourcePath = path.normalize(String(item.sourcePath ?? '').trim())
+        const originalSourcePath = path.normalize(String(item.sourcePath ?? '').trim())
+        const targetSourcePath = restoreDirectory
+          ? path.join(restoreDirectory, path.basename(originalSourcePath))
+          : originalSourcePath
         const targetResourceId = String(item.resourceId ?? '').trim()
         const targetResource = resourceDetails[index]
+        const targetFileName = String(targetResource?.fileName ?? '').trim()
         return {
           item,
+          originalSourcePath,
           targetSourcePath,
           targetResourceId,
           targetResource,
+          restoredBasePath: targetFileName ? path.dirname(targetSourcePath) : targetSourcePath,
+          restoredFileName: targetFileName || null,
         }
       })
+      sourcePath = restoreTargets[0]?.targetSourcePath || sourcePath
+      queueItem.sourcePath = sourcePath
 
       for (const target of restoreTargets) {
         if (!target.targetSourcePath || !target.targetResourceId || !target.targetResource) {
@@ -5349,7 +5498,7 @@ export class ResourceService {
             current: queueCurrent,
             total: queueTotal,
             progress: 100,
-            message: `归档原始目录不安全，已阻止还原：${target.targetSourcePath}`,
+            message: `还原目标路径不安全，已阻止还原：${target.targetSourcePath}`,
             done: true,
             success: false,
             archivePath
@@ -5362,7 +5511,7 @@ export class ResourceService {
             current: queueCurrent,
             total: queueTotal,
             progress: 100,
-            message: '原始资源目录已存在，已取消还原以避免覆盖文件',
+            message: '还原目标路径已存在，已取消还原以避免覆盖文件',
             done: true,
             success: false,
             archivePath
@@ -5401,7 +5550,7 @@ export class ResourceService {
 
       try {
         for (const target of restoreTargets) {
-          const extractedSourcePath = resolveArchiveExtractedItemPath(restoreTempDirectory, String(target.item.archiveEntryPath ?? ''), target.targetSourcePath)
+          const extractedSourcePath = resolveArchiveExtractedItemPath(restoreTempDirectory, String(target.item.archiveEntryPath ?? ''), target.originalSourcePath)
           if (!await pathExistsPhysical(extractedSourcePath)) {
             await pushProgress({
               current: queueCurrent,
@@ -5430,7 +5579,17 @@ export class ResourceService {
         archivePath
       })
 
-      await DatabaseService.restoreResourceArchive(archiveId, restoreTargets.map((item) => item.targetResourceId))
+      await DatabaseService.restoreResourceArchive(
+        archiveId,
+        restoreTargets.map((item) => item.targetResourceId),
+        undefined,
+        restoreTargets.map((item) => ({
+          resourceId: item.targetResourceId,
+          basePath: item.restoredBasePath,
+          fileName: item.restoredFileName
+        }))
+      )
+      await ArchivePackageWatcher.getInstance().untrackArchivePackage(archiveId)
 
       for (const target of restoreTargets) {
         const targetCategoryInfo = await DatabaseService.getCategoryById(String(target.targetResource?.categoryId ?? '').trim())
@@ -5440,13 +5599,13 @@ export class ResourceService {
 
         await writeResourceMarker({
           resourceId: target.targetResourceId,
-          basePath: String(target.targetResource?.basePath ?? '').trim(),
-          fileName: target.targetResource?.fileName ?? null,
+          basePath: target.restoredBasePath,
+          fileName: target.restoredFileName,
           markerEnabled: shouldCreateResourceMarker(
             targetCategoryInfo,
             {
-              basePath: String(target.targetResource?.basePath ?? '').trim(),
-              fileName: target.targetResource?.fileName ?? null
+              basePath: target.restoredBasePath,
+              fileName: target.restoredFileName
             },
             {} as ResourceMeta
           )
@@ -5454,8 +5613,8 @@ export class ResourceService {
         ResourceWatcher.getInstance().trackResource({
           id: target.targetResourceId,
           categoryId: String(target.targetResource?.categoryId ?? '').trim(),
-          basePath: String(target.targetResource?.basePath ?? '').trim(),
-          fileName: target.targetResource?.fileName ?? null,
+          basePath: target.restoredBasePath,
+          fileName: target.restoredFileName,
           missingStatus: false,
           directoryMetadataKind: ResourceDirectoryMetadataService.getDirectoryMetadataKindFromCategory(targetCategoryInfo),
         })
@@ -6674,6 +6833,47 @@ function isAcceptableWebsitePageStatus(status: number) {
   return status >= 200 && status < 500
 }
 
+function extractAxiosErrorStatus(error: unknown) {
+  const status = Number((error as any)?.response?.status ?? 0)
+  return Number.isFinite(status) && status > 0 ? status : 0
+}
+
+function extractAxiosErrorStatusText(error: unknown) {
+  return String((error as any)?.response?.statusText ?? '').trim()
+}
+
+function buildWebsiteStatusWarningMessage(status: number, statusText = '') {
+  const normalizedStatus = Number(status)
+  if (!Number.isFinite(normalizedStatus) || normalizedStatus < 500) {
+    return ''
+  }
+
+  const normalizedStatusText = String(statusText ?? '').trim()
+  const suffix = normalizedStatusText ? `（${normalizedStatusText}）` : ''
+  return `网站当前返回 ${normalizedStatus}${suffix}，可能是服务器临时异常，请稍后重试并确认页面信息是否可信`
+}
+
+function detectAbnormalWebsiteMetadataTitle(title: string) {
+  const normalizedTitle = String(title ?? '').replace(/\s+/g, ' ').trim()
+  if (!normalizedTitle) {
+    return ''
+  }
+
+  if (/\b503\b.*\bservice unavailable\b/i.test(normalizedTitle) || /\bservice unavailable\b.*\b503\b/i.test(normalizedTitle)) {
+    return `当前页面标题看起来像 503 异常页：${normalizedTitle}`
+  }
+
+  if (/\b502\b.*\bbad gateway\b/i.test(normalizedTitle) || /\bbad gateway\b.*\b502\b/i.test(normalizedTitle)) {
+    return `当前页面标题看起来像 502 异常页：${normalizedTitle}`
+  }
+
+  if (/\b504\b.*\bgateway time(?:out)?\b/i.test(normalizedTitle) || /\bgateway time(?:out)?\b.*\b504\b/i.test(normalizedTitle)) {
+    return `当前页面标题看起来像 504 异常页：${normalizedTitle}`
+  }
+
+  return ''
+}
+
 function hasAttachmentContentDisposition(contentDisposition: string) {
   return /attachment/i.test(String(contentDisposition ?? ''))
 }
@@ -6870,6 +7070,8 @@ async function fetchWebsiteHtmlPreview(url: string, maxBytes = 256 * 1024, timeo
 
     return {
       finalUrl,
+      status: Number(response.status ?? 0),
+      statusText: String(response.statusText ?? '').trim(),
       contentType,
       contentDisposition,
       htmlText: '',
@@ -6878,6 +7080,8 @@ async function fetchWebsiteHtmlPreview(url: string, maxBytes = 256 * 1024, timeo
 
   return {
     finalUrl,
+    status: Number(response.status ?? 0),
+    statusText: String(response.statusText ?? '').trim(),
     contentType,
     contentDisposition,
     htmlText: await readStreamTextUpTo(stream, maxBytes),
@@ -8432,6 +8636,142 @@ function waitForWebsiteScreenshotPageReady(window: BrowserWindow, url: string) {
   })
 }
 
+async function waitForWebsiteCoverVisualReady(window: BrowserWindow, url: string) {
+  const webContents = window.webContents
+  const result = await withTimeout(
+    webContents.executeJavaScript(`
+(() => {
+  const VISIBLE_STYLE = (element) => {
+    if (!(element instanceof HTMLElement)) {
+      return false
+    }
+    const style = window.getComputedStyle(element)
+    if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || '1') === 0) {
+      return false
+    }
+    const rect = element.getBoundingClientRect()
+    return rect.width > 8 && rect.height > 8
+  }
+
+  const LOADING_SELECTORS = [
+    '[aria-busy="true"]',
+    '[role="progressbar"]',
+    '[class*="loading"]',
+    '[id*="loading"]',
+    '[class*="spinner"]',
+    '[id*="spinner"]',
+    '[class*="skeleton"]',
+    '[id*="skeleton"]',
+    '[class*="placeholder"]',
+    '[data-loading="true"]'
+  ]
+
+  const countVisibleLoading = () => {
+    const nodes = document.querySelectorAll(LOADING_SELECTORS.join(','))
+    let count = 0
+    nodes.forEach((node) => {
+      if (VISIBLE_STYLE(node)) {
+        count += 1
+      }
+    })
+    return count
+  }
+
+  return new Promise((resolve) => {
+    const startedAt = Date.now()
+    let stableSince = 0
+    let lastSignature = ''
+
+    const tick = () => {
+      const body = document.body
+      const root = document.documentElement
+      const readyState = document.readyState
+      const textLength = String(body?.innerText ?? '').trim().length
+      const imageCount = Array.from(document.images || []).filter((image) => {
+        const source = String(image.currentSrc || image.src || '').trim()
+        return Boolean(source) && !source.startsWith('data:')
+      }).length
+      const pendingImageCount = Array.from(document.images || []).filter((image) => {
+        const source = String(image.currentSrc || image.src || '').trim()
+        return Boolean(source) && !source.startsWith('data:') && !image.complete
+      }).length
+      const loadingCount = countVisibleLoading()
+      const scrollHeight = Math.max(
+        Number(body?.scrollHeight ?? 0),
+        Number(root?.scrollHeight ?? 0)
+      )
+      const viewportFilled = scrollHeight >= Math.max(window.innerHeight * 0.5, 320)
+      const hasMeaningfulContent = textLength >= 24 || imageCount > 0 || viewportFilled
+      const signature = [
+        readyState,
+        loadingCount,
+        pendingImageCount,
+        scrollHeight,
+        textLength > 0 ? 'text' : 'empty',
+        imageCount
+      ].join('|')
+
+      if (readyState === 'complete' && loadingCount === 0 && pendingImageCount <= 1 && hasMeaningfulContent) {
+        if (signature === lastSignature) {
+          if (!stableSince) {
+            stableSince = Date.now()
+          }
+          if ((Date.now() - stableSince) >= ${WEBSITE_COVER_VISUAL_READY_STABLE_MS}) {
+            resolve({
+              reason: 'stable',
+              readyState,
+              loadingCount,
+              pendingImageCount,
+              scrollHeight,
+              textLength,
+              imageCount
+            })
+            return
+          }
+        } else {
+          stableSince = Date.now()
+          lastSignature = signature
+        }
+      } else {
+        stableSince = 0
+        lastSignature = signature
+      }
+
+      if ((Date.now() - startedAt) >= ${WEBSITE_COVER_VISUAL_READY_TIMEOUT_MS}) {
+        resolve({
+          reason: 'timeout',
+          readyState,
+          loadingCount,
+          pendingImageCount,
+          scrollHeight,
+          textLength,
+          imageCount
+        })
+        return
+      }
+
+      window.setTimeout(tick, 250)
+    }
+
+    tick()
+  })
+})()
+    `),
+    WEBSITE_COVER_VISUAL_READY_TIMEOUT_MS + 1000,
+    '网站封面视觉稳定等待超时',
+    () => {
+      if (!window.isDestroyed()) {
+        window.destroy()
+      }
+    }
+  )
+
+  ResourceService.logger.info('website cover visual ready', {
+    url,
+    ...(typeof result === 'object' && result ? result as Record<string, unknown> : {})
+  })
+}
+
 async function captureWebsiteCoverBuffer(url: string, resourceId: string) {
   const partition = `website-cover-${String(resourceId ?? '').trim()}-${Date.now()}`
   const screenshotWindow = new BrowserWindow({
@@ -8475,7 +8815,10 @@ html, body {
 ::-webkit-scrollbar {
   display: none !important;
 }
-[class*="cookie"], [id*="cookie"], [class*="consent"], [id*="consent"], [aria-modal="true"] {
+[class*="cookie"], [id*="cookie"], [class*="consent"], [id*="consent"], [aria-modal="true"],
+[class*="loading"], [id*="loading"], [class*="spinner"], [id*="spinner"],
+[class*="skeleton"], [id*="skeleton"], [class*="placeholder"], [data-loading="true"],
+[aria-busy="true"], [role="progressbar"] {
   opacity: 0 !important;
   pointer-events: none !important;
 }
@@ -8488,7 +8831,23 @@ html, body {
     await withTimeout(screenshotWindow.webContents.executeJavaScript(`
 (() => {
   window.scrollTo(0, 0)
-  const selectors = ['[class*="cookie"]', '[id*="cookie"]', '[class*="consent"]', '[id*="consent"]', '[aria-modal="true"]']
+  const selectors = [
+    '[class*="cookie"]',
+    '[id*="cookie"]',
+    '[class*="consent"]',
+    '[id*="consent"]',
+    '[aria-modal="true"]',
+    '[class*="loading"]',
+    '[id*="loading"]',
+    '[class*="spinner"]',
+    '[id*="spinner"]',
+    '[class*="skeleton"]',
+    '[id*="skeleton"]',
+    '[class*="placeholder"]',
+    '[data-loading="true"]',
+    '[aria-busy="true"]',
+    '[role="progressbar"]'
+  ]
   for (const selector of selectors) {
     document.querySelectorAll(selector).forEach((node) => {
       if (node instanceof HTMLElement) {
@@ -8504,6 +8863,7 @@ html, body {
       }
     })
 
+    await waitForWebsiteCoverVisualReady(screenshotWindow, url)
     await waitForTimeout(WEBSITE_COVER_STABILIZE_DELAY_MS)
     const capturedImage = await withTimeout(
       screenshotWindow.webContents.capturePage(),
@@ -9111,8 +9471,8 @@ function isRemoteCoverPath(coverPath: string) {
 }
 
 async function extractVideoCoverFrameCandidates(videoPath: string) {
-  const resolvedFfmpegPath = String(ffmpegPath ?? '').trim()
-  const resolvedFfprobePath = String(ffprobeStatic?.path ?? '').trim()
+  const resolvedFfmpegPath = getBundledFfmpegPath()
+  const resolvedFfprobePath = getBundledFfprobePath()
 
   if (!resolvedFfmpegPath || !(await fs.pathExists(resolvedFfmpegPath))) {
     throw new Error('未找到内置 ffmpeg，请重新安装依赖')
@@ -9176,8 +9536,8 @@ async function extractVideoCoverFrameCandidates(videoPath: string) {
 }
 
 async function extractRandomVideoSubCoverFrameCandidates(videoPath: string, relativePath: string, count: number) {
-  const resolvedFfmpegPath = String(ffmpegPath ?? '').trim()
-  const resolvedFfprobePath = String(ffprobeStatic?.path ?? '').trim()
+  const resolvedFfmpegPath = getBundledFfmpegPath()
+  const resolvedFfprobePath = getBundledFfprobePath()
 
   if (!resolvedFfmpegPath || !(await fs.pathExists(resolvedFfmpegPath))) {
     throw new Error('未找到内置 ffmpeg，请重新安装依赖')
@@ -9247,7 +9607,7 @@ async function ensureVideoSubCoverPath(
     return normalizedExistingCoverPath
   }
 
-  const resolvedFfmpegPath = String(ffmpegPath ?? '').trim()
+  const resolvedFfmpegPath = getBundledFfmpegPath()
   if (!resolvedFfmpegPath || !(await fs.pathExists(resolvedFfmpegPath))) {
     throw new Error('未找到内置 ffmpeg，请重新安装依赖')
   }
@@ -9302,7 +9662,7 @@ async function ensureVideoCoverPath(
     return normalizedExistingCoverPath
   }
 
-  const resolvedFfmpegPath = String(ffmpegPath ?? '').trim()
+  const resolvedFfmpegPath = getBundledFfmpegPath()
   if (!resolvedFfmpegPath || !(await fs.pathExists(resolvedFfmpegPath))) {
     throw new Error('未找到内置 ffmpeg，请重新安装依赖')
   }

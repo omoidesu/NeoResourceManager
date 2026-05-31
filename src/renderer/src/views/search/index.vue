@@ -131,6 +131,8 @@ type ArchivePackageRecord = {
   archiveSize: number
   status: string
   archivedAt: number | null
+  archiveMissing: boolean
+  archiveMissingReason: string
   items: Array<{
     resourceId: string
     title: string
@@ -1038,7 +1040,8 @@ const filteredArchivePackages = computed(() => {
       item.categoryName,
       item.archiveFormat,
       item.archivePath,
-      item.sourcePath
+      item.sourcePath,
+      item.archiveMissingReason
     ].join(' ').toLowerCase()
     return searchText.includes(keyword)
   })
@@ -3263,15 +3266,19 @@ const handleClearCompletedArchiveQueueItems = async () => {
   }
 }
 
-const handleRestoreArchivedPackage = async (item: ArchivePackageRecord) => {
+const handleRestoreArchivedPackage = async (item: ArchivePackageRecord, options?: { restoreDirectory?: string }) => {
   const archiveId = String(item?.id ?? '').trim()
   if (!archiveId || restoringArchivePackageIds.value.includes(archiveId)) {
+    return
+  }
+  if (item.archiveMissing) {
+    notify('warning', '还原归档包', String(item.archiveMissingReason ?? '').trim() || '当前归档包已失效，无法还原')
     return
   }
 
   restoringArchivePackageIds.value = [...restoringArchivePackageIds.value, archiveId]
   try {
-    const result = await window.api.service.restoreArchivedPackage(archiveId)
+    const result = await window.api.service.restoreArchivedPackage(archiveId, options)
     const type = result?.type === 'success' ? 'success' : result?.type === 'warning' ? 'warning' : 'error'
     notify(type, '还原归档包', String(result?.message ?? '归档包已加入还原队列'))
     if (result?.type === 'success' || result?.type === 'warning') {
@@ -3294,10 +3301,36 @@ const handleRestoreArchivedPackage = async (item: ArchivePackageRecord) => {
   }
 }
 
-const handleBatchRestoreArchivedPackages = async () => {
-  const archiveIds = selectedArchivePackageRecords.value.map((item) => item.id).filter(Boolean)
-  if (!archiveIds.length) {
+const handleRestoreArchivedPackageToDirectory = async (item: ArchivePackageRecord) => {
+  const archiveId = String(item?.id ?? '').trim()
+  if (!archiveId || restoringArchivePackageIds.value.includes(archiveId)) {
     return
+  }
+  if (item.archiveMissing) {
+    notify('warning', '还原归档包', String(item.archiveMissingReason ?? '').trim() || '当前归档包已失效，无法还原')
+    return
+  }
+
+  const restoreDirectory = String(await window.api.dialog.selectFolder() ?? '').trim()
+  if (!restoreDirectory) {
+    return
+  }
+
+  await handleRestoreArchivedPackage(item, { restoreDirectory })
+}
+
+const handleBatchRestoreArchivedPackages = async () => {
+  const invalidRecords = selectedArchivePackageRecords.value.filter((item) => item.archiveMissing)
+  const validRecords = selectedArchivePackageRecords.value.filter((item) => !item.archiveMissing)
+  const archiveIds = validRecords.map((item) => item.id).filter(Boolean)
+  if (!archiveIds.length) {
+    if (invalidRecords.length) {
+      notify('warning', '批量还原归档包', '选中的归档包均已失效，请先清理失效记录')
+    }
+    return
+  }
+  if (invalidRecords.length) {
+    notify('warning', '批量还原归档包', `已自动跳过 ${invalidRecords.length} 个失效归档包`)
   }
 
   restoringArchivePackageIds.value = Array.from(new Set([...restoringArchivePackageIds.value, ...archiveIds]))
@@ -3388,6 +3421,22 @@ const handleBatchDeleteArchivedPackages = async () => {
 }
 
 const getArchivePackageRowKey = (item: ArchivePackageRecord) => item.id
+
+const getArchivePackageStateMeta = (item: ArchivePackageRecord) => {
+  if (item.archiveMissing) {
+    return {
+      type: 'error' as const,
+      label: '已失效',
+      tooltip: String(item.archiveMissingReason ?? '').trim() || '归档包文件不存在，可能已被手动移动或删除'
+    }
+  }
+
+  return {
+    type: 'success' as const,
+    label: '正常',
+    tooltip: '归档包文件可用'
+  }
+}
 
 const handleArchivePackageDataTableSelection = (keys: DataTableRowKey[]) => {
   selectedArchivePackageIds.value = keys.map((key) => String(key))
@@ -3603,6 +3652,30 @@ const archivePackageDataTableColumns = computed<DataTableColumns<ArchivePackageR
     }
   },
   {
+    title: '状态',
+    key: 'archiveMissing',
+    width: 108,
+    render: (row) => {
+      const stateMeta = getArchivePackageStateMeta(row)
+      return h(
+        NPopover,
+        { trigger: 'hover', placement: 'top' },
+        {
+          trigger: () => h(
+            NTag,
+            {
+              size: 'small',
+              bordered: false,
+              type: stateMeta.type
+            },
+            { default: () => stateMeta.label }
+          ),
+          default: () => stateMeta.tooltip
+        }
+      )
+    }
+  },
+  {
     title: '压缩等级',
     key: 'archiveLevel',
     width: 132,
@@ -3630,26 +3703,48 @@ const archivePackageDataTableColumns = computed<DataTableColumns<ArchivePackageR
     render: (row) => formatArchiveDateTime(row.archivedAt)
   },
   {
-    title: '归档路径',
-    key: 'archivePath',
+    title: '原路径',
+    key: 'sourcePath',
     minWidth: 300,
     ellipsis: {
       tooltip: true
     },
     render: (row) => h(
-      'code',
+      'div',
       {
-        class: 'archive-naive-table__path',
-        title: row.archivePath
+        style: {
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '4px'
+        }
       },
-      truncateMiddleText(row.archivePath, { head: 22, tail: 24 })
+      [
+        h(
+          'code',
+          {
+            class: 'archive-naive-table__path',
+            title: row.sourcePath
+          },
+          truncateMiddleText(row.sourcePath, { head: 22, tail: 24 })
+        ),
+        row.archiveMissing
+          ? h(
+              'span',
+              {
+                class: 'archive-naive-table__warning',
+                title: row.archiveMissingReason
+              },
+              row.archiveMissingReason
+            )
+          : null
+      ]
     )
   },
   {
     title: '操作',
     key: 'actions',
     fixed: 'right',
-    width: 292,
+    width: 408,
     render: (row) => h(
       'div',
       { class: 'archive-table__actions archive-naive-table__actions' },
@@ -3661,10 +3756,22 @@ const archivePackageDataTableColumns = computed<DataTableColumns<ArchivePackageR
             tertiary: true,
             class: 'archive-table__action-button',
             loading: restoringArchivePackageIds.value.includes(row.id),
-            disabled: deletingArchivePackageIds.value.includes(row.id),
+            disabled: deletingArchivePackageIds.value.includes(row.id) || row.archiveMissing,
             onClick: () => handleRestoreArchivedPackage(row)
           },
           { default: () => '还原' }
+        ),
+        h(
+          NButton,
+          {
+            size: 'tiny',
+            tertiary: true,
+            class: 'archive-table__action-button archive-table__action-button--wide',
+            loading: restoringArchivePackageIds.value.includes(row.id),
+            disabled: deletingArchivePackageIds.value.includes(row.id) || row.archiveMissing,
+            onClick: () => handleRestoreArchivedPackageToDirectory(row)
+          },
+          { default: () => '还原到指定路径' }
         ),
         h(
           NPopconfirm,
@@ -3791,6 +3898,37 @@ const handleArchiveProgressEvent = (event: Event) => {
   }
 }
 
+const handleArchivePackageStateChangedEvent = (event: Event) => {
+  const customEvent = event as CustomEvent<{
+    archiveId?: string
+    archivePath?: string
+    missingStatus?: boolean
+    changedAt?: number
+  }>
+  const archiveId = String(customEvent.detail?.archiveId ?? '').trim()
+  if (!archiveId) {
+    return
+  }
+
+  const missingStatus = Boolean(customEvent.detail?.missingStatus)
+  archivePackages.value = archivePackages.value.map((item) => {
+    if (item.id !== archiveId) {
+      return item
+    }
+
+    const archivePath = String(customEvent.detail?.archivePath ?? item.archivePath ?? '').trim()
+    return {
+      ...item,
+      archivePath,
+      missingStatus,
+      archiveMissing: missingStatus,
+      archiveMissingReason: missingStatus
+        ? (archivePath ? '归档包文件不存在，可能已被手动移动或删除' : '归档记录缺少归档包路径')
+        : ''
+    }
+  })
+}
+
 const handleResourceArchiveFinished = (event: Event) => {
   const customEvent = event as CustomEvent<{ taskId?: string; operation?: 'archive' | 'restore'; archiveId?: string; resourceId?: string; success?: boolean }>
   const normalizedResourceId = String(customEvent.detail?.resourceId ?? '').trim()
@@ -3834,6 +3972,7 @@ onMounted(() => {
   window.addEventListener('app-settings-changed', handleSettingsChanged as EventListener)
   window.addEventListener('resource-archive-progress', handleArchiveProgressEvent as EventListener)
   window.addEventListener('resource-archive-finished', handleResourceArchiveFinished as EventListener)
+  window.addEventListener('archive-package-state-changed', handleArchivePackageStateChangedEvent as EventListener)
   void loadGovernanceIssues()
   void refreshArchiveQueue().catch(() => {})
 })
@@ -3844,6 +3983,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('app-settings-changed', handleSettingsChanged as EventListener)
   window.removeEventListener('resource-archive-progress', handleArchiveProgressEvent as EventListener)
   window.removeEventListener('resource-archive-finished', handleResourceArchiveFinished as EventListener)
+  window.removeEventListener('archive-package-state-changed', handleArchivePackageStateChangedEvent as EventListener)
   document.body.style.userSelect = ''
 })
 
@@ -4348,7 +4488,7 @@ watch(
             </div>
 
             <div class="archive-panel__filters">
-              <n-input v-model:value="archiveFilterKeyword" clearable placeholder="搜索标题、分类、格式或归档路径" />
+              <n-input v-model:value="archiveFilterKeyword" clearable placeholder="搜索标题、分类、格式、原路径或归档路径" />
               <n-select v-model:value="archiveFilterCategory" :options="archiveCategoryOptions" />
               <n-select v-model:value="archiveFilterFormat" :options="archiveFormatOptions" />
             </div>
@@ -5180,6 +5320,17 @@ watch(
   max-width: 100%;
   overflow: hidden;
   color: v-bind(mutedTextColor);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archive-naive-table__warning {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  color: v-bind('topThemeTokens.error');
+  font-size: 12px;
+  line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

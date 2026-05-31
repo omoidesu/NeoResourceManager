@@ -44,6 +44,22 @@ const props = defineProps({
     type: String,
     required: true
   },
+  progressToastProgress: {
+    type: Number,
+    default: null
+  },
+  progressToastTitle: {
+    type: String,
+    default: ''
+  },
+  progressToastSubtitleLines: {
+    type: Array as PropType<string[]>,
+    default: () => []
+  },
+  progressToastClickable: {
+    type: Boolean,
+    default: true
+  },
   currentDirectoryName: {
     type: String,
     required: true
@@ -313,15 +329,15 @@ watch(
 
   <BackgroundProgressToast
     :show="showProgressToast"
-    :progress="batchAnalyzePercent"
-    :title="batchProgressStage === 'import' ? `正在后台导入${batchImportResourceLabel}` : `正在后台分析${batchImportResourceLabel}${detailIsWebsite ? '书签' : '目录'}`"
-    :subtitle-lines="[
+    :progress="progressToastProgress == null ? batchAnalyzePercent : progressToastProgress"
+    :title="progressToastTitle || (batchProgressStage === 'import' ? `正在后台导入${batchImportResourceLabel}` : `正在后台分析${batchImportResourceLabel}${detailIsWebsite ? '书签' : '目录'}`)"
+    :subtitle-lines="progressToastSubtitleLines.length ? progressToastSubtitleLines : [
       batchProgressStage === 'import'
         ? `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${batchImportResourceLabel}`
         : `第 ${batchAnalyzeDisplayIndex} / ${batchAnalyzeTotal} 个${detailIsWebsite ? '书签' : '目录'}`,
       currentDirectoryName
     ]"
-    clickable
+    :clickable="progressToastClickable"
     @click="onReopenProgress"
     @close="onDismissProgressToast"
   />

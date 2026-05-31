@@ -104,12 +104,28 @@ const DEFAULT_CATEGORY_PILL_COLORS: Record<string, string> = {
 
 export class DatabaseService {
   private static categoryPillColorColumnReady = false
+  private static categoryArchiveNameColumnReady = false
   private static resourceTopAndHomePinSchemaReady = false
   private static mediaSubSchemaReady = false
   private static resourceSearchTextColumnReady = false
   private static resourceIssueIgnoreSchemaReady = false
   private static archivePackageSchemaReady = false
   private static categoryArchivePolicyExtraReady = false
+
+  private static async ensureCategoryArchiveNameColumn() {
+    if (this.categoryArchiveNameColumnReady) {
+      return
+    }
+
+    const rows = await db.all(sql`PRAGMA table_info('category')`) as Array<{ name?: string }>
+    const columns = new Set(rows.map((row) => String(row.name ?? '').trim()))
+    if (!columns.has('archive_name')) {
+      await db.run(sql`ALTER TABLE category ADD archive_name text`)
+    }
+
+    await db.run(sql`UPDATE category SET archive_name = name WHERE archive_name IS NULL OR trim(archive_name) = ''`)
+    this.categoryArchiveNameColumnReady = true
+  }
 
   private static resolveDefaultArchivePolicy(extra: {
     extendTable?: string | null
@@ -486,6 +502,7 @@ export class DatabaseService {
         id text PRIMARY KEY NOT NULL,
         package_title text NOT NULL,
         archive_path text NOT NULL,
+        missing_status integer DEFAULT 0,
         archive_format text NOT NULL,
         archive_level integer DEFAULT 9,
         password_enabled integer DEFAULT 0,
@@ -524,6 +541,9 @@ export class DatabaseService {
     const packageColumns = new Set(packageRows.map((row) => String(row.name ?? '').trim()))
     if (!packageColumns.has('archive_password')) {
       await db.run(sql`ALTER TABLE archive_package ADD archive_password text`)
+    }
+    if (!packageColumns.has('missing_status')) {
+      await db.run(sql`ALTER TABLE archive_package ADD missing_status integer DEFAULT 0`)
     }
 
     const itemRows = await db.all(sql`PRAGMA table_info('archive_package_item')`) as Array<{ name?: string }>
@@ -806,6 +826,7 @@ export class DatabaseService {
   static async getCategory() {
     await Promise.all([
       this.ensureCategoryPillColorColumn(),
+      this.ensureCategoryArchiveNameColumn(),
       this.ensureCategoryArchivePolicyExtra()
     ])
 
@@ -813,6 +834,7 @@ export class DatabaseService {
         .select({
           id: category.id,
           name: category.name,
+          archiveName: category.archiveName,
           emoji: category.emoji,
           pillColor: category.pillColor,
           sort: category.sort,
@@ -838,6 +860,7 @@ export class DatabaseService {
   static async getCategoryById(id: string) {
     await Promise.all([
       this.ensureCategoryPillColorColumn(),
+      this.ensureCategoryArchiveNameColumn(),
       this.ensureCategoryArchivePolicyExtra()
     ])
 
@@ -855,6 +878,7 @@ export class DatabaseService {
   static async getCategoryByName(name: string) {
     await Promise.all([
       this.ensureCategoryPillColorColumn(),
+      this.ensureCategoryArchiveNameColumn(),
       this.ensureCategoryArchivePolicyExtra()
     ])
 
@@ -914,6 +938,26 @@ export class DatabaseService {
       value: setting.default,
       locked,
     })
+  }
+
+  static async updateCategoryArchiveName(categoryId: string, archiveName: string, tx?: DbExecutor) {
+    await this.ensureCategoryArchiveNameColumn()
+    const executor = tx ?? db
+    const normalizedCategoryId = String(categoryId ?? '').trim()
+    const normalizedArchiveName = String(archiveName ?? '').trim()
+    if (!normalizedCategoryId) {
+      throw new Error('分类ID无效')
+    }
+
+    await executor
+      .update(category)
+      .set({
+        archiveName: normalizedArchiveName
+      })
+      .where(and(
+        eq(category.id, normalizedCategoryId),
+        eq(category.isDeleted, false)
+      ))
   }
 
   static async getAllSetting() {
@@ -3849,7 +3893,12 @@ export class DatabaseService {
     }
   }
 
-  static async restoreResourceArchive(archiveId: string, resourceIds: string[], tx?: DbExecutor) {
+  static async restoreResourceArchive(
+    archiveId: string,
+    resourceIds: string[],
+    tx?: DbExecutor,
+    restoredPaths?: Array<{ resourceId: string; basePath: string; fileName: string | null }>
+  ) {
     await this.ensureArchivePackageSchema()
     const executor = tx ?? db
     const normalizedResourceIds = resourceIds.map((item) => String(item ?? '').trim()).filter(Boolean)
@@ -3861,6 +3910,23 @@ export class DatabaseService {
           missingStatus: false
         })
         .where(inArray(resource.id, normalizedResourceIds))
+    }
+    for (const restoredPath of restoredPaths ?? []) {
+      const resourceId = String(restoredPath?.resourceId ?? '').trim()
+      const basePath = String(restoredPath?.basePath ?? '').trim()
+      if (!resourceId || !basePath) {
+        continue
+      }
+
+      await executor
+        .update(resource)
+        .set({
+          basePath,
+          fileName: restoredPath.fileName,
+          isDeleted: false,
+          missingStatus: false
+        })
+        .where(eq(resource.id, resourceId))
     }
     await executor
       .update(archivePackageItem)
@@ -3895,6 +3961,33 @@ export class DatabaseService {
       .where(eq(archivePackage.id, archiveId))
   }
 
+  static async updateArchivePackageMissingStatus(archiveId: string, missingStatus: boolean, tx?: DbExecutor) {
+    await this.ensureArchivePackageSchema()
+    const executor = tx ?? db
+    await executor
+      .update(archivePackage)
+      .set({
+        missingStatus,
+      })
+      .where(eq(archivePackage.id, archiveId))
+  }
+
+  static async getArchiveWatcherPackages() {
+    await this.ensureArchivePackageSchema()
+    return await db
+      .select({
+        id: archivePackage.id,
+        archivePath: archivePackage.archivePath,
+        missingStatus: archivePackage.missingStatus,
+      })
+      .from(archivePackage)
+      .where(and(
+        eq(archivePackage.isDeleted, false),
+        not(eq(archivePackage.status, 'deleted')),
+        not(eq(archivePackage.status, 'restored'))
+      ))
+  }
+
   static async listArchivedPackages() {
     await this.ensureArchivePackageSchema()
 
@@ -3903,6 +3996,7 @@ export class DatabaseService {
         id: archivePackage.id,
         packageTitle: archivePackage.packageTitle,
         archivePath: archivePackage.archivePath,
+        missingStatus: archivePackage.missingStatus,
         archiveFormat: archivePackage.archiveFormat,
         archiveLevel: archivePackage.archiveLevel,
         passwordEnabled: archivePackage.passwordEnabled,
@@ -3935,6 +4029,7 @@ export class DatabaseService {
       id: string
       resourceId: string
       archivePath: string
+      missingStatus: boolean | null
       archiveFormat: string
       archiveLevel: number | null
       passwordEnabled: boolean | null
@@ -3988,6 +4083,7 @@ export class DatabaseService {
         id: packageId,
         resourceId: itemRecord.resourceId,
         archivePath: String(row.archivePath ?? '').trim(),
+        missingStatus: row.missingStatus ?? null,
         archiveFormat: String(row.archiveFormat ?? '').trim(),
         archiveLevel: row.archiveLevel ?? null,
         passwordEnabled: row.passwordEnabled ?? null,
@@ -4281,4 +4377,5 @@ export class DatabaseService {
     const executor = tx ?? db
     return executor.update(dictData).set(data).where(eq(dictData.id, data.id)).run()
   }
+
 }

@@ -10,6 +10,12 @@ useECharts([CanvasRenderer, PieChart, BarChart, GridComponent, TooltipComponent,
 
 type Tone = 'mint' | 'blue' | 'amber' | 'purple' | 'rose' | 'green' | 'slate' | 'cyan' | 'orange' | 'magenta' | 'lime'
 type AnalysisTabKey = 'category' | 'health' | 'longUnvisited' | 'usage' | 'addedTrend'
+type DashboardShortcut = {
+  label: string
+  value: string
+  tone: Tone
+  routeName?: string
+}
 
 const props = defineProps<{
   isDark: boolean
@@ -49,7 +55,7 @@ const props = defineProps<{
   usageInsightSummaryText: string
   addedTrendChartOption: any
   addedTrendInsightText: string
-  shortcuts: Array<{ label: string; value: string; tone: Tone }>
+  shortcuts: DashboardShortcut[]
   formatNumber: (value: number) => string
   setHeatmapFrameRef: (element: Element | null) => void
   handleCategoryDistributionActiveChange: (label?: string | null) => void
@@ -64,6 +70,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'update:heatmapRangeDays', value: 30 | 84 | 365): void
   (e: 'update:activeAnalysisTab', value: AnalysisTabKey): void
+  (e: 'shortcut-click', item: DashboardShortcut): void
 }>()
 
 const toneClass = (tone: Tone) => `tone-${tone}`
@@ -394,7 +401,12 @@ const setHeatmapFrame = (value: any) => {
       v-for="item in props.shortcuts"
       :key="item.label"
       class="shortcut-card"
-      :class="toneClass(item.tone)"
+      :class="[toneClass(item.tone), { 'shortcut-card--clickable': item.routeName }]"
+      :tabindex="item.routeName ? 0 : undefined"
+      :role="item.routeName ? 'button' : undefined"
+      @click="item.routeName && emit('shortcut-click', item)"
+      @keydown.enter.prevent="item.routeName && emit('shortcut-click', item)"
+      @keydown.space.prevent="item.routeName && emit('shortcut-click', item)"
     >
       <strong>{{ item.label }}</strong>
       <span>{{ item.value }}</span>
@@ -956,6 +968,20 @@ const setHeatmapFrame = (value: any) => {
   border: 1px solid var(--home-border);
   border-radius: 18px;
   background: var(--home-panel);
+}
+
+.shortcut-card--clickable {
+  cursor: pointer;
+  transition:
+    border-color 0.2s ease,
+    transform 0.2s ease;
+}
+
+.shortcut-card--clickable:hover,
+.shortcut-card--clickable:focus-visible {
+  border-color: color-mix(in srgb, var(--home-primary) 56%, var(--home-border));
+  transform: translateY(-1px);
+  outline: none;
 }
 
 .shortcut-card strong {

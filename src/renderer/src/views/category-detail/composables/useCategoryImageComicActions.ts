@@ -25,6 +25,7 @@ interface UseCategoryImageComicActionsOptions {
   showNotifyByType: (type: NotifyType, title: string, content: string) => void
   getResourceFilePath: (resource: any) => string
   loadPictureViewerScrollMode: () => Promise<void>
+  buildResourceQuery: (page: number, size: number) => Record<string, unknown>
   fetchData: () => Promise<void>
   readComicProgress: (resourceId: string) => Promise<number>
   writeComicProgress: (resourceId: string, progressIndex: number) => Promise<void>
@@ -119,11 +120,10 @@ export const useCategoryImageComicActions = (options: UseCategoryImageComicActio
       }
 
       const pageSize = Math.max(options.totalResources.value, options.resourceList.value.length, 1)
-      const result = await window.api.db.getResourceByCategoryId(options.categoryId.value, {
-        page: 1,
-        pageSize,
-        sortBy: options.sortBy.value
-      })
+      const result = await window.api.db.getResourceByCategoryId(
+        options.categoryId.value,
+        options.buildResourceQuery(1, pageSize)
+      )
       const allResources = Array.isArray(result?.items) && result.items.length ? result.items : options.resourceList.value
       const imageResources = allResources.filter((item: any) => !item?.missingStatus && options.getResourceFilePath(item))
       const imagePaths = imageResources.map((item: any) => options.getResourceFilePath(item))

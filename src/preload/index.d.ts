@@ -4,6 +4,7 @@ import {settings, category} from "../main/db/schema";
 import { ResourceForm } from '../main/model/models'
 import type {
   AppNotificationMessage,
+  ArchivePackageStateChangedMessage,
   BatchImportProgressMessage,
   ResourceArchiveProgressMessage,
   ResourceStateChangedMessage,
@@ -116,12 +117,17 @@ declare global {
           sourcePath: string
           playbackPath: string
         } | null>,
-        getVideoPlaybackUrl: (filePath: string, startTime?: number) => Promise<{
+        getVideoPlaybackUrl: (filePath: string, startTime?: number, fastSeek?: boolean, sessionId?: string) => Promise<{
           url: string
           transcoded: boolean
           sourcePath: string
           playbackPath: string
           duration: number
+          mode: 'direct' | 'remux-cache' | 'stream-transcode' | 'full-transcode-cache'
+          isLossless: boolean
+          sessionId?: string
+          reason?: string
+          errorMessage?: string
         } | null>,
         readTextFile: (filePath: string, encoding?: string) => Promise<string | null>,
         getTextFileInfo: (filePath: string) => Promise<{
@@ -222,8 +228,8 @@ declare global {
         archiveResources: (resourceIds: string[]) => Promise<any>,
         archiveResourcesAsPackage: (resourceIds: string[], packageTitle?: string) => Promise<any>,
         listArchivedPackages: () => Promise<any>,
-        restoreArchivedPackage: (archiveId: string) => Promise<any>,
-        restoreArchivedPackages: (archiveIds: string[]) => Promise<any>,
+        restoreArchivedPackage: (archiveId: string, options?: { restoreDirectory?: string }) => Promise<any>,
+        restoreArchivedPackages: (archiveIds: string[], options?: { restoreDirectory?: string }) => Promise<any>,
         deleteArchivedPackage: (archiveId: string) => Promise<any>,
         deleteArchivedPackages: (archiveIds: string[]) => Promise<any>,
         listArchiveQueueItems: () => Promise<any>,
@@ -237,7 +243,16 @@ declare global {
         startNotificationPush: () => Promise<boolean>,
         onNotificationPush: (listener: (message: AppNotificationMessage) => void) => () => void,
         onResourceStateChanged: (listener: (message: ResourceStateChangedMessage) => void) => () => void,
+        onArchivePackageStateChanged: (listener: (message: ArchivePackageStateChangedMessage) => void) => () => void,
         onVideoFrameCaptureShortcut: (listener: () => void) => () => void,
+        onVideoTranscodeFailed: (listener: (message: {
+          sessionId: string
+          filePath: string
+          message: string
+          code?: number | null
+          signal?: string | null
+          stderr?: string
+        }) => void) => () => void,
         onBatchImportProgress: (listener: (message: BatchImportProgressMessage) => void) => () => void,
         onResourceArchiveProgress: (listener: (message: ResourceArchiveProgressMessage) => void) => () => void,
         onWebsiteCoverProgress: (listener: (message: WebsiteCoverProgressMessage) => void) => () => void,

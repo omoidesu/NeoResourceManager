@@ -9,6 +9,11 @@ type UseVideoPlaybackSessionOptions = {
   onProgressPersisted: (value: { resourceId: string; filePath: string; playbackTime: number }) => void
 }
 
+type PersistProgressOptions = {
+  allowZero?: boolean
+  playbackTime?: number
+}
+
 export const useVideoPlaybackSession = ({
   videoRef,
   currentTrack,
@@ -17,10 +22,24 @@ export const useVideoPlaybackSession = ({
   onProgressPersisted
 }: UseVideoPlaybackSessionOptions) => {
   let playbackSessionResourceId = ''
+  let lastPersistedFilePath = ''
+  let lastPersistedPlaybackTime = -1
 
   const getPlaybackSessionResourceId = () => playbackSessionResourceId
 
-  const persistCurrentProgress = async () => {
+  const resolvePlaybackTime = (overrideTime?: number) => {
+    if (typeof overrideTime === 'number' && Number.isFinite(overrideTime)) {
+      return Math.max(0, Math.floor(overrideTime))
+    }
+
+    const video = videoRef.value
+    const rawTime = isCurrentSourceTranscoded.value
+      ? currentTime.value
+      : (video?.currentTime ?? currentTime.value ?? 0)
+    return Math.max(0, Math.floor(Number(rawTime ?? 0)))
+  }
+
+  const persistCurrentProgress = async (options: PersistProgressOptions = {}) => {
     const track = currentTrack.value
     const resourceId = String(track?.resourceId ?? '').trim()
     const filePath = String(track?.path ?? '').trim()
@@ -28,11 +47,18 @@ export const useVideoPlaybackSession = ({
       return
     }
 
-    const playbackTime = Math.max(
-      0,
-      Math.floor(isCurrentSourceTranscoded.value ? currentTime.value : (videoRef.value?.currentTime ?? currentTime.value ?? 0))
-    )
+    const playbackTime = resolvePlaybackTime(options.playbackTime)
+    if (playbackTime <= 0 && !options.allowZero) {
+      return
+    }
+
+    if (filePath === lastPersistedFilePath && playbackTime === lastPersistedPlaybackTime) {
+      return
+    }
+
     await window.api.service.updateVideoPlaybackProgress(resourceId, filePath, playbackTime)
+    lastPersistedFilePath = filePath
+    lastPersistedPlaybackTime = playbackTime
     onProgressPersisted({
       resourceId,
       filePath,

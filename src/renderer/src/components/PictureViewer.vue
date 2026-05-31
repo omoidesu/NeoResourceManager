@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, defineComponent, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineComponent, h, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { Ref } from 'vue'
 import {
   CopyOutline,
   EyeOutline,
@@ -8,6 +9,8 @@ import {
   OpenOutline,
   ChevronBackOutline,
   ChevronForwardOutline,
+  PauseOutline,
+  PlayOutline,
   RefreshOutline,
   TrashOutline
 } from '@vicons/ionicons5'
@@ -56,6 +59,13 @@ const AntDesignRotateRightOutlined = defineComponent({
 const currentIndex = ref(0)
 const scale = ref(1)
 const rotationDeg = ref(0)
+const injectedAppPrimaryColor = inject<Readonly<Ref<string>>>('appPrimaryColor')
+const autoModeEnabled = ref(false)
+const autoIntervalSeconds = ref(3)
+const autoCycleStartedAt = ref(0)
+const autoProgressTick = ref(0)
+let autoTimer: number | null = null
+let autoProgressTimer: number | null = null
 const thumbPreviewCache = useReaderImagePreviewCache({
   maxWidth: 240,
   maxHeight: 160,
@@ -105,6 +115,23 @@ const currentImageUrl = computed(() => fullImageUrlMap.value[currentImagePath.va
 const hasPrevious = computed(() => props.imagePaths.length > 1)
 const hasNext = computed(() => props.imagePaths.length > 1)
 const isImageDraggable = computed(() => scale.value > 1 && Boolean(currentImageUrl.value))
+const canUseAutoMode = computed(() => props.show && props.imagePaths.length > 1)
+const autoProgressColor = computed(() => injectedAppPrimaryColor?.value || 'var(--n-primary-color)')
+const normalizedAutoIntervalMs = computed(() => {
+  const seconds = Number(autoIntervalSeconds.value)
+  const normalizedSeconds = Number.isFinite(seconds) ? Math.max(1, Math.min(60, seconds)) : 3
+  return normalizedSeconds * 1000
+})
+const autoProgressPercentage = computed(() => {
+  void autoProgressTick.value
+  if (!autoModeEnabled.value || autoCycleStartedAt.value <= 0) {
+    return 0
+  }
+
+  const elapsed = Date.now() - autoCycleStartedAt.value
+  const remainingRatio = 1 - elapsed / normalizedAutoIntervalMs.value
+  return Math.max(0, Math.min(100, Math.round(remainingRatio * 100)))
+})
 
 const loadThumbPreviewImage = async (filePath: string) => {
   await thumbPreviewCache.load(filePath)
@@ -223,6 +250,72 @@ const goNext = () => {
 
   currentIndex.value = clampIndex(currentIndex.value + 1)
   resetTransform()
+}
+
+const stopAutoMode = () => {
+  autoModeEnabled.value = false
+}
+
+const clearAutoTimer = () => {
+  if (!autoTimer) {
+    return
+  }
+
+  window.clearInterval(autoTimer)
+  autoTimer = null
+}
+
+const clearAutoProgressTimer = () => {
+  if (!autoProgressTimer) {
+    return
+  }
+
+  window.clearInterval(autoProgressTimer)
+  autoProgressTimer = null
+}
+
+const resetAutoProgressCountdown = () => {
+  autoCycleStartedAt.value = Date.now()
+  autoProgressTick.value += 1
+}
+
+const startAutoProgressTimer = () => {
+  clearAutoProgressTimer()
+
+  if (!autoModeEnabled.value || !canUseAutoMode.value) {
+    return
+  }
+
+  resetAutoProgressCountdown()
+  autoProgressTimer = window.setInterval(() => {
+    autoProgressTick.value += 1
+  }, 100)
+}
+
+const startAutoTimer = () => {
+  clearAutoTimer()
+
+  if (!autoModeEnabled.value || !canUseAutoMode.value) {
+    return
+  }
+
+  autoTimer = window.setInterval(() => {
+    if (!props.show || props.imagePaths.length <= 1) {
+      stopAutoMode()
+      return
+    }
+
+    goNext()
+  }, normalizedAutoIntervalMs.value)
+}
+
+const toggleAutoMode = () => {
+  if (!canUseAutoMode.value) {
+    stopAutoMode()
+    return
+  }
+
+  autoModeEnabled.value = !autoModeEnabled.value
 }
 
 const handleWheel = (event: WheelEvent) => {
@@ -498,6 +591,7 @@ watch(
   () => props.show,
   (visible) => {
     if (!visible) {
+      stopAutoMode()
       resetTransform()
       clearImageCache()
       return
@@ -531,6 +625,9 @@ watch(
   () => props.imagePaths,
   () => {
     currentIndex.value = clampIndex(currentIndex.value)
+    if (props.imagePaths.length <= 1) {
+      stopAutoMode()
+    }
     resetTransform()
     clearImageCache()
     void loadMainImage(currentImagePath.value)
@@ -542,6 +639,9 @@ watch(
 
 watch(currentIndex, () => {
   emit('index-change', currentIndex.value)
+  if (autoModeEnabled.value) {
+    resetAutoProgressCountdown()
+  }
   void loadMainImage(currentImagePath.value)
   void preloadThumbsAroundCurrent()
   void scrollActiveThumbIntoView()
@@ -556,6 +656,18 @@ watch([scale, currentImageUrl, imagePanBounds], () => {
   clampImagePanOffset()
 })
 
+watch([autoModeEnabled, normalizedAutoIntervalMs, canUseAutoMode], () => {
+  if (!autoModeEnabled.value || !canUseAutoMode.value) {
+    clearAutoTimer()
+    clearAutoProgressTimer()
+    autoCycleStartedAt.value = 0
+    return
+  }
+
+  startAutoTimer()
+  startAutoProgressTimer()
+})
+
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown)
   window.addEventListener('mousemove', handleGlobalMouseMove)
@@ -563,6 +675,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  clearAutoTimer()
+  clearAutoProgressTimer()
   window.removeEventListener('keydown', handleKeydown)
   window.removeEventListener('mousemove', handleGlobalMouseMove)
   window.removeEventListener('mouseup', stopStageDragging)
@@ -603,6 +717,33 @@ onBeforeUnmount(() => {
             </template>
             下一张
           </n-tooltip>
+        </div>
+        <div class="picture-viewer__toolbar-center">
+          <n-tooltip trigger="hover">
+            <template #trigger>
+              <n-button quaternary round :disabled="!canUseAutoMode" @click="toggleAutoMode">
+                <template #icon>
+                  <n-icon :component="autoModeEnabled ? PauseOutline : PlayOutline" />
+                </template>
+                自动模式
+              </n-button>
+            </template>
+            {{ autoModeEnabled ? '暂停自动切换' : '自动切换下一张' }}
+          </n-tooltip>
+          <div class="picture-viewer__auto-interval">
+            <span class="picture-viewer__auto-label">间隔</span>
+            <n-input-number
+              v-model:value="autoIntervalSeconds"
+              size="small"
+              :min="1"
+              :max="60"
+              :step="1"
+              :show-button="false"
+              :disabled="!canUseAutoMode"
+              class="picture-viewer__auto-input"
+            />
+            <span class="picture-viewer__auto-label">秒</span>
+          </div>
         </div>
         <div class="picture-viewer__toolbar-right">
           <n-tooltip trigger="hover">
@@ -694,6 +835,17 @@ onBeforeUnmount(() => {
         @mousemove="handleStageMouseMove"
         @mouseleave="handleStageMouseLeave"
       >
+        <n-progress
+          v-if="autoModeEnabled"
+          type="line"
+          :color="autoProgressColor"
+          :percentage="autoProgressPercentage"
+          :show-indicator="false"
+          :height="4"
+          :border-radius="999"
+          :fill-border-radius="999"
+          class="picture-viewer__auto-progress"
+        />
         <div class="picture-viewer__image-scroll-container">
           <div class="picture-viewer__image-center">
             <img
@@ -762,9 +914,9 @@ onBeforeUnmount(() => {
 }
 
 .picture-viewer__toolbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   padding: 14px 14px 0;
 }
@@ -774,6 +926,39 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.picture-viewer__toolbar-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.picture-viewer__toolbar-right {
+  justify-content: flex-end;
+}
+
+.picture-viewer__auto-interval {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: rgba(255, 255, 255, 0.74);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.picture-viewer__auto-label {
+  line-height: 1;
+}
+
+.picture-viewer__auto-input {
+  width: 58px;
+}
+
+.picture-viewer__auto-input :deep(.n-input) {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .picture-viewer__stage {
@@ -802,6 +987,24 @@ onBeforeUnmount(() => {
 
 .picture-viewer__stage--dragging {
   cursor: grabbing;
+}
+
+.picture-viewer__auto-progress {
+  position: absolute;
+  top: 0;
+  left: 14px;
+  right: 14px;
+  z-index: 2;
+  width: auto;
+  pointer-events: none;
+}
+
+.picture-viewer__auto-progress :deep(.n-progress-graph-line) {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+.picture-viewer__auto-progress :deep(.n-progress-graph-line-fill) {
+  transition: width 0.1s linear;
 }
 
 .picture-viewer__image-scroll-container {

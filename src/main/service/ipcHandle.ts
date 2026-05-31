@@ -235,8 +235,8 @@ function registerDialog() {
     return DialogService.getAudioPlaybackUrl(filePath);
   })
 
-  ipcMain.handle('dialog:get-video-playback-url', async (_event, filePath: string, startTime?: number) => {
-    return DialogService.getVideoPlaybackUrl(filePath, startTime);
+  ipcMain.handle('dialog:get-video-playback-url', async (_event, filePath: string, startTime?: number, fastSeek?: boolean, sessionId?: string) => {
+    return DialogService.getVideoPlaybackUrl(filePath, startTime, fastSeek, sessionId);
   })
 
   ipcMain.handle('dialog:read-text-file', async (_event, filePath: string, encoding?: string) => {
@@ -578,12 +578,12 @@ function registerService() {
     return ResourceService.listArchivedPackages()
   })
 
-  ipcMain.handle('service:restore-archived-package', async (_event, archiveId: string) => {
-    return ResourceService.restoreArchivedPackage(archiveId)
+  ipcMain.handle('service:restore-archived-package', async (_event, archiveId: string, options?: { restoreDirectory?: string }) => {
+    return ResourceService.restoreArchivedPackage(archiveId, options)
   })
 
-  ipcMain.handle('service:restore-archived-packages', async (_event, archiveIds: string[]) => {
-    return ResourceService.restoreArchivedPackages(archiveIds)
+  ipcMain.handle('service:restore-archived-packages', async (_event, archiveIds: string[], options?: { restoreDirectory?: string }) => {
+    return ResourceService.restoreArchivedPackages(archiveIds, options)
   })
 
   ipcMain.handle('service:delete-archived-package', async (_event, archiveId: string) => {

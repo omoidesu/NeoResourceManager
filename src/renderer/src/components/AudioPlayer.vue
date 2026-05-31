@@ -76,7 +76,56 @@ const emit = defineEmits<{
 const AUDIO_PLAYER_ONGOING_ID = 'audio-player:ongoing'
 const AUDIO_PLAYER_LAYOUT_MODE_STORAGE_KEY = 'neo-resource:audio-player-layout-mode'
 const AUDIO_PLAYER_OSU_UNLOCKED_STORAGE_KEY = 'neo-resource:audio-player-osu-unlocked'
+const AUDIO_AUTOPLAY_RETRY_DELAY_MS = 180
+const MAX_AUDIO_AUTOPLAY_ATTEMPTS = 4
 const logger = createLogger('audio-player')
+
+const getAudioElementDiagnostics = () => {
+  const audioElement = audioRef.value
+  const mediaError = audioElement?.error
+
+  return {
+    currentSrc: String(audioElement?.currentSrc ?? '').trim(),
+    readyState: Number(audioElement?.readyState ?? 0),
+    networkState: Number(audioElement?.networkState ?? 0),
+    paused: Boolean(audioElement?.paused ?? true),
+    ended: Boolean(audioElement?.ended ?? false),
+    seeking: Boolean(audioElement?.seeking ?? false),
+    localCurrentTime: Number(audioElement?.currentTime ?? 0),
+    localDuration: Number(audioElement?.duration ?? 0),
+    mediaErrorCode: Number(mediaError?.code ?? 0),
+    mediaErrorMessage: String(mediaError?.message ?? '').trim(),
+    pendingAutoplayAttempts
+  }
+}
+
+const logAudioPlayback = (level: 'debug' | 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>) => {
+  window.api?.diagnostics?.logRenderer(level, `audio playback: ${message}`, {
+    ...buildPlaybackLogContext(),
+    ...getAudioElementDiagnostics(),
+    ...(meta ?? {})
+  })
+}
+
+const resolveAudioElementErrorMessage = (mediaErrorCode: number | null) => {
+  switch (mediaErrorCode) {
+    case 1:
+      return '音频加载已中断'
+    case 2:
+      return '音频数据加载中断'
+    case 3:
+      return '播放器无法解码当前音频'
+    case 4:
+      return '当前音频格式不兼容'
+    default:
+      return '当前音频无法播放'
+  }
+}
+
+const getAudioPlaybackFailureMessage = (fallback = '当前音频无法播放') => {
+  const message = String(playbackError.value ?? '').trim()
+  return message || fallback
+}
 
 const readStoredPlayerLayoutMode = (): PlayerLayoutMode => {
   if (typeof window === 'undefined') {
@@ -161,6 +210,10 @@ let classicPlaylistCenterFrame: number | null = null
 let classicPlaylistCenterTimers: Array<ReturnType<typeof setTimeout>> = []
 let playlistDurationLoadToken = 0
 let playlistCoverLoadToken = 0
+let coverPreviewLoadToken = 0
+let syncRequestId = 0
+let pendingAutoplayAttempts = 0
+let pendingAutoplayTimer: ReturnType<typeof setTimeout> | null = null
 
 const {
   orderedPlaylist,
@@ -532,6 +585,32 @@ const normalizeTrackDuration = (value: unknown) => {
   return Number.isFinite(durationValue) && durationValue > 0 ? durationValue : 0
 }
 
+const buildPlaylistSignature = (playlist: AudioTrack[]) => {
+  return (Array.isArray(playlist) ? playlist : [])
+    .map((track) => [
+      String(track?.path ?? '').trim(),
+      String(track?.label ?? '').trim(),
+      String(track?.subtitlePath ?? '').trim(),
+      String(track?.coverPath ?? '').trim(),
+      String(track?.coverSrc ?? '').trim(),
+      String(track?.resourceId ?? '').trim()
+    ].join(':'))
+    .join('|')
+}
+
+const clearPendingAutoplayTimer = () => {
+  if (pendingAutoplayTimer) {
+    clearTimeout(pendingAutoplayTimer)
+    pendingAutoplayTimer = null
+  }
+}
+
+const cancelPendingAutoplay = () => {
+  pendingAutoplay.value = false
+  pendingAutoplayAttempts = 0
+  clearPendingAutoplayTimer()
+}
+
 const rememberTrackDuration = (trackPath: string, nextDuration: unknown) => {
   const normalizedPath = String(trackPath ?? '').trim()
   const normalizedDuration = normalizeTrackDuration(nextDuration)
@@ -655,10 +734,18 @@ const playCurrentAudio = async () => {
   const audioElement = audioRef.value
   if (!audioElement || !currentTrack.value) {
     logger.error('playCurrentAudio aborted because audio element or current track is missing', buildPlaybackLogContext())
+    logAudioPlayback('error', 'play-attempt-aborted', {
+      reason: !audioElement ? 'missing-audio-element' : 'missing-current-track'
+    })
     return false
   }
 
   try {
+    logAudioPlayback('info', 'play-attempt', {
+      paused: Boolean(audioElement.paused),
+      readyState: Number(audioElement.readyState ?? 0),
+      networkState: Number(audioElement.networkState ?? 0)
+    })
     logger.info('attempting audio playback', {
       ...buildPlaybackLogContext(),
       paused: Boolean(audioElement.paused),
@@ -667,22 +754,93 @@ const playCurrentAudio = async () => {
     })
     await audioElement.play()
     isPlaying.value = true
-    pendingAutoplay.value = false
+    cancelPendingAutoplay()
     playbackError.value = ''
     logger.info('audio playback started', buildPlaybackLogContext())
+    logAudioPlayback('info', 'play-attempt-resolved')
 
     await startPlaybackSession(currentResourceId.value, String(currentTrack.value?.path ?? '').trim())
 
     return true
   } catch (error) {
     isPlaying.value = false
-    playbackError.value = '当前音频无法播放'
+    playbackError.value = '当前音频暂时无法自动播放，请重试'
+    logAudioPlayback('warn', 'play-attempt-rejected', {
+      error: error instanceof Error
+        ? {
+            message: error.message,
+            stack: error.stack ?? ''
+          }
+        : String(error)
+    })
     logger.error('audio playback rejected by browser', {
       ...buildPlaybackLogContext(),
       error: error instanceof Error ? error.message : String(error)
     })
     return false
   }
+}
+
+const requestPendingAutoplay = () => {
+  if (!pendingAutoplay.value || pendingAutoplayAttempts >= MAX_AUDIO_AUTOPLAY_ATTEMPTS) {
+    logAudioPlayback('debug', 'pending-autoplay-skipped', {
+      reason: !pendingAutoplay.value ? 'pending-autoplay-disabled' : 'max-attempts-reached'
+    })
+    return
+  }
+
+  const requestId = syncRequestId
+  const requestedTrackPath = String(currentTrack.value?.path ?? '').trim()
+  clearPendingAutoplayTimer()
+  pendingAutoplayAttempts += 1
+  logger.info('audio pending autoplay attempt', {
+    ...buildPlaybackLogContext(),
+    requestId,
+    pendingAutoplayAttempts
+  })
+  logAudioPlayback('debug', 'pending-autoplay-attempt', {
+    requestId,
+    requestedTrackPath
+  })
+
+  void playCurrentAudio().then((played) => {
+    if (
+      played
+      || requestId !== syncRequestId
+      || requestedTrackPath !== String(currentTrack.value?.path ?? '').trim()
+      || !pendingAutoplay.value
+      || pendingAutoplayAttempts >= MAX_AUDIO_AUTOPLAY_ATTEMPTS
+    ) {
+      logAudioPlayback('debug', 'pending-autoplay-attempt-finished', {
+        requestId,
+        requestedTrackPath,
+        played,
+        staleRequest: requestId !== syncRequestId,
+        trackChanged: requestedTrackPath !== String(currentTrack.value?.path ?? '').trim(),
+        pendingAutoplay: Boolean(pendingAutoplay.value)
+      })
+      return
+    }
+
+    if (pendingAutoplayAttempts >= MAX_AUDIO_AUTOPLAY_ATTEMPTS) {
+      logAudioPlayback('warn', 'pending-autoplay-exhausted', {
+        requestId,
+        requestedTrackPath
+      })
+      notify('warning', '播放音频', getAudioPlaybackFailureMessage('当前音频暂时无法自动播放，请手动重试'))
+      return
+    }
+
+    logAudioPlayback('debug', 'pending-autoplay-retry-scheduled', {
+      requestId,
+      requestedTrackPath,
+      retryDelayMs: AUDIO_AUTOPLAY_RETRY_DELAY_MS
+    })
+    pendingAutoplayTimer = setTimeout(() => {
+      pendingAutoplayTimer = null
+      requestPendingAutoplay()
+    }, AUDIO_AUTOPLAY_RETRY_DELAY_MS)
+  })
 }
 
 const stopPlayback = async () => {
@@ -735,6 +893,9 @@ const ensureAudioUrl = async (filePath: string) => {
   const normalizedPath = String(filePath ?? '').trim()
   if (!normalizedPath || audioUrlMap.value[normalizedPath]) {
     if (normalizedPath) {
+      logAudioPlayback('debug', 'sync-track-audio-url-reused', {
+        filePath: normalizedPath
+      })
       logger.info('reusing cached audio url', {
         ...buildPlaybackLogContext(),
         filePath: normalizedPath
@@ -747,9 +908,17 @@ const ensureAudioUrl = async (filePath: string) => {
     ...buildPlaybackLogContext(),
     filePath: normalizedPath
   })
+  logAudioPlayback('info', 'sync-track-audio-url-requested', {
+    filePath: normalizedPath
+  })
 
   const playbackUrl = await window.api.dialog.getAudioPlaybackUrl(normalizedPath)
   if (playbackUrl?.url) {
+    logAudioPlayback('info', 'sync-track-audio-url-resolved', {
+      filePath: normalizedPath,
+      playbackPath: playbackUrl.playbackPath,
+      transcoded: playbackUrl.transcoded
+    })
     logger.info('resolved audio playback url', {
       ...buildPlaybackLogContext(),
       filePath: normalizedPath,
@@ -767,8 +936,15 @@ const ensureAudioUrl = async (filePath: string) => {
     ...buildPlaybackLogContext(),
     filePath: normalizedPath
   })
+  logAudioPlayback('warn', 'sync-track-audio-url-fallback-binary', {
+    filePath: normalizedPath
+  })
   const binaryData = await window.api.dialog.readBinaryFile(normalizedPath)
   if (!binaryData || !binaryData.length) {
+    logAudioPlayback('error', 'sync-track-audio-url-fallback-failed', {
+      filePath: normalizedPath,
+      byteLength: Number(binaryData?.length ?? 0)
+    })
     logger.error('failed to resolve audio playback url or read binary file', {
       ...buildPlaybackLogContext(),
       filePath: normalizedPath,
@@ -782,6 +958,11 @@ const ensureAudioUrl = async (filePath: string) => {
   audioBytes.set(binaryData)
   const audioBlob = new Blob([audioBytes], { type: getAudioMimeType(normalizedPath) })
   const fileUrl = URL.createObjectURL(audioBlob)
+  logAudioPlayback('info', 'sync-track-audio-object-url-created', {
+    filePath: normalizedPath,
+    mimeType: getAudioMimeType(normalizedPath),
+    byteLength: audioBytes.byteLength
+  })
   logger.info('created audio object url', {
     ...buildPlaybackLogContext(),
     filePath: normalizedPath,
@@ -1011,6 +1192,7 @@ const loadSubtitleForTrack = async (trackPath: string, explicitSubtitlePath?: st
 }
 
 const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
+  const requestId = ++syncRequestId
   const nextIndex = clampIndex(index)
   const previousTrackPath = String(currentTrack.value?.path ?? '').trim()
   const previousResourceId = String(getPlaybackSessionResourceId() || currentResourceId.value).trim()
@@ -1027,15 +1209,29 @@ const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
     autoplay,
     startTime
   })
+  logAudioPlayback('info', 'sync-track-start', {
+    requestId,
+    requestedIndex: index,
+    nextIndex,
+    previousTrackPath,
+    nextTrackPath,
+    autoplay,
+    startTime
+  })
   currentIndex.value = nextIndex
   currentTime.value = 0
   duration.value = Number(currentTrack.value?.duration ?? 0) || 0
   pendingAutoplay.value = autoplay
+  pendingAutoplayAttempts = 0
+  clearPendingAutoplayTimer()
   pendingSeekTime.value = Math.max(0, Number(startTime ?? 0))
   playbackError.value = ''
 
   const trackPath = currentTrack.value?.path ?? ''
   if (!trackPath) {
+    logAudioPlayback('error', 'sync-track-aborted-empty-track-path', {
+      requestId
+    })
     logger.error('syncTrack aborted because resolved track path is empty', buildPlaybackLogContext())
     return
   }
@@ -1045,18 +1241,77 @@ const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
     loadSubtitleForTrack(trackPath, String(currentTrack.value?.subtitlePath ?? ''))
   ])
 
+  if (requestId !== syncRequestId) {
+    logAudioPlayback('warn', 'sync-track-stale-after-asset-load', {
+      requestId,
+      latestRequestId: syncRequestId
+    })
+    logger.warn('syncTrack aborted because a newer audio sync request arrived', {
+      ...buildPlaybackLogContext(),
+      requestId
+    })
+    return
+  }
+
   await nextTick()
+
+  if (requestId !== syncRequestId) {
+    logAudioPlayback('warn', 'sync-track-stale-after-next-tick', {
+      requestId,
+      latestRequestId: syncRequestId
+    })
+    logger.warn('syncTrack aborted after nextTick because a newer audio sync request arrived', {
+      ...buildPlaybackLogContext(),
+      requestId
+    })
+    return
+  }
 
   const audioElement = audioRef.value
   if (!audioElement) {
+    logAudioPlayback('error', 'sync-track-missing-audio-element', {
+      requestId
+    })
     logger.error('syncTrack aborted because audio element is missing after nextTick', buildPlaybackLogContext())
     return
   }
 
+  const expectedSource = String(currentAudioSrc.value ?? '').trim()
+  const currentElementSource = String(audioElement.currentSrc ?? '').trim()
+  const sourceAlreadyLoadingOrReady = Boolean(
+    expectedSource
+    && currentElementSource === expectedSource
+    && (
+      Number(audioElement.readyState ?? 0) > HTMLMediaElement.HAVE_NOTHING
+      || Number(audioElement.networkState ?? 0) !== HTMLMediaElement.NETWORK_EMPTY
+    )
+  )
+
+  if (sourceAlreadyLoadingOrReady) {
+    logAudioPlayback('info', 'sync-track-audio-load-skipped', {
+      requestId,
+      expectedSource,
+      currentElementSource,
+      reason: 'source-already-loading-or-ready'
+    })
+    if (!audioElement.paused) {
+      handleAudioPlay()
+      return
+    }
+
+    requestPendingAutoplay()
+    return
+  }
+
   audioElement.pause()
+  audioElement.autoplay = pendingAutoplay.value
   audioElement.currentTime = 0
   audioElement.load()
   isPlaying.value = false
+  logAudioPlayback('info', 'sync-track-audio-load-requested', {
+    requestId,
+    trackPath
+  })
   logger.info('audio element load requested', {
     ...buildPlaybackLogContext(),
     readyState: Number(audioElement.readyState ?? 0),
@@ -1073,7 +1328,7 @@ const togglePlayback = async () => {
   if (audioElement.paused) {
     const played = await playCurrentAudio()
     if (!played) {
-      notify('warning', '播放音频', playbackError.value || '当前音频无法播放')
+      notify('warning', '播放音频', getAudioPlaybackFailureMessage())
     }
     return
   }
@@ -1116,16 +1371,6 @@ const handleOsuPlaylistWheel = (event: WheelEvent) => {
   }, 150)
 }
 
-const handleAudioEnded = () => {
-  const nextIndex = resolveNextTrackIndex('ended')
-  if (nextIndex < 0) {
-    void stopPlayback()
-    return
-  }
-
-  void syncTrack(nextIndex, true, 0)
-}
-
 const handleLoadedMetadata = () => {
   const audioElement = audioRef.value
   if (!audioElement) {
@@ -1149,11 +1394,14 @@ const handleLoadedMetadata = () => {
     readyState: Number(audioElement.readyState ?? 0),
     networkState: Number(audioElement.networkState ?? 0)
   })
+  logAudioPlayback('info', 'event-loadedmetadata')
   rememberTrackDuration(String(currentTrack.value?.path ?? '').trim(), duration.value)
+  requestPendingAutoplay()
 }
 
 const handleCanPlay = () => {
   const audioElement = audioRef.value
+  logAudioPlayback('info', 'event-canplay')
   logger.info('audio canplay event received', {
     ...buildPlaybackLogContext(),
     readyState: Number(audioElement?.readyState ?? 0),
@@ -1164,23 +1412,59 @@ const handleCanPlay = () => {
     return
   }
 
-  void playCurrentAudio().then((played) => {
-    if (!played) {
-      notify('warning', '播放音频', playbackError.value || '当前音频无法播放')
-    }
-  })
+  requestPendingAutoplay()
 }
 
 const handleTimeUpdate = () => {
   currentTime.value = Number(audioRef.value?.currentTime ?? 0)
 }
 
+const handleLoadStart = () => {
+  logAudioPlayback('info', 'event-loadstart')
+}
+
+const handleLoadedData = () => {
+  logAudioPlayback('info', 'event-loadeddata')
+}
+
+const handleDurationChange = () => {
+  logAudioPlayback('debug', 'event-durationchange')
+}
+
+const handleWaiting = () => {
+  logAudioPlayback('warn', 'event-waiting')
+}
+
+const handleStalled = () => {
+  logAudioPlayback('warn', 'event-stalled')
+}
+
+const handleSuspend = () => {
+  logAudioPlayback('debug', 'event-suspend')
+}
+
+const handleAbort = () => {
+  logAudioPlayback('warn', 'event-abort')
+}
+
+const handleEmptied = () => {
+  logAudioPlayback('warn', 'event-emptied')
+}
+
+const handleSeekingEvent = () => {
+  logAudioPlayback('debug', 'event-seeking')
+}
+
 const handleAudioError = () => {
   const audioElement = audioRef.value
   const mediaError = audioElement?.error
+  const resolvedPlaybackError = resolveAudioElementErrorMessage(Number(mediaError?.code ?? 0) || null)
   isPlaying.value = false
-  pendingAutoplay.value = false
-  playbackError.value = '当前音频无法播放'
+  cancelPendingAutoplay()
+  playbackError.value = resolvedPlaybackError
+  logAudioPlayback('error', 'event-error', {
+    resolvedPlaybackError
+  })
   logger.error('audio element emitted error event', {
     ...buildPlaybackLogContext(),
     mediaErrorCode: Number(mediaError?.code ?? 0),
@@ -1188,7 +1472,33 @@ const handleAudioError = () => {
     readyState: Number(audioElement?.readyState ?? 0),
     networkState: Number(audioElement?.networkState ?? 0)
   })
-  notify('error', '播放音频', `${currentTrack.value?.label || '当前文件'} 播放失败`)
+  notify('error', '播放音频', `${currentTrack.value?.label || '当前文件'}：${resolvedPlaybackError}`)
+}
+
+const handleAudioPlay = () => {
+  isPlaying.value = true
+  cancelPendingAutoplay()
+  logAudioPlayback('info', 'event-play')
+}
+
+const handleAudioPause = () => {
+  isPlaying.value = false
+  logAudioPlayback('info', 'event-pause')
+}
+
+const handleAudioPlaying = () => {
+  logAudioPlayback('info', 'event-playing')
+}
+
+const handleAudioEnded = () => {
+  logAudioPlayback('info', 'event-ended')
+  const nextIndex = resolveNextTrackIndex('ended')
+  if (nextIndex < 0) {
+    void stopPlayback()
+    return
+  }
+
+  void syncTrack(nextIndex, true, 0)
 }
 
 const handleSeek = (value: number) => {
@@ -1269,6 +1579,9 @@ const handleKeydown = (event: KeyboardEvent) => {
 }
 
 watch(() => props.show, async (visible) => {
+  logAudioPlayback('info', 'watch-show', {
+    visible
+  })
   setAudioPlayerVisible(visible)
 
   if (!visible) {
@@ -1288,6 +1601,9 @@ watch(() => props.show, async (visible) => {
 })
 
 watch(() => props.initialPath, async (filePath) => {
+  logAudioPlayback('info', 'watch-initial-path', {
+    filePath
+  })
   if (!props.show) {
     return
   }
@@ -1299,6 +1615,10 @@ watch(() => props.initialPath, async (filePath) => {
 })
 
 watch(() => props.sessionVersion, async (nextVersion, previousVersion) => {
+  logAudioPlayback('info', 'watch-session-version', {
+    nextVersion: Number(nextVersion ?? 0),
+    previousVersion: Number(previousVersion ?? 0)
+  })
   if (!props.show || !orderedPlaylist.value.length) {
     return
   }
@@ -1311,10 +1631,18 @@ watch(() => props.sessionVersion, async (nextVersion, previousVersion) => {
   await syncTrack(nextIndex >= 0 ? nextIndex : currentIndex.value, true, props.initialTime)
 })
 
-watch(() => props.playlist, async (playlist) => {
+watch(() => props.playlist, async (playlist, previousPlaylist) => {
+  logAudioPlayback('info', 'watch-playlist', {
+    nextPlaylistSize: Array.isArray(playlist) ? playlist.length : 0,
+    previousPlaylistSize: Array.isArray(previousPlaylist) ? previousPlaylist.length : 0
+  })
   syncOrderedPlaylist(playlist, props.initialPath)
 
   if (consumeSuppressPlaylistReload()) {
+    return
+  }
+
+  if (buildPlaylistSignature(playlist) === buildPlaylistSignature(previousPlaylist ?? [])) {
     return
   }
 
@@ -1507,11 +1835,37 @@ watch(currentTrack, (track) => {
 })
 
 watch(() => [currentTrack.value?.coverSrc, currentTrack.value?.coverPath, props.coverSrc] as const, async ([trackCoverSrc, trackCoverPath, fallbackCoverSrc]) => {
-  currentCoverPreviewSrc.value = await resolveCoverPreviewSource(
-    String(trackCoverSrc ?? '').trim()
+  const requestToken = ++coverPreviewLoadToken
+  const hasActiveTrack = Boolean(String(currentTrack.value?.path ?? '').trim())
+  const nextCoverSource = String(trackCoverSrc ?? '').trim()
     || String(trackCoverPath ?? '').trim()
-    || String(fallbackCoverSrc ?? '').trim()
-  )
+    || (!hasActiveTrack ? String(fallbackCoverSrc ?? '').trim() : '')
+
+  if (!nextCoverSource) {
+    currentCoverPreviewSrc.value = ''
+    logAudioPlayback('debug', 'cover-preview-cleared', {
+      requestToken,
+      hasActiveTrack
+    })
+    return
+  }
+
+  const resolvedCoverPreviewSrc = await resolveCoverPreviewSource(nextCoverSource)
+  if (requestToken !== coverPreviewLoadToken) {
+    logAudioPlayback('debug', 'cover-preview-stale', {
+      requestToken,
+      latestRequestToken: coverPreviewLoadToken,
+      nextCoverSource
+    })
+    return
+  }
+
+  currentCoverPreviewSrc.value = resolvedCoverPreviewSrc
+  logAudioPlayback('debug', 'cover-preview-updated', {
+    requestToken,
+    nextCoverSource,
+    hasCover: Boolean(resolvedCoverPreviewSrc)
+  })
 }, { immediate: true })
 
 watch(currentCoverPreviewSrc, (nextCoverSrc) => {
@@ -1575,6 +1929,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
   void finalizePlaybackSession()
   audioRef.value?.pause()
+  cancelPendingAutoplay()
   clearAudioPlayerControls()
   removeOngoingCenterItem(AUDIO_PLAYER_ONGOING_ID)
   revokeAllAudioObjectUrls()
@@ -1937,13 +2292,23 @@ onBeforeUnmount(() => {
     ref="audioRef"
     :src="currentAudioSrc"
     preload="metadata"
+    @loadstart="handleLoadStart"
+    @loadeddata="handleLoadedData"
     @ended="handleAudioEnded"
     @loadedmetadata="handleLoadedMetadata"
     @canplay="handleCanPlay"
+    @durationchange="handleDurationChange"
+    @waiting="handleWaiting"
+    @stalled="handleStalled"
+    @suspend="handleSuspend"
+    @abort="handleAbort"
+    @emptied="handleEmptied"
+    @seeking="handleSeekingEvent"
     @timeupdate="handleTimeUpdate"
     @error="handleAudioError"
-    @play="isPlaying = true"
-    @pause="isPlaying = false"
+    @play="handleAudioPlay"
+    @pause="handleAudioPause"
+    @playing="handleAudioPlaying"
   />
 </template>
 

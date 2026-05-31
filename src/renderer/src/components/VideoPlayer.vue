@@ -11,6 +11,7 @@ import {
   Play,
   PlayBackOutline,
   PlayForwardOutline,
+  ReloadOutline,
   VolumeHighOutline,
   VolumeMuteOutline
 } from '@vicons/ionicons5'
@@ -59,6 +60,10 @@ const isPlaying = ref(false)
 const isLoading = ref(false)
 const isFullscreen = ref(false)
 const isCurrentSourceTranscoded = ref(false)
+const playbackMode = ref<'direct' | 'remux-cache' | 'stream-transcode' | 'full-transcode-cache' | ''>('')
+const playbackIsLossless = ref(true)
+const playbackModeReason = ref('')
+const currentTranscodeSessionId = ref('')
 const playbackTimeOffset = ref(0)
 const seekPreviewTime = ref<number | null>(null)
 const showPlaylist = ref(true)
@@ -67,13 +72,135 @@ const fullscreenControlsVisible = ref(true)
 const playbackRate = ref(1)
 const screenshotShortcut = ref(String(Settings.SHORTCUT_PRINT_SCREEN.default ?? 'f11'))
 const captureToast = ref('')
+const trackResumeTimes = ref<Record<string, number>>({})
+const VIDEO_ERROR_DELAY_MS = 8000
+const TRANSCODED_VIDEO_ERROR_DELAY_MS = 120000
+const STREAM_TRANSCODE_EARLY_END_TOLERANCE_SECONDS = 3
+const MAX_AUTOPLAY_ATTEMPTS = 12
+const AUTOPLAY_RETRY_DELAY_MS = 300
 let loadRequestId = 0
 let pendingStartTime = 0
 let pendingAutoplay = false
+let pendingAutoplayAttempts = 0
+let pendingAutoplayTimer: number | null = null
+let userRequestedPause = false
 let fullscreenControlsTimer: number | null = null
 let captureToastTimer: number | null = null
 let seekPreviewTimer: number | null = null
+let playbackProgressTimer: number | null = null
+let videoErrorTimer: number | null = null
+let transcodedStartupTimer: number | null = null
 let removeVideoFrameCaptureShortcutListener: (() => void) | null = null
+let removeVideoTranscodeFailedListener: (() => void) | null = null
+let lastVideoTranscodeFailure: {
+  sessionId: string
+  filePath: string
+  message: string
+  code?: number | null
+  signal?: string | null
+  stderr?: string
+} | null = null
+
+const logVideoPlayback = (
+  level: 'debug' | 'info' | 'warn' | 'error',
+  message: string,
+  meta: Record<string, unknown> = {}
+) => {
+  window.api?.diagnostics?.logRenderer(level, `video playback: ${message}`, {
+    requestId: loadRequestId,
+    currentIndex: currentIndex.value,
+    currentPath: String(currentTrack.value?.path ?? '').trim(),
+    sourceUrl: sourceUrl.value,
+    playbackMode: playbackMode.value,
+    playbackModeReason: playbackModeReason.value,
+    currentTranscodeSessionId: currentTranscodeSessionId.value,
+    isLoading: isLoading.value,
+    isPlaying: isPlaying.value,
+    currentTime: currentTime.value,
+    duration: duration.value,
+    ...meta
+  })
+}
+
+const getVideoElementDiagnostics = () => {
+  const video = videoRef.value
+  if (!video) {
+    return {
+      hasVideoElement: false
+    }
+  }
+
+  return {
+    hasVideoElement: true,
+    currentSrc: video.currentSrc,
+    readyState: video.readyState,
+    networkState: video.networkState,
+    paused: video.paused,
+    ended: video.ended,
+    seeking: video.seeking,
+    muted: video.muted,
+    playbackRate: video.playbackRate,
+    localCurrentTime: Number(video.currentTime ?? 0),
+    localDuration: Number(video.duration ?? 0),
+    errorCode: Number(video.error?.code ?? 0) || null
+  }
+}
+
+const resolveVideoTranscodeFailureMessage = (failure: typeof lastVideoTranscodeFailure) => {
+  const message = String(failure?.message ?? '').trim().toLowerCase()
+  const stderr = String(failure?.stderr ?? '').trim().toLowerCase()
+
+  if (message.includes('input or ffmpeg executable is unavailable')) {
+    return '视频文件不存在或无法读取'
+  }
+
+  if (message.includes('encoder is disabled or unavailable')) {
+    return '当前设备没有可用的视频转码器'
+  }
+
+  if (message.includes('failed to start video transcode stream')) {
+    return '视频转码启动失败'
+  }
+
+  if (
+    stderr.includes('permission denied')
+    || stderr.includes('no such file')
+    || stderr.includes('system cannot find the file')
+  ) {
+    return '视频文件不存在或无法读取'
+  }
+
+  if (
+    stderr.includes('invalid data found')
+    || stderr.includes('could not find codec parameters')
+    || stderr.includes('error while decoding')
+    || stderr.includes('moov atom not found')
+    || stderr.includes('malformed')
+  ) {
+    return '视频文件格式异常或已损坏'
+  }
+
+  if (message.includes('exited abnormally')) {
+    return '视频转码中断'
+  }
+
+  return '视频转码失败'
+}
+
+const resolveVideoElementErrorMessage = (mediaErrorCode: number | null, transcoded: boolean) => {
+  switch (mediaErrorCode) {
+    case 1:
+      return '视频加载已中断'
+    case 2:
+      return transcoded ? '转码视频数据加载中断' : '视频数据加载中断'
+    case 3:
+      return transcoded ? '播放器无法解码转码后的视频' : '播放器无法解码当前视频'
+    case 4:
+      return transcoded ? '转码后的视频格式仍不受支持' : '当前视频格式不兼容'
+    default:
+      return transcoded ? '转码视频加载失败' : '视频加载失败'
+  }
+}
 
 const resetAudioPlayerStoreState = () => {
   setAudioPlayerPlaybackState({
@@ -187,8 +314,118 @@ const {
   currentTrack,
   currentTime,
   isCurrentSourceTranscoded,
-  onProgressPersisted: (value) => emit('progress-persisted', value)
+  onProgressPersisted: (value) => {
+    const normalizedPath = String(value.filePath ?? '').trim()
+    if (normalizedPath) {
+      trackResumeTimes.value = {
+        ...trackResumeTimes.value,
+        [normalizedPath]: Math.max(0, Number(value.playbackTime ?? 0))
+      }
+    }
+    emit('progress-persisted', value)
+  }
 })
+
+const clearPlaybackProgressTimer = () => {
+  if (playbackProgressTimer) {
+    window.clearInterval(playbackProgressTimer)
+    playbackProgressTimer = null
+  }
+}
+
+const clearVideoErrorTimer = () => {
+  if (videoErrorTimer) {
+    window.clearTimeout(videoErrorTimer)
+    videoErrorTimer = null
+  }
+}
+
+const clearTranscodedStartupTimer = () => {
+  if (transcodedStartupTimer) {
+    window.clearTimeout(transcodedStartupTimer)
+    transcodedStartupTimer = null
+  }
+}
+
+const clearPendingAutoplayTimer = () => {
+  if (pendingAutoplayTimer) {
+    window.clearTimeout(pendingAutoplayTimer)
+    pendingAutoplayTimer = null
+  }
+}
+
+const cancelPendingAutoplay = () => {
+  pendingAutoplay = false
+  pendingAutoplayAttempts = 0
+  clearPendingAutoplayTimer()
+}
+
+const startTranscodedStartupTimer = (requestId: number, source: string) => {
+  clearTranscodedStartupTimer()
+  transcodedStartupTimer = window.setTimeout(() => {
+    transcodedStartupTimer = null
+    if (
+      requestId !== loadRequestId ||
+      sourceUrl.value !== source ||
+      hasUsableVideoState() ||
+      !isLoading.value
+    ) {
+      return
+    }
+
+    isLoading.value = false
+    isPlaying.value = false
+    errorMessage.value = '视频转码启动超时'
+  }, TRANSCODED_VIDEO_ERROR_DELAY_MS)
+}
+
+const createTranscodeSessionId = (requestId: number) => {
+  return [
+    'video',
+    Date.now(),
+    requestId,
+    Math.random().toString(36).slice(2, 10)
+  ].join('-')
+}
+
+const hasUsableVideoState = () => {
+  const video = videoRef.value
+  if (!video) {
+    return false
+  }
+
+  return video.readyState > HTMLMediaElement.HAVE_NOTHING
+    || Number.isFinite(video.duration) && video.duration > 0
+    || duration.value > 0
+    || currentTime.value > playbackTimeOffset.value + 1
+    || isPlaying.value
+}
+
+const startPlaybackProgressTimer = () => {
+  clearPlaybackProgressTimer()
+  playbackProgressTimer = window.setInterval(() => {
+    if (!props.show || !isPlaying.value || isLoading.value) {
+      return
+    }
+
+    void persistCurrentProgress()
+  }, 5000)
+}
+
+const releaseVideoElementSource = () => {
+  const video = videoRef.value
+  if (!video) {
+    return
+  }
+
+  video.pause()
+  video.removeAttribute('src')
+  try {
+    video.load()
+  } catch {
+    // ignore media release failures
+  }
+}
 
 const formatTime = (value?: number | null) => {
   const seconds = Math.max(0, Math.floor(Number(value ?? 0)))
@@ -211,7 +448,34 @@ const normalizeResumeTime = (resumeTime: number, mediaDuration: number) => {
   return normalizedResumeTime / normalizedDuration >= thresholdPercent / 100 ? 0 : normalizedResumeTime
 }
 
-const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
+const getCurrentAbsoluteTime = () => {
+  const video = videoRef.value
+  const localTime = Math.max(0, Number(video?.currentTime ?? currentTime.value ?? 0))
+  return isCurrentSourceTranscoded.value ? Math.max(currentTime.value, playbackTimeOffset.value + localTime) : localTime
+}
+
+const rememberTrackProgress = (filePath: string, playbackTime = getCurrentAbsoluteTime()) => {
+  const normalizedPath = String(filePath ?? '').trim()
+  const normalizedTime = Math.max(0, Math.floor(Number(playbackTime ?? 0)))
+  if (!normalizedPath || normalizedTime <= 0) {
+    return
+  }
+
+  trackResumeTimes.value = {
+    ...trackResumeTimes.value,
+    [normalizedPath]: normalizedTime
+  }
+}
+
+const resolveTrackStartTime = (filePath: string, explicitStartTime?: number) => {
+  if (typeof explicitStartTime === 'number' && Number.isFinite(explicitStartTime)) {
+    return Math.max(0, Number(explicitStartTime ?? 0))
+  }
+
+  return Math.max(0, Number(trackResumeTimes.value[String(filePath ?? '').trim()] ?? 0))
+}
+
+const syncTrack = async (index: number, autoplay = false, startTime?: number, fastSeek = false) => {
   const playlist = normalizedPlaylist.value
   if (!playlist.length) {
     return
@@ -222,7 +486,10 @@ const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
   const previousResourceId = getPlaybackSessionResourceId()
   const nextPath = String(playlist[nextIndex]?.path ?? '').trim()
   const nextResourceId = String(playlist[nextIndex]?.resourceId ?? '').trim()
-  if (previousPath && previousPath !== nextPath) {
+  if (previousPath) {
+    rememberTrackProgress(previousPath)
+  }
+  if (previousPath && (previousPath !== nextPath || previousResourceId !== nextResourceId)) {
     await persistCurrentProgress()
   }
   if (previousResourceId && previousResourceId !== nextResourceId) {
@@ -230,6 +497,11 @@ const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
   }
 
   const requestId = ++loadRequestId
+  clearPlaybackProgressTimer()
+  clearVideoErrorTimer()
+  clearTranscodedStartupTimer()
+  clearPendingAutoplayTimer()
+  releaseVideoElementSource()
   currentIndex.value = nextIndex
   sourceUrl.value = ''
   errorMessage.value = ''
@@ -239,41 +511,100 @@ const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
   isLoading.value = true
   isPlaying.value = false
   isCurrentSourceTranscoded.value = false
+  playbackMode.value = ''
+  playbackIsLossless.value = true
+  playbackModeReason.value = ''
+  currentTranscodeSessionId.value = ''
   playbackTimeOffset.value = 0
-  pendingStartTime = Math.max(0, Number(startTime ?? 0))
+  lastVideoTranscodeFailure = null
+  pendingStartTime = resolveTrackStartTime(nextPath, startTime)
   pendingAutoplay = autoplay
+  pendingAutoplayAttempts = 0
+  userRequestedPause = false
 
-  const requestedStartTime = Math.max(0, Number(startTime ?? 0))
-  let playbackUrl = await window.api.dialog.getVideoPlaybackUrl(nextPath, requestedStartTime)
+  const requestedStartTime = resolveTrackStartTime(nextPath, startTime)
+  const transcodeSessionId = createTranscodeSessionId(requestId)
+  logVideoPlayback('info', 'sync-track-start', {
+    nextIndex,
+    nextPath,
+    previousPath,
+    requestedStartTime,
+    autoplay,
+    fastSeek,
+    transcodeSessionId,
+    ...getVideoElementDiagnostics()
+  })
+  let playbackUrl = await window.api.dialog.getVideoPlaybackUrl(nextPath, requestedStartTime, fastSeek, transcodeSessionId)
   if (requestId !== loadRequestId) {
+    logVideoPlayback('warn', 'sync-track-stale-after-playback-url', {
+      nextPath,
+      transcodeSessionId
+    })
     return
   }
 
   if (!playbackUrl?.url) {
-    errorMessage.value = '视频文件不存在或无法读取'
+    errorMessage.value = playbackUrl?.errorMessage || '视频文件不存在或无法读取'
     isLoading.value = false
+    logVideoPlayback('warn', 'sync-track-empty-playback-url', {
+      nextPath,
+      requestedStartTime,
+      transcodeSessionId,
+      playbackUrl,
+      ...getVideoElementDiagnostics()
+    })
     await loadSubtitleForTrack(playlist[nextIndex], requestId)
     return
   }
+
+  logVideoPlayback('info', 'sync-track-playback-url', {
+    nextPath,
+    requestedStartTime,
+    transcodeSessionId,
+    playbackUrl,
+    ...getVideoElementDiagnostics()
+  })
 
   const normalizedStartTime = normalizeResumeTime(
     requestedStartTime,
     Math.max(0, Number(playbackUrl.duration ?? 0))
   )
   if (playbackUrl.transcoded && normalizedStartTime !== requestedStartTime) {
-    playbackUrl = await window.api.dialog.getVideoPlaybackUrl(nextPath, normalizedStartTime)
+    logVideoPlayback('info', 'sync-track-normalized-start-time-reload', {
+      nextPath,
+      requestedStartTime,
+      normalizedStartTime,
+      transcodeSessionId
+    })
+    playbackUrl = await window.api.dialog.getVideoPlaybackUrl(nextPath, normalizedStartTime, fastSeek, transcodeSessionId)
     if (requestId !== loadRequestId) {
+      logVideoPlayback('warn', 'sync-track-stale-after-normalized-reload', {
+        nextPath,
+        normalizedStartTime,
+        transcodeSessionId
+      })
       return
     }
     if (!playbackUrl?.url) {
-      errorMessage.value = '视频文件不存在或无法读取'
+      errorMessage.value = playbackUrl?.errorMessage || '视频文件不存在或无法读取'
       isLoading.value = false
+      logVideoPlayback('warn', 'sync-track-empty-playback-url-after-normalized-reload', {
+        nextPath,
+        normalizedStartTime,
+        transcodeSessionId,
+        playbackUrl,
+        ...getVideoElementDiagnostics()
+      })
       await loadSubtitleForTrack(playlist[nextIndex], requestId)
       return
     }
   }
 
   isCurrentSourceTranscoded.value = Boolean(playbackUrl.transcoded)
+  playbackMode.value = playbackUrl.mode ?? ''
+  playbackIsLossless.value = Boolean(playbackUrl.isLossless)
+  playbackModeReason.value = String(playbackUrl.reason ?? '')
+  currentTranscodeSessionId.value = playbackUrl.transcoded ? String(playbackUrl.sessionId || transcodeSessionId) : ''
   playbackTimeOffset.value = playbackUrl.transcoded ? normalizedStartTime : 0
   duration.value = Math.max(0, Number(playbackUrl.duration ?? 0))
   if (playbackUrl.transcoded) {
@@ -282,33 +613,108 @@ const syncTrack = async (index: number, autoplay = false, startTime = 0) => {
   } else {
     pendingStartTime = normalizedStartTime
   }
-  sourceUrl.value = playbackUrl.url
+  const nextSourceUrl = playbackUrl.url
   await loadSubtitleForTrack(playlist[nextIndex], requestId)
   await nextTick()
 
   const video = videoRef.value
   if (!video) {
     isLoading.value = false
+    logVideoPlayback('warn', 'sync-track-missing-video-element', {
+      nextPath,
+      nextSourceUrl,
+      ...getVideoElementDiagnostics()
+    })
     return
   }
 
   video.volume = Math.max(0, Math.min(1, volume.value / 100))
   video.muted = isMuted.value
+  video.autoplay = pendingAutoplay
   video.playbackRate = playbackRate.value
+  sourceUrl.value = nextSourceUrl
+  if (playbackUrl.transcoded) {
+    startTranscodedStartupTimer(requestId, nextSourceUrl)
+  }
+  await nextTick()
+  logVideoPlayback('info', 'sync-track-video-load', {
+    nextPath,
+    nextSourceUrl,
+    playbackUrl,
+    ...getVideoElementDiagnostics()
+  })
   video.load()
 }
 
-const playCurrentVideo = async () => {
+const playCurrentVideo = async (fromAutoplay = false) => {
   const video = videoRef.value
   if (!video) {
-    return
+    return false
   }
 
   try {
     await video.play()
-  } catch {
-    // 浏览器可能会阻止自动播放，用户点播放即可继续。
+    const played = fromAutoplay ? !video.paused : true
+    logVideoPlayback('info', 'play-attempt-resolved', {
+      fromAutoplay,
+      played,
+      ...getVideoElementDiagnostics()
+    })
+    return played
+  } catch (error) {
+    logVideoPlayback('warn', 'play-attempt-rejected', {
+      fromAutoplay,
+      error: error instanceof Error
+        ? {
+            message: error.message,
+            stack: error.stack ?? ''
+          }
+        : String(error ?? ''),
+      ...getVideoElementDiagnostics()
+    })
+    return false
   }
+}
+
+const requestPendingAutoplay = () => {
+  if (!pendingAutoplay || pendingAutoplayAttempts >= MAX_AUTOPLAY_ATTEMPTS) {
+    return
+  }
+
+  clearPendingAutoplayTimer()
+  const requestId = loadRequestId
+  const requestedSourceUrl = sourceUrl.value
+  pendingAutoplayAttempts += 1
+  logVideoPlayback('debug', 'pending-autoplay-request', {
+    requestedSourceUrl,
+    pendingAutoplayAttempts,
+    ...getVideoElementDiagnostics()
+  })
+  void playCurrentVideo(true).then((played) => {
+    if (
+      requestId !== loadRequestId ||
+      requestedSourceUrl !== sourceUrl.value ||
+      !pendingAutoplay ||
+      pendingAutoplayAttempts >= MAX_AUTOPLAY_ATTEMPTS
+    ) {
+      return
+    }
+
+    if (played && !videoRef.value?.paused) {
+      return
+    }
+
+    logVideoPlayback('debug', 'pending-autoplay-retry-scheduled', {
+      requestedSourceUrl,
+      pendingAutoplayAttempts,
+      played,
+      ...getVideoElementDiagnostics()
+    })
+    pendingAutoplayTimer = window.setTimeout(() => {
+      pendingAutoplayTimer = null
+      requestPendingAutoplay()
+    }, AUTOPLAY_RETRY_DELAY_MS)
+  })
 }
 
 const applyPendingStartTime = () => {
@@ -355,8 +761,11 @@ const initializePlayer = async () => {
 }
 
 const closePlayer = async () => {
+  clearPlaybackProgressTimer()
+  clearTranscodedStartupTimer()
+  cancelPendingAutoplay()
   await finalizePlaybackSession()
-  videoRef.value?.pause()
+  releaseVideoElementSource()
   emit('update:show', false)
 }
 
@@ -369,6 +778,8 @@ const togglePlayback = async () => {
   if (video.paused) {
     await video.play()
   } else {
+    userRequestedPause = true
+    cancelPendingAutoplay()
     video.pause()
   }
 }
@@ -418,7 +829,8 @@ const commitSeek = async (value: number, keepPreviewTime = false) => {
 
   if (isCurrentSourceTranscoded.value) {
     const shouldAutoplay = isPlaying.value
-    await syncTrack(currentIndex.value, shouldAutoplay, nextTime)
+    await syncTrack(currentIndex.value, shouldAutoplay, nextTime, true)
+    await persistCurrentProgress()
     if (!keepPreviewTime) {
       seekPreviewTime.value = null
     }
@@ -428,6 +840,7 @@ const commitSeek = async (value: number, keepPreviewTime = false) => {
   const localTargetTime = Math.max(0, nextTime - playbackTimeOffset.value)
   video.currentTime = localTargetTime
   currentTime.value = nextTime
+  await persistCurrentProgress()
   if (!keepPreviewTime) {
     seekPreviewTime.value = null
   }
@@ -451,6 +864,11 @@ const goNext = async () => {
     return
   }
   await syncTrack(currentIndex.value + 1, true, 0)
+}
+
+const retryCurrentTrack = async () => {
+  errorMessage.value = ''
+  await syncTrack(currentIndex.value, true)
 }
 
 const handleVolumeChange = (value: number) => {
@@ -619,7 +1037,27 @@ const isShortcutMatched = (event: KeyboardEvent, shortcut: string) => {
     && normalizeShortcutKey(event.key) === normalizeShortcutKey(targetKey)
 }
 
+const shouldIgnorePlayerShortcut = (event: KeyboardEvent) => {
+  if (event.defaultPrevented) {
+    return true
+  }
+
+  const target = event.target
+  if (!(target instanceof HTMLElement)) {
+    return false
+  }
+
+  if (target.isContentEditable) {
+    return true
+  }
+
+  const tagName = target.tagName.toLowerCase()
+  return ['input', 'textarea', 'select', 'button'].includes(tagName)
+}
+
 const handleLoadedMetadata = () => {
+  clearVideoErrorTimer()
+  clearTranscodedStartupTimer()
   const video = videoRef.value
   const mediaDuration = Math.max(0, Number(video?.duration ?? 0))
   if (!(duration.value > 0)) {
@@ -631,14 +1069,71 @@ const handleLoadedMetadata = () => {
   isLoading.value = false
   errorMessage.value = ''
   seekPreviewTime.value = null
+  logVideoPlayback('info', 'event-loadedmetadata', {
+    mediaDuration,
+    localCurrentTime: Number(video?.currentTime ?? 0),
+    ...getVideoElementDiagnostics()
+  })
 
-  if (pendingAutoplay) {
-    pendingAutoplay = false
-    void playCurrentVideo()
-  }
+  requestPendingAutoplay()
+}
+
+const handleCanPlay = () => {
+  clearVideoErrorTimer()
+  clearTranscodedStartupTimer()
+  logVideoPlayback('info', 'event-canplay', getVideoElementDiagnostics())
+  requestPendingAutoplay()
+}
+
+const handleLoadedData = () => {
+  logVideoPlayback('info', 'event-loadeddata', getVideoElementDiagnostics())
+  requestPendingAutoplay()
+}
+
+const handlePlaying = () => {
+  logVideoPlayback('info', 'event-playing', getVideoElementDiagnostics())
+  cancelPendingAutoplay()
+  handlePlay()
+}
+
+const handleLoadStart = () => {
+  logVideoPlayback('info', 'event-loadstart', getVideoElementDiagnostics())
+}
+
+const handleDurationChange = () => {
+  logVideoPlayback('debug', 'event-durationchange', getVideoElementDiagnostics())
+}
+
+const handleWaiting = () => {
+  logVideoPlayback('warn', 'event-waiting', getVideoElementDiagnostics())
+}
+
+const handleStalled = () => {
+  logVideoPlayback('warn', 'event-stalled', getVideoElementDiagnostics())
+}
+
+const handleSuspend = () => {
+  logVideoPlayback('debug', 'event-suspend', getVideoElementDiagnostics())
+}
+
+const handleAbort = () => {
+  logVideoPlayback('warn', 'event-abort', getVideoElementDiagnostics())
+}
+
+const handleEmptied = () => {
+  logVideoPlayback('warn', 'event-emptied', getVideoElementDiagnostics())
+}
+
+const handleSeeking = () => {
+  logVideoPlayback('debug', 'event-seeking', {
+    absoluteTime: getCurrentAbsoluteTime(),
+    ...getVideoElementDiagnostics()
+  })
 }
 
 const handleTimeUpdate = () => {
+  clearVideoErrorTimer()
+  clearTranscodedStartupTimer()
   if (seekPreviewTime.value !== null) {
     return
   }
@@ -658,28 +1153,111 @@ const handleSeeked = () => {
 }
 
 const handlePlay = () => {
+  clearVideoErrorTimer()
+  clearTranscodedStartupTimer()
+  userRequestedPause = false
   isPlaying.value = true
   errorMessage.value = ''
+  startPlaybackProgressTimer()
+  logVideoPlayback('info', 'event-play')
   void startCurrentPlaybackSession()
 }
 
 const handlePause = () => {
+  if (userRequestedPause) {
+    userRequestedPause = false
+    cancelPendingAutoplay()
+  } else if (pendingAutoplay) {
+    isPlaying.value = false
+    clearPlaybackProgressTimer()
+    return
+  }
   isPlaying.value = false
+  clearPlaybackProgressTimer()
+  logVideoPlayback('info', 'event-pause', getVideoElementDiagnostics())
+  if (!isLoading.value) {
+    void persistCurrentProgress()
+  }
+}
+
+const failCurrentTranscodePlayback = (nextErrorMessage?: string) => {
+  const resolvedErrorMessage = String(nextErrorMessage ?? '').trim() || resolveVideoTranscodeFailureMessage(lastVideoTranscodeFailure)
+  logVideoPlayback('error', 'transcode-playback-failed', {
+    errorMessage: resolvedErrorMessage,
+    ...getVideoElementDiagnostics()
+  })
+  currentTranscodeSessionId.value = ''
+  isLoading.value = false
+  isPlaying.value = false
+  clearPlaybackProgressTimer()
+  clearVideoErrorTimer()
+  clearTranscodedStartupTimer()
+  cancelPendingAutoplay()
+  errorMessage.value = resolvedErrorMessage
 }
 
 const handleEnded = () => {
-  void goNext()
+  clearPlaybackProgressTimer()
+  logVideoPlayback('info', 'event-ended', {
+    absoluteTime: getCurrentAbsoluteTime(),
+    ...getVideoElementDiagnostics()
+  })
+  if (isCurrentSourceTranscoded.value && currentTranscodeSessionId.value) {
+    const endedTime = getCurrentAbsoluteTime()
+    const sourceDuration = Math.max(0, Number(duration.value ?? 0))
+    if (!sourceDuration || endedTime + STREAM_TRANSCODE_EARLY_END_TOLERANCE_SECONDS < sourceDuration) {
+      currentTime.value = endedTime
+      failCurrentTranscodePlayback('视频转码中断')
+      return
+    }
+  }
+
+  const completedTime = Math.max(duration.value, currentTime.value, Number(videoRef.value?.duration ?? 0))
+  currentTime.value = completedTime
+  void persistCurrentProgress({ allowZero: true, playbackTime: completedTime }).then(() => {
+    void goNext()
+  })
 }
 
 const handleVideoError = () => {
-  const isStartupPhase = isLoading.value && !isPlaying.value && currentTime.value <= playbackTimeOffset.value + 1
-  if (isStartupPhase) {
-    errorMessage.value = ''
+  clearPlaybackProgressTimer()
+  clearVideoErrorTimer()
+  logVideoPlayback('warn', 'event-error', {
+    mediaErrorCode: Number(videoRef.value?.error?.code ?? 0) || null,
+    ...getVideoElementDiagnostics()
+  })
+  if (isCurrentSourceTranscoded.value && isLoading.value) {
     return
   }
+  const requestId = loadRequestId
+  const erroredVideo = videoRef.value
+  const erroredSourceUrl = sourceUrl.value
+  const errorDelay = isCurrentSourceTranscoded.value ? TRANSCODED_VIDEO_ERROR_DELAY_MS : VIDEO_ERROR_DELAY_MS
+  videoErrorTimer = window.setTimeout(() => {
+    videoErrorTimer = null
+    const video = videoRef.value
+    if (
+      requestId !== loadRequestId ||
+      video !== erroredVideo ||
+      sourceUrl.value !== erroredSourceUrl ||
+      hasUsableVideoState() ||
+      !video?.error
+    ) {
+      return
+    }
 
-  isLoading.value = false
-  errorMessage.value = '视频加载失败'
+    isLoading.value = false
+    isPlaying.value = false
+    cancelPendingAutoplay()
+    errorMessage.value = resolveVideoElementErrorMessage(
+      Number(video?.error?.code ?? 0) || null,
+      isCurrentSourceTranscoded.value
+    )
+    logVideoPlayback('error', 'event-error-finalized', {
+      mediaErrorCode: Number(video?.error?.code ?? 0) || null,
+      ...getVideoElementDiagnostics()
+    })
+  }, errorDelay)
 }
 
 const handleFullscreenChange = () => {
@@ -689,6 +1267,10 @@ const handleFullscreenChange = () => {
 
 const handleKeydown = (event: KeyboardEvent) => {
   if (!props.show) {
+    return
+  }
+
+  if (shouldIgnorePlayerShortcut(event)) {
     return
   }
 
@@ -720,6 +1302,33 @@ const handleVideoFrameCaptureShortcut = () => {
   void captureCurrentFrame()
 }
 
+const handleVideoTranscodeFailed = (message: {
+  sessionId: string
+  filePath: string
+  message: string
+  code?: number | null
+  signal?: string | null
+  stderr?: string
+}) => {
+  const sessionId = String(message?.sessionId ?? '').trim()
+  if (!props.show || !sessionId || sessionId !== currentTranscodeSessionId.value) {
+    logVideoPlayback('warn', 'transcode-failed-ignored', {
+      incomingSessionId: sessionId,
+      message,
+      ...getVideoElementDiagnostics()
+    })
+    return
+  }
+
+  lastVideoTranscodeFailure = message
+  logVideoPlayback('error', 'transcode-failed-received', {
+    incomingSessionId: sessionId,
+    message,
+    ...getVideoElementDiagnostics()
+  })
+  failCurrentTranscodePlayback(resolveVideoTranscodeFailureMessage(message))
+}
+
 watch(() => props.show, (visible) => {
   if (visible) {
     void (async () => {
@@ -731,14 +1340,23 @@ watch(() => props.show, (visible) => {
     document.addEventListener('fullscreenchange', handleFullscreenChange)
     removeVideoFrameCaptureShortcutListener?.()
     removeVideoFrameCaptureShortcutListener = window.api.service.onVideoFrameCaptureShortcut(handleVideoFrameCaptureShortcut)
+    removeVideoTranscodeFailedListener?.()
+    removeVideoTranscodeFailedListener = window.api.service.onVideoTranscodeFailed(handleVideoTranscodeFailed)
   } else {
+    clearPlaybackProgressTimer()
+    cancelPendingAutoplay()
     void finalizePlaybackSession()
-    videoRef.value?.pause()
+    releaseVideoElementSource()
     clearFullscreenControlsTimer()
+    clearVideoErrorTimer()
+    clearTranscodedStartupTimer()
+    currentTranscodeSessionId.value = ''
     window.removeEventListener('keydown', handleKeydown)
     document.removeEventListener('fullscreenchange', handleFullscreenChange)
     removeVideoFrameCaptureShortcutListener?.()
     removeVideoFrameCaptureShortcutListener = null
+    removeVideoTranscodeFailedListener?.()
+    removeVideoTranscodeFailedListener = null
   }
 })
 
@@ -754,9 +1372,17 @@ watch(() => props.playlist, (playlist) => {
 
 onBeforeUnmount(() => {
   void finalizePlaybackSession()
+  clearPlaybackProgressTimer()
+  clearVideoErrorTimer()
+  clearTranscodedStartupTimer()
+  currentTranscodeSessionId.value = ''
+  cancelPendingAutoplay()
+  releaseVideoElementSource()
   clearFullscreenControlsTimer()
   removeVideoFrameCaptureShortcutListener?.()
   removeVideoFrameCaptureShortcutListener = null
+  removeVideoTranscodeFailedListener?.()
+  removeVideoTranscodeFailedListener = null
   if (seekPreviewTimer) {
     window.clearTimeout(seekPreviewTimer)
     seekPreviewTimer = null
@@ -805,7 +1431,18 @@ onBeforeUnmount(() => {
             ref="videoRef"
             class="video-player__video"
             :src="sourceUrl"
+            @loadstart="handleLoadStart"
             @loadedmetadata="handleLoadedMetadata"
+            @loadeddata="handleLoadedData"
+            @durationchange="handleDurationChange"
+            @canplay="handleCanPlay"
+            @waiting="handleWaiting"
+            @stalled="handleStalled"
+            @suspend="handleSuspend"
+            @abort="handleAbort"
+            @emptied="handleEmptied"
+            @seeking="handleSeeking"
+            @playing="handlePlaying"
             @timeupdate="handleTimeUpdate"
             @seeked="handleSeeked"
             @play="handlePlay"
@@ -814,13 +1451,22 @@ onBeforeUnmount(() => {
             @error="handleVideoError"
           />
           <div v-if="isLoading" class="video-player__state">加载中</div>
-          <div v-if="errorMessage" class="video-player__state video-player__state--error">{{ errorMessage }}</div>
+          <div v-if="errorMessage" class="video-player__state video-player__state--error">
+            <span>{{ errorMessage }}</span>
+            <n-button size="small" type="error" ghost @click="retryCurrentTrack">
+              <template #icon><n-icon :component="ReloadOutline" /></template>
+              重试
+            </n-button>
+          </div>
           <div v-if="currentSubtitleText" class="video-player__subtitle">
             <span>{{ currentSubtitleText }}</span>
           </div>
           <div v-if="captureToast" class="video-player__toast">{{ captureToast }}</div>
           <div v-else-if="subtitleLoadState === 'loading'" class="video-player__subtitle video-player__subtitle--muted">
             正在读取字幕
+          </div>
+          <div v-else-if="subtitleLoadState === 'error'" class="video-player__subtitle video-player__subtitle--muted">
+            字幕读取失败
           </div>
         </div>
 
@@ -1089,12 +1735,15 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-direction: column;
+  gap: 12px;
   color: rgba(216, 221, 229, 0.78);
   pointer-events: none;
 }
 
 .video-player__state--error {
   color: #f08a8a;
+  pointer-events: auto;
 }
 
 .video-player__subtitle {

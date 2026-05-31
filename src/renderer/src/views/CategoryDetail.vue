@@ -10,6 +10,7 @@ import {
 import {createLogger} from '../../../main/util/logger'
 import {confirmDialog, notify} from '../utils/notification'
 import {removeOngoingCenterItem, upsertOngoingCenterItem} from '../utils/notification-center'
+import type {WebsiteCoverProgressMessage} from '../../../main/service/notification-queue.service'
 import ResourceCard from '../components/card/ResourceCard.vue'
 import {createEmptyMetaByType} from '../components/meta/meta-factory'
 import {resolveMetaFormComponent} from '../components/meta/registry'
@@ -145,6 +146,13 @@ const batchImportRunning = ref(false)
 const batchAnalyzeCancelled = ref(false)
 const batchAnalyzeInBackground = ref(false)
 const batchAnalyzeToastDismissed = ref(false)
+const websiteCoverToastActive = ref(false)
+const websiteCoverToastDismissed = ref(false)
+const websiteCoverToastCurrent = ref(0)
+const websiteCoverToastTotal = ref(0)
+const websiteCoverToastProgress = ref(0)
+const websiteCoverToastTitle = ref('')
+const websiteCoverToastSubtitle = ref('')
 const batchArchivePackageName = ref('')
 const showWebsiteBatchImportSourceModal = ref(false)
 const websiteBrowserSources = ref<any[]>([])
@@ -755,6 +763,12 @@ const batchAnalyzeDisplayIndex = computed(() => {
 })
 const showBatchImportProgressToast = computed(() =>
   batchProgressRunning.value && batchAnalyzeInBackground.value && !batchAnalyzeToastDismissed.value
+)
+const showWebsiteCoverProgressToast = computed(() =>
+  isWebsiteCategory.value && websiteCoverToastActive.value && !websiteCoverToastDismissed.value
+)
+const combinedBatchProgressToastVisible = computed(() =>
+  showBatchImportProgressToast.value || showWebsiteCoverProgressToast.value
 )
 const isBatchImportItemImportable = (item: any) => {
   if (isWebsiteCategory.value) {
@@ -2511,6 +2525,7 @@ const addResourceRule = computed(() => ({
 onMounted(() => {
   void loadPlaybackResumeRestartThresholds()
   window.addEventListener('click', closeDetailAudioContextMenu)
+  window.addEventListener('website-cover-progress', handleWebsiteCoverProgressEvent as EventListener)
   window.addEventListener('resize', closeDetailAudioContextMenu)
   window.addEventListener('resize', updateDetailLayoutHeights)
   window.addEventListener('mousemove', handleDetailDrawerResizeMove)
@@ -2562,6 +2577,7 @@ const updateDetailDescriptionHeight = async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('click', closeDetailAudioContextMenu)
+  window.removeEventListener('website-cover-progress', handleWebsiteCoverProgressEvent as EventListener)
   window.removeEventListener('resize', closeDetailAudioContextMenu)
   window.removeEventListener('resize', updateDetailLayoutHeights)
   if (showComicReader.value) {
@@ -3706,6 +3722,49 @@ const getBatchProgressDirectoryName = () => {
     || batchAnalyzeMessage.value
     || '正在准备分析目录'
 }
+const getWebsiteCoverProgressDirectoryName = () =>
+  websiteCoverToastTitle.value
+    || websiteCoverToastSubtitle.value
+    || '正在获取网站图标和封面'
+
+const handleCombinedProgressToastDismiss = () => {
+  if (showWebsiteCoverProgressToast.value) {
+    websiteCoverToastDismissed.value = true
+    return
+  }
+
+  handleDismissBatchImportProgressToast()
+}
+
+const handleWebsiteCoverProgressEvent = (event: Event) => {
+  const customEvent = event as CustomEvent<WebsiteCoverProgressMessage>
+  const message = customEvent.detail
+  if (!message || !isWebsiteCategory.value || String(message.categoryId ?? '').trim() !== String(categoryId.value ?? '').trim()) {
+    return
+  }
+
+  const current = Math.max(0, Number(message.current ?? 0))
+  const total = Math.max(0, Number(message.total ?? 0))
+  const progress = Math.max(0, Math.min(100, Number(message.progress ?? 0)))
+  const title = String(message.title ?? '').trim()
+  const subtitle = String(message.url ?? '').trim() || String(message.message ?? '').trim()
+  const isDone = Boolean(message.done) || (total > 0 && current >= total && progress >= 100)
+
+  websiteCoverToastCurrent.value = current
+  websiteCoverToastTotal.value = total
+  websiteCoverToastProgress.value = progress
+  websiteCoverToastTitle.value = title
+  websiteCoverToastSubtitle.value = subtitle
+
+  if (isDone) {
+    websiteCoverToastActive.value = false
+    websiteCoverToastDismissed.value = false
+    return
+  }
+
+  websiteCoverToastActive.value = true
+}
+
 watch(
   [batchAnalyzeRunning, batchImportRunning, batchAnalyzeInBackground],
   () => {
@@ -3714,6 +3773,18 @@ watch(
     } else {
       clearBatchImportOngoingCenter()
     }
+  }
+)
+watch(
+  () => [categoryId.value, isWebsiteCategory.value] as const,
+  () => {
+    websiteCoverToastActive.value = false
+    websiteCoverToastDismissed.value = false
+    websiteCoverToastCurrent.value = 0
+    websiteCoverToastTotal.value = 0
+    websiteCoverToastProgress.value = 0
+    websiteCoverToastTitle.value = ''
+    websiteCoverToastSubtitle.value = ''
   }
 )
 
@@ -3928,6 +3999,7 @@ readerPlayerActions = useCategoryReaderPlayerActions({
   getAudioDirectoryPath,
   normalizeAudioPath,
   loadPictureViewerScrollMode,
+  buildResourceQuery,
   fetchData,
   applyAudioPlayerSession,
   loadPlaybackResumeRestartThresholds,
@@ -4575,7 +4647,7 @@ const handleToggleCompleted = async (resource: any) => {
 
     <CategoryBatchImportPanel
       :show-loading="showBatchImportLoading"
-      :show-progress-toast="showBatchImportProgressToast"
+      :show-progress-toast="combinedBatchProgressToastVisible"
       :show-preview="showBatchImportModal"
       :batch-progress-running="batchProgressRunning"
       :batch-progress-stage="batchProgressStage"
@@ -4584,7 +4656,16 @@ const handleToggleCompleted = async (resource: any) => {
       :batch-analyze-display-index="batchAnalyzeDisplayIndex"
       :batch-import-resource-label="batchImportResourceLabel"
       :batch-analyze-message="batchAnalyzeMessage"
-      :current-directory-name="getBatchProgressDirectoryName()"
+      :progress-toast-progress="showWebsiteCoverProgressToast ? websiteCoverToastProgress : undefined"
+      :progress-toast-title="showWebsiteCoverProgressToast ? '正在后台获取网站图标和封面' : ''"
+      :progress-toast-subtitle-lines="showWebsiteCoverProgressToast
+        ? [
+            websiteCoverToastTotal > 0 ? `第 ${Math.min(websiteCoverToastTotal, Math.max(1, websiteCoverToastCurrent))} / ${websiteCoverToastTotal} 个网站` : '',
+            getWebsiteCoverProgressDirectoryName()
+          ].filter(Boolean)
+        : []"
+      :progress-toast-clickable="!showWebsiteCoverProgressToast"
+      :current-directory-name="showWebsiteCoverProgressToast ? getWebsiteCoverProgressDirectoryName() : getBatchProgressDirectoryName()"
       :selected-batch-import-count="selectedBatchImportCount"
       :selectable-batch-import-count="selectableBatchImportItems.length"
       :batch-import-items="batchImportItems"
@@ -4604,7 +4685,7 @@ const handleToggleCompleted = async (resource: any) => {
       :on-run-in-background="handleBatchImportRunInBackground"
       :on-stop-analysis="handleStopBatchImportAnalysis"
       :on-reopen-progress="handleReopenBatchImportProgress"
-      :on-dismiss-progress-toast="handleDismissBatchImportProgressToast"
+      :on-dismiss-progress-toast="handleCombinedProgressToastDismiss"
       :on-select-all="handleBatchImportSelectAll"
       :on-deselect-all="handleBatchImportDeselectAll"
       :on-invert="handleBatchImportInvert"

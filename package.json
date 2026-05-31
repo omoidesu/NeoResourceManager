@@ -1,6 +1,6 @@
 {
   "name": "neoresourcemanager",
-  "version": "0.9.2",
+  "version": "0.9.5",
   "description": "An Electron application with Vue and TypeScript",
   "main": "./out/main/index.js",
   "license": "GPL-3.0-or-later",

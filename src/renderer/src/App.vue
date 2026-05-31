@@ -4,7 +4,7 @@ import {onBeforeUnmount, onMounted, ref, watch} from "vue";
 import {Settings} from "../../common/constants";
 import { notify, setNotificationTheme } from "./utils/notification";
 import { pushNotificationCenterItem, removeOngoingCenterItem, upsertOngoingCenterItem } from "./utils/notification-center";
-import type { ResourceArchiveProgressMessage, WebsiteCoverProgressMessage } from "../../main/service/notification-queue.service";
+import type { ArchivePackageStateChangedMessage, ResourceArchiveProgressMessage, WebsiteCoverProgressMessage } from "../../main/service/notification-queue.service";
 import { normalizeCoverPreviewSource, normalizeWebsiteIconSource, resolveImagePreviewSource } from './shared/preview/usePreviewAssetLoader'
 
 const appIsDark = ref(true)
@@ -12,6 +12,7 @@ const blurAllImages = ref(false)
 let stopNotificationPushListener: null | (() => void) = null
 let stopResourceArchiveProgressListener: null | (() => void) = null
 let stopWebsiteCoverProgressListener: null | (() => void) = null
+let stopArchivePackageStateChangedListener: null | (() => void) = null
 const RESOURCE_ARCHIVE_ONGOING_PREFIX = 'resource-archive:'
 const WEBSITE_COVER_ONGOING_PREFIX = 'website-cover:'
 const archiveCoverPreviewCache = new Map<string, string>()
@@ -175,6 +176,10 @@ const handleWebsiteCoverProgress = async (message: WebsiteCoverProgressMessage) 
     : `${progress}%`
   const isDone = Boolean(message.done) || (total > 0 && current >= total && progress >= 100)
 
+  window.dispatchEvent(new CustomEvent('website-cover-progress', {
+    detail: message
+  }))
+
   if (!isDone) {
     upsertOngoingCenterItem({
       id: ongoingId,
@@ -208,6 +213,12 @@ const handleWebsiteCoverProgress = async (message: WebsiteCoverProgressMessage) 
   })
 }
 
+const handleArchivePackageStateChanged = (message: ArchivePackageStateChangedMessage) => {
+  window.dispatchEvent(new CustomEvent('archive-package-state-changed', {
+    detail: message
+  }))
+}
+
 onMounted(async () => {
   const mountedAt = performance.now()
   const bootStartedAt = Number((window as any).__nrmRendererBootPerf?.startedAt ?? mountedAt)
@@ -226,6 +237,7 @@ onMounted(async () => {
   })
   stopResourceArchiveProgressListener = window.api.service.onResourceArchiveProgress(handleResourceArchiveProgress)
   stopWebsiteCoverProgressListener = window.api.service.onWebsiteCoverProgress(handleWebsiteCoverProgress)
+  stopArchivePackageStateChangedListener = window.api.service.onArchivePackageStateChanged(handleArchivePackageStateChanged)
   await window.api.service.startNotificationPush()
   emitRendererTiming('app settings bootstrap', {
     phase: 'notification-ready',
@@ -271,6 +283,8 @@ onBeforeUnmount(() => {
   stopResourceArchiveProgressListener = null
   stopWebsiteCoverProgressListener?.()
   stopWebsiteCoverProgressListener = null
+  stopArchivePackageStateChangedListener?.()
+  stopArchivePackageStateChangedListener = null
   window.removeEventListener('app-settings-changed', handleAppSettingsChanged as EventListener)
 })
 </script>

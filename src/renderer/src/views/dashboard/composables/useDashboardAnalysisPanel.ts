@@ -56,6 +56,12 @@ type UsageInsightItem = {
   count: number
   color: string
 }
+type DashboardShortcut = {
+  label: string
+  value: string
+  tone: Tone
+  routeName?: string
+}
 type MeasureDashboardTask = <T>(
   label: string,
   task: () => Promise<T>,
@@ -354,16 +360,16 @@ export function useDashboardAnalysisPanel(options: {
         { label: '资源失效', value: '读取中', tone: 'rose' as Tone },
         { label: '封面缺失', value: '读取中', tone: 'purple' as Tone },
         { label: '长期未访问', value: '读取中', tone: 'mint' as Tone },
-        { label: '标签管理', value: '进入', tone: 'slate' as Tone }
-      ]
+        { label: '资源管理', value: '进入', tone: 'slate' as Tone, routeName: 'search' }
+      ] satisfies DashboardShortcut[]
     }
 
     return [
       { label: '资源失效', value: options.formatNumber(dashboardStats.value.missingResources), tone: 'rose' as Tone },
       { label: '封面缺失', value: options.formatNumber(dashboardStats.value.missingCovers), tone: 'purple' as Tone },
       { label: '沉睡资源', value: options.formatNumber(dashboardStats.value.longUnvisitedResources), tone: 'mint' as Tone },
-      { label: '标签管理', value: '进入', tone: 'slate' as Tone }
-    ]
+      { label: '资源管理', value: '进入', tone: 'slate' as Tone, routeName: 'search' }
+    ] satisfies DashboardShortcut[]
   })
 
   const analysisTabs = [

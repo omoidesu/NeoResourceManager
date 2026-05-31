@@ -2074,6 +2074,15 @@ const handleHomeDetailOpenCategory = (resource: any) => {
   })
 }
 
+const handleDashboardShortcutClick = (item: { routeName?: string }) => {
+  const routeName = String(item?.routeName ?? '').trim()
+  if (!routeName) {
+    return
+  }
+
+  void router.push({ name: routeName })
+}
+
 function formatNumber(value: number) {
   return new Intl.NumberFormat('zh-CN').format(Math.max(0, Math.floor(Number(value) || 0)))
 }
@@ -3067,6 +3076,7 @@ useDashboardDeferredTasks({
       :hide-health-insight-tooltip="hideHealthInsightTooltip"
       @update:heatmap-range-days="heatmapRangeDays = $event"
       @update:active-analysis-tab="activeAnalysisTab = $event"
+      @shortcut-click="handleDashboardShortcutClick"
     />
 
     <section ref="coverWallSectionRef" class="cover-wall-anchor">

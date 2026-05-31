@@ -173,6 +173,36 @@ export const Settings = {
     description: '电影续播完成阈值（百分比）',
     default: '95'
   },
+  VIDEO_ALLOW_AUTO_REMUX: {
+    name: 'videoAllowAutoRemux',
+    description: '视频允许自动无损转封装',
+    default: '1'
+  },
+  VIDEO_ALLOW_HARDWARE_TRANSCODE: {
+    name: 'videoAllowHardwareTranscode',
+    description: '视频允许硬件转码',
+    default: '1'
+  },
+  VIDEO_ALLOW_CPU_TRANSCODE: {
+    name: 'videoAllowCpuTranscode',
+    description: '视频允许 CPU 转码',
+    default: '1'
+  },
+  VIDEO_TRANSCODE_MODE: {
+    name: 'videoTranscodeMode',
+    description: '视频转码方式',
+    default: 'auto'
+  },
+  VIDEO_FULL_CACHE_TRANSCODE_MAX_MB: {
+    name: 'videoFullCacheTranscodeMaxMb',
+    description: '视频完整缓存转码上限（MB）',
+    default: '1024'
+  },
+  VIDEO_SHOW_PLAYBACK_MODE: {
+    name: 'videoShowPlaybackMode',
+    description: '视频显示播放模式提示',
+    default: '0'
+  },
   API_PORT: {
     name: 'apiPort',
     description: '本地 API 服务端口',
@@ -208,6 +238,13 @@ export const PanicMode = {
 export const PictureReadScrollMode = {
   ZOOM: 'zoom',
   SCROLL: 'scroll'
+} as const;
+
+export const VideoTranscodeMode = {
+  AUTO: 'auto',
+  HARDWARE_ONLY: 'hardwareOnly',
+  CPU_ONLY: 'cpuOnly',
+  DISABLED: 'disabled'
 } as const;
 
 export const ResourceLaunchMode = {

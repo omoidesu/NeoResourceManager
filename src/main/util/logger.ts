@@ -1,5 +1,10 @@
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
+type LogFileAppender = (line: string) => void
+
+let fileAppender: LogFileAppender | null = null
+let fileAppenderFailureLogged = false
+
 function formatNow() {
   const now = new Date()
   const pad = (value: number, size = 2) => String(value).padStart(size, '0')
@@ -43,6 +48,14 @@ function writeLog(scope: string, level: LogLevel, message: string, payload?: unk
 }
 
 function safeSerializePayload(payload: unknown) {
+  if (payload instanceof Error) {
+    return JSON.stringify({
+      name: payload.name,
+      message: payload.message,
+      stack: payload.stack ?? ''
+    })
+  }
+
   try {
     return typeof payload === 'string' ? payload : JSON.stringify(payload)
   } catch {
@@ -51,38 +64,25 @@ function safeSerializePayload(payload: unknown) {
 }
 
 function writeLogToFile(line: string) {
+  if (!fileAppender) {
+    return
+  }
+
   try {
-    const nodeRequire = getNodeRequire()
-    if (!nodeRequire) {
+    fileAppender(line)
+  } catch (error) {
+    if (fileAppenderFailureLogged) {
       return
     }
 
-    const fs = nodeRequire('fs') as typeof import('fs')
-    const path = nodeRequire('path') as typeof import('path')
-    const { app } = nodeRequire('electron') as typeof import('electron')
-
-    if (!app?.isReady?.()) {
-      return
-    }
-
-    const logDir = path.join(app.getPath('userData'), 'logs')
-    fs.mkdirSync(logDir, { recursive: true })
-    fs.appendFileSync(path.join(logDir, 'main.log'), `${line}\n`, 'utf8')
-  } catch {
-    // noop
+    fileAppenderFailureLogged = true
+    console.error('[logger] failed to append log file', error)
   }
 }
 
-function getNodeRequire() {
-  try {
-    if (typeof window !== 'undefined') {
-      return null
-    }
-
-    return Function('return require')() as NodeJS.Require
-  } catch {
-    return null
-  }
+export function setLogFileAppender(appender: LogFileAppender | null) {
+  fileAppender = appender
+  fileAppenderFailureLogged = false
 }
 
 export function createLogger(scope: string) {

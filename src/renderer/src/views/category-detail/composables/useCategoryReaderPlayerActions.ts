@@ -65,6 +65,7 @@ interface UseCategoryReaderPlayerActionsOptions {
   getAudioDirectoryPath: (path: string) => string
   normalizeAudioPath: (path: string) => string
   loadPictureViewerScrollMode: () => Promise<void>
+  buildResourceQuery: (page: number, size: number) => Record<string, unknown>
   fetchData: () => Promise<void>
   applyAudioPlayerSession: (resource: any, playlist: any[], targetPath: string, initialTime?: number) => Promise<void>
   loadPlaybackResumeRestartThresholds: () => Promise<void>
@@ -113,6 +114,7 @@ export const useCategoryReaderPlayerActions = (options: UseCategoryReaderPlayerA
     showNotifyByType: options.showNotifyByType,
     getResourceFilePath: options.getResourceFilePath,
     loadPictureViewerScrollMode: options.loadPictureViewerScrollMode,
+    buildResourceQuery: options.buildResourceQuery,
     fetchData: options.fetchData,
     readComicProgress: options.readComicProgress,
     writeComicProgress: options.writeComicProgress,
